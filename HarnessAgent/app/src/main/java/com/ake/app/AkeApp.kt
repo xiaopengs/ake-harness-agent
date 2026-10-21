@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.ComponentCallbacks2
 import com.ake.app.di.MemoryReleaser
 import com.ake.core.common.AkeLog
+import com.ake.core.common.StdoutLogSink
 import dagger.hilt.android.HiltAndroidApp
 import javax.inject.Inject
 import javax.inject.Provider

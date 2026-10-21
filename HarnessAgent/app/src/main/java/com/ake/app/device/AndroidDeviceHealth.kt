@@ -80,23 +80,30 @@ public class AndroidDeviceHealth @Inject constructor(
         } catch (_: Throwable) {
             0L
         }
-        val isEmulator = (Build.FINGERPRINT.startsWith("generic") ||
-            Build.FINGERPRINT.startsWith("unknown") ||
-            Build.MODEL.contains("google_sdk") ||
-            Build.MODEL.contains("Emulator") ||
-            Build.MODEL.contains("Android SDK built for x86"))
-
         val brand = detectNpuBrand()
         return SocProfile(
             manufacturer = Build.MANUFACTURER ?: "unknown",
             socModel = Build.HARDWARE ?: "unknown",
             npuBrand = brand,
             // 模拟器上 OpenCL 常见为软件实现 / 不可用 ⇒ 直接走 CPU，避免探针白白失败一遍
-            isGpuOpenClLikely = !isEmulator && gpuLikelyUsable(),
+            isGpuOpenClLikely = !isEmulator() && gpuLikelyUsable(),
             totalRamMb = totalMb,
-            isEmulator = isEmulator,
+            isEmulator = isEmulator(),
         )
     }
+
+    /**
+     * 模拟器判定。**必须是成员函数而不是 `socProfile()` 里的局部变量** ——
+     * `detectNpuBrand()` 同样要用它（模拟器上报的 `SOC_MANUFACTURER` 经常是假值，
+     * 会误判出 NPU ⇒ LiteRT 去初始化一个不存在的后端 ⇒ `initialize()` 直接失败）。
+     */
+    private fun isEmulator(): Boolean = (
+        Build.FINGERPRINT.startsWith("generic") ||
+            Build.FINGERPRINT.startsWith("unknown") ||
+            Build.MODEL.contains("google_sdk") ||
+            Build.MODEL.contains("Emulator") ||
+            Build.MODEL.contains("Android SDK built for x86")
+        )
 
     private fun readThermal(): ThermalState {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return ThermalState.UNKNOWN
@@ -136,7 +143,7 @@ public class AndroidDeviceHealth @Inject constructor(
      * 探测不到就返回 null ⇒ 阶梯里根本不会出现 NPU ⇒ MVP 默认走 CPU/GPU，行为可预期。
      */
     private fun detectNpuBrand(): String? = when {
-        isEmulator -> null
+        isEmulator() -> null
         Build.HARDWARE?.contains("tensor", true) == true ||
             Build.SOC_MODEL?.contains("tensor", true) == true -> "GOOGLE_TENSOR"
 
@@ -149,13 +156,18 @@ public class AndroidDeviceHealth @Inject constructor(
         else -> null // 探测不到就不启用 NPU（MVP 默认）
     }
 
-    private fun gpuLikelyUsable(): Boolean = try {
-        // 只在明显没有 GPU 能力的环境（如无硬件加速的容器）返回 false，其余给 GPU 一个机会
-        // 真正的裁决交给 :llm 的预热探针 —— 它能处理「initialize 成功但首条消息失败」
-        true
-    }
+    /**
+     * 只在明显没有 GPU 能力的环境（如无硬件加速的容器）返回 false，其余给 GPU 一个机会。
+     * 真正的裁决交给 `:llm` 的预热探针 —— 它能处理「initialize 成功但首条消息失败」。
+     *
+     * ⚠ 这里曾是 `try { true }`（**没有 catch/finally**）⇒ Kotlin 直接语法错误
+     *   `Expecting 'catch' or 'finally'`。`try` 在 Kotlin 里是**表达式**且必须配 catch 或 finally，
+     *   不像 Java 允许裸 try-with-nothing。MVP 里没有需要兜的异常，索性去掉 try。
+     */
+    private fun gpuLikelyUsable(): Boolean = true
 
     private companion object {
+        const val TAG = "AndroidDeviceHealth"
         const val RAM_MID_MB = 6_144L
         const val RAM_HIGH_MB = 11_264L
         const val THERMAL_POLL_MS = 5_000L

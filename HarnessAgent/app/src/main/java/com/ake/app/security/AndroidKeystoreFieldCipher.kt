@@ -39,7 +39,9 @@ import javax.inject.Singleton
  * ```
  */
 @Singleton
-internal class AndroidKeystoreFieldCipher @Inject constructor() : FieldCipher {
+// ★ 必须 public：`PlatformBindingsModule.bindFieldCipher` 要把它 @Binds 到 `FieldCipher`。
+//   它是 `FieldCipher` 在 Android 上的**唯一**实现，:app 是唯一合法的装配点。
+public class AndroidKeystoreFieldCipher @Inject constructor() : FieldCipher {
 
     override fun seal(plain: ByteArray, aad: ByteArray?): ByteArray {
         val cipher = Cipher.getInstance(TRANSFORMATION)

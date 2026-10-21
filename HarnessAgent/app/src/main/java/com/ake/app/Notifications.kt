@@ -7,6 +7,11 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
+// ⚠ `android.nonTransitiveRClass=true` ⇒ R 类**不再**从依赖模块传递过来，
+//   本模块的 R 坐标是 `com.ake.harnessagent.R`（= app 的 namespace），必须显式 import。
+//   少了这一行，`.setSmallIcon(R.drawable.xxx)` 整条 Builder 链会退化成 error type，
+//   表现为一串莫名其妙的 "Unresolved reference 'setContentTitle'" / "Cannot infer type for T"。
+import com.ake.harnessagent.R
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton

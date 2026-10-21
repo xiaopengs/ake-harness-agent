@@ -9,6 +9,7 @@ import com.ake.app.AkeNotifications
 import com.ake.core.common.AkeLog
 import com.ake.core.common.Outcome
 import com.ake.llm.ModelDownloader
+import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -26,6 +27,10 @@ import javax.inject.Inject
  *    而内部存储对本项目的安全模型更合适（模型文件同样是不该被别的 App 顺手读到的资产）。
  *  - WorkManager 仍然保留在依赖里，供「清理作业 / 保留策略」这类真正的后台任务使用。
  */
+// ★ `@AndroidEntryPoint` 不是可选项：本类有 `@Inject` 字段，缺了它 Hilt 不会注入，
+//   运行期第一次碰 `downloader` 就是 `lateinit property has not been initialized` ——
+//   而且是在 download 这种长耗时路径上才炸，很难往回查。
+@AndroidEntryPoint
 public class ModelDownloadService : Service() {
 
     @Inject
@@ -38,7 +43,9 @@ public class ModelDownloadService : Service() {
     private lateinit var scope: CoroutineScope
 
     public inner class LocalBinder : Binder() {
-        public fun service(): ModelDownloadService = this@Service
+        // ⚠ 标签是外层**类名**，不是 `this@Service` —— 后者会被解析成 label 而报
+        //   "Unresolved label"。Kotlin 的 qualified this 一律写 `this@OuterClassName`。
+        public fun service(): ModelDownloadService = this@ModelDownloadService
     }
 
     private val binder = LocalBinder()
@@ -55,11 +62,16 @@ public class ModelDownloadService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val modelId = intent?.getStringExtra(EXTRA_MODEL_ID)
-        if (modelId != null) start(modelId)
+        if (modelId != null) start(modelId, startId)
         return START_STICKY
     }
 
-    private fun start(modelId: String) {
+    /**
+     * @param startId **必须透传进来**：下载是异步的，`stopSelf()` 会立刻停掉服务，
+     *                而 `stopSelf(startId)` 只在「这次 start 还没被后续 start 取代」时才停 ——
+     *                否则中途又来一个下载请求会被误停。
+     */
+    private fun start(modelId: String, startId: Int) {
         scope.launch {
             val outcome = downloader.download(
                 req = ModelDownloader.Request(
@@ -99,6 +111,14 @@ public class ModelDownloadService : Service() {
         }
     }
 
+    /** 更新常驻通知。走 `NotificationManagerCompat` 才会带上所需的 POST_NOTIFICATIONS 兼容处理。 */
+    private fun notify(builder: android.app.Notification) {
+        androidx.core.app.NotificationManagerCompat.from(this).apply {
+            runCatching { notify(AkeNotifications.Ids.DOWNLOAD, builder) }
+                .onFailure { AkeLog.w(TAG, "notify failed", it) }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onDestroy() {
@@ -107,6 +127,8 @@ public class ModelDownloadService : Service() {
     }
 
     public companion object {
+        private const val TAG: String = "ModelDownloadService"
+
         public const val EXTRA_MODEL_ID: String = "extra.model_id"
 
         // ★ 上线前必须替换成「我方签名过的 manifest」里的真实值。

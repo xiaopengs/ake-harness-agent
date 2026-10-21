@@ -1,4 +1,4 @@
-package com.ake.app
+package com.ake.app.di
 
 import com.ake.core.ports.ModelLifecyclePort
 import com.ake.core.ports.UnloadReason

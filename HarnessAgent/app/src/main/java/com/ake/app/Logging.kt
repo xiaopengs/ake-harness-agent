@@ -13,8 +13,13 @@ import com.ake.core.common.LogSink
  * 一旦它们依赖 `android.util.Log`，整层就绕不开 Robolectric。
  * 于是 core 里只有接口，Android 侧在 Application 里 install 这个实现。
  *
- * 级别映射是刻意的：`VERBOSE` 落到 `Log.v`，`ASSERT` 与 `ERROR` 同落到 `Log.e`
- * （Log 没有 assert 级别，用 `wtf` 会在某些 ROM 上触发额外行为，不划算）。
+ * 级别映射是刻意的：`VERBOSE` 落到 `Log.v`，`ERROR` 落到 `Log.e`。
+ *
+ * ⚠ `core:common` 的 `LogLevel` **只有 5 级**（VERBOSE/DEBUG/INFO/WARN/ERROR），没有 `ASSERT`。
+ * 曾在这里写过 `LogLevel.ASSERT -> Log.e(...)` 而编译不过 —— 不要凭 Android 的
+ * `Log.ASSERT` 记忆往 `when` 里加分支，这个 `when` 是**穷举**的（不是 else 兜底），
+ * core 侧加新级别时这里必须同步，否则直接编译失败。
+ * 另外：不要用 `Log.wtf`，它在部分 ROM 上会触发额外的上报行为，不划算。
  */
 internal object AndroidLogSink : LogSink {
 
@@ -24,9 +29,7 @@ internal object AndroidLogSink : LogSink {
             LogLevel.DEBUG -> Log.d(tag, message, cause)
             LogLevel.INFO -> Log.i(tag, message, cause)
             LogLevel.WARN -> Log.w(tag, message, cause)
-            LogLevel.ERROR,
-            LogLevel.ASSERT,
-            -> Log.e(tag, message, cause)
+            LogLevel.ERROR -> Log.e(tag, message, cause)
         }
     }
 }
