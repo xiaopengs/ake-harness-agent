@@ -188,3 +188,22 @@ public fun SuspendReason.humanAdvice(): String = when (this) {
 /** 由 status 字符串反查暂停原因（冷启动恢复时用）。 */
 public fun suspendReasonOf(reasonKey: String): SuspendReason? =
     SuspendReason.entries.firstOrNull { it.reasonKey == reasonKey }
+
+/**
+ * status → 人话。历史列表直接显示库里的 `CREATED` / `WAITING_HUMAN` 是**不可接受的** ——
+ * 那是给机器看的枚举名，不是给用户看的状态。
+ *
+ * ★ 这里对 `TaskStatus.ALL` 的 8 个取值穷尽，新增 status 时本函数会编译失败（无 else 分支），
+ * 而不是静默回落到英文原文。
+ */
+public fun statusLabelOf(status: String): String = when (status) {
+    TaskStatus.CREATED -> "已创建"
+    TaskStatus.RUNNING -> "执行中"
+    TaskStatus.PAUSED -> "已暂停"
+    TaskStatus.WAITING_HUMAN -> "等你确认"
+    TaskStatus.SUCCEEDED -> "已完成"
+    TaskStatus.FAILED -> "失败"
+    TaskStatus.IMPOSSIBLE -> "做不到"
+    TaskStatus.ABORTED -> "已中止"
+    else -> status
+}

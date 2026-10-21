@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -16,17 +17,22 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.ake.core.contract.TaskPhase
+import com.ake.core.contract.TaskStatus
 import com.ake.ui.components.EmptyHint
 import com.ake.ui.components.LabeledField
 import com.ake.ui.components.SectionCard
 import com.ake.ui.components.Tag
 import com.ake.ui.model.RunState
+import com.ake.ui.model.statusLabelOf
 import com.ake.ui.util.collectAsStateWithLifecycle
 import com.ake.ui.theme.AkeColors
 
@@ -55,7 +61,11 @@ public fun HomeScreen(
     val session by viewModel.session.collectAsStateWithLifecycle()
     val goal by viewModel.goal.collectAsStateWithLifecycle()
     val startUrl by viewModel.startUrl.collectAsStateWithLifecycle()
-    val resumable by viewModel.resumable.collectAsStateWithLifecycle()
+    val history by viewModel.history.collectAsStateWithLifecycle()
+
+    // 从任务页返回时重新拉一次：任务刚暂停/结束的落盘走 200 ms 合并队列，
+    // 靠事件推比靠猜时机可靠。
+    LaunchedEffect(Unit) { viewModel.refreshHistory() }
 
     Column(
         Modifier
@@ -111,16 +121,16 @@ public fun HomeScreen(
 
         Spacer(Modifier.height(16.dp))
 
-        // ── 可恢复的暂停任务：与「历史」分开，因为它需要动作而不是回忆
+        // ── 历史任务：来自 TaskStorePort.recent()，冷启动即可见，含未结束的
         SectionCard(
-            "还能继续的任务",
-            subtitle = "这些任务停在了半路，断点还在 —— 继续不等于重跑",
+            "历史任务",
+            subtitle = "最近 ${HomeViewModel.HISTORY_LIMIT} 条，含还没跑完的 —— 暂停的可以直接接着跑",
         ) {
-            if (resumable.isEmpty()) {
-                EmptyHint("没有暂停中的任务。")
+            if (history.isEmpty()) {
+                EmptyHint("还没有跑过任务。")
             } else {
                 Column {
-                    resumable.forEach { item ->
+                    history.forEach { item ->
                         Row(
                             Modifier.fillMaxWidth().padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -129,17 +139,31 @@ public fun HomeScreen(
                                 Text(item.goalPreview, style = MaterialTheme.typography.bodyMedium, maxLines = 2)
                                 Spacer(Modifier.height(2.dp))
                                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Tag("第 ${item.stepSeq + 1} 步", AkeColors.PhaseSuspended)
-                                    Tag(item.status, MaterialTheme.colorScheme.outline)
+                                    Tag(statusLabelOf(item.status), phaseColorOf(item.status, item.phase))
+                                    Tag(
+                                        if (item.phase == TaskPhase.TERMINAL) "共 ${item.stepsDone} 步"
+                                        else "第 ${item.stepsDone + 1} 步",
+                                        MaterialTheme.colorScheme.outline,
+                                    )
+                                    val ago = viewModel.relativeTime(item.lastActivityAt)
+                                    if (ago.isNotEmpty()) {
+                                        Text(
+                                            ago,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
                                 }
                             }
-                            Spacer(Modifier.height(4.dp))
-                            Column {
-                                OutlinedButton(onClick = { viewModel.resume(item.taskId); onOpenTask() }) {
-                                    Text("继续", style = MaterialTheme.typography.labelMedium)
-                                }
-                                OutlinedButton(onClick = { viewModel.abandon(item.taskId) }) {
-                                    Text("放弃", style = MaterialTheme.typography.labelMedium)
+                            if (item.resumable) {
+                                Spacer(Modifier.width(6.dp))
+                                Column {
+                                    OutlinedButton(onClick = { viewModel.resume(item.taskId); onOpenTask() }) {
+                                        Text("继续", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                    OutlinedButton(onClick = { viewModel.abandon(item.taskId) }) {
+                                        Text("放弃", style = MaterialTheme.typography.labelMedium)
+                                    }
                                 }
                             }
                         }
@@ -191,6 +215,18 @@ public fun HomeScreen(
                 }
             }
         }
+    }
+}
+
+/** 相位 → 语义色。与任务页顶部的相位条同一套色，避免同一个状态在两个页面两种颜色。 */
+@Composable
+private fun phaseColorOf(status: String, phase: TaskPhase): Color = when (phase) {
+    TaskPhase.ACTIVE -> AkeColors.PhaseActive
+    TaskPhase.SUSPENDED -> AkeColors.PhaseSuspended
+    TaskPhase.TERMINAL -> if (status == TaskStatus.SUCCEEDED) {
+        AkeColors.PhaseTerminalOk
+    } else {
+        AkeColors.PhaseTerminalWarn
     }
 }
 

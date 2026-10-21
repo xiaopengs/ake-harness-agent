@@ -59,17 +59,16 @@ import kotlin.coroutines.cancellation.CancellationException
  * （旋转屏幕、退到后台再回来、切到设置页再切回来）。
  * 把 Flow 归约成一个 `StateFlow<TaskSessionUi>` 就是本类唯一的职责。
  *
- * ## ★ 暂停不是终止：伪终止事件的过滤
+ * ## ★ 流的终点有两个，UI 必须都接
  *
- * `AgentLoop.pause()` 目前的实现在发出 `TaskEvent.Paused` 之后，为了让 Flow 有终点，
- * 又补了一条 `TaskEvent.Terminal(USER_ABORT, null, "paused:xxx")`（同事自己在注释里承认语义不干净）。
- * 如果 UI 老老实实按最后一条事件渲染，用户看到的就是「任务已停止」——
- * 而事实是「它停在第 7 步，可以继续」。
+ * `AgentLoop.pause()` 曾经在 `Paused` 之后补发一条伪 `Terminal(USER_ABORT, null, "paused:xxx")`，
+ * 让 UI 只能靠 `detail.startsWith("paused:")` 去丢弃它 —— 那套字符串补丁已随 `:agent` 的根治删除。
+ * 现在挂起一律是「`Paused`（渲染用）→ `StatusChanged` → **`Suspended`（流终点）**」，
+ * 与 `Terminal` **互斥且穷尽**（`AgentEvents.isEndOfStream`）。
  *
- * 这里按主理人的裁决处理：**`Paused` 之后的伪 `Terminal` 一律丢弃**，
- * 状态停在 [RunState.Suspended]，直到用户点「继续」或「放弃」。
- * 判据收紧到 `reason == USER_ABORT && detail.startsWith("paused:")`，
- * 以免把一次真正的用户中止也一起吃掉。
+ * 所以这里在 `when` 里对两者**对称收尾**：都停计时器、都刷新可恢复列表，
+ * 区别只在 `Suspended` 不改 `runState`（改状态是 `Paused` 分支的职责）。
+ * 少了 `Suspended` 分支，暂停后计时器协程就会一直活着 —— 这是补上它的唯一理由。
  */
 @Singleton
 public class AgentSessionCoordinator @Inject constructor(
@@ -364,6 +363,12 @@ public class AgentSessionCoordinator @Inject constructor(
                 }
             }
 
+            is TaskEvent.TokenDelta -> {
+                _state.update { s ->
+                    s.copy(steps = s.steps.upsert(e.seq) { it.appendModelDelta(e.delta) })
+                }
+            }
+
             is TaskEvent.ConfirmRequested -> {
                 _state.update { s ->
                     s.copy(
@@ -424,7 +429,8 @@ public class AgentSessionCoordinator @Inject constructor(
             is TaskEvent.CheckpointSaved -> Unit
 
             is TaskEvent.Paused -> {
-                // ★ 暂停是独立状态。这里写入后，紧随其后的伪 Terminal 会被 [isPseudoTerminal] 吃掉。
+                // 渲染用的挂起事件：全量展示信息由事件自带，UI 不再反推。
+                // ★ checkpointSaved 直接用事件里的值 —— 硬编码 true 会让「点了继续却恢复不了」。
                 _state.update { s ->
                     s.copy(
                         runState = RunState.Suspended(
@@ -433,7 +439,7 @@ public class AgentSessionCoordinator @Inject constructor(
                                 status = e.reason.status,
                                 reasonKey = e.reason.reasonKey,
                                 stepSeq = e.stepSeq,
-                                checkpointSaved = true,
+                                checkpointSaved = e.checkpointSaved,
                             ),
                         ),
                         status = e.reason.status,
@@ -443,8 +449,15 @@ public class AgentSessionCoordinator @Inject constructor(
                 refreshResumable()
             }
 
+            is TaskEvent.Suspended -> {
+                // ★ 流终点之一（可恢复挂起）。与 Terminal 分支对称：停计时器 + 刷新可恢复列表，
+                //   但不改写 runState —— 那是 Paused 分支已经写完的事。
+                //   少了这一支，clockJob 在暂停后没有任何人取消，计时器协程会一直空转。
+                clockJob?.cancel()
+                refreshResumable()
+            }
+
             is TaskEvent.Terminal -> {
-                if (isPseudoTerminal(e)) return      // ★ 丢弃 pause() 补发的伪终止
                 _state.update { s ->
                     s.copy(
                         runState = RunState.Terminated(
@@ -463,15 +476,6 @@ public class AgentSessionCoordinator @Inject constructor(
             }
         }
     }
-
-    /**
-     * 判据：`AgentLoop.pause()` 发出的那条 `Terminal(USER_ABORT, null, "paused:<reasonKey>")`。
-     *
-     * 收紧到 `USER_ABORT + detail 前缀`，是为了不误伤真正的用户中止
-     * （那条来自 `Resolved.Abort` / `AbortSignal`，detail 为 null）。
-     */
-    private fun isPseudoTerminal(e: TaskEvent.Terminal): Boolean =
-        e.reason == TerminalReason.USER_ABORT && e.detail?.startsWith("paused:") == true
 
     // ──────────────────────────────────────────── 指标
 
