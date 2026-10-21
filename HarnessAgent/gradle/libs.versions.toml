@@ -1,0 +1,146 @@
+# ── 端侧 GUI Agent · Version Catalog
+#
+# 纪律：**所有版本集中在此**，模块 build.gradle.kts 只允许出现别名，禁止裸版本号。
+#
+# 【核实说明】下列坐标均由邝随行在 2026-10 对实际仓库元数据逐一校验存在后才写入：
+#   - Google Maven  dl.google.com/dl/android/maven2
+#   - Maven Central repo1.maven.org
+#   - Gradle Plugin Portal / services.gradle.org
+# **未凭记忆填写任何版本。** 与霍承钧清单的差异在回传里单独列出。
+
+[versions]
+
+# ── 构建栈
+agp = "9.4.1"                 # AGP 最新稳定线（9.5.0 仍在 alpha）
+kotlin = "2.3.21"             # ★ 与 ksp 对齐：KSP 最高 2.3.12 ⇒ Kotlin 锁 2.3.x
+ksp = "2.3.12"
+
+# ── DI
+hilt = "2.60.1"
+hiltNavigationCompose = "1.4.0"
+
+# ── 协程 / 序列化
+coroutines = "1.11.0"
+serialization = "1.12.0"
+
+# ── 推理（纯自带 Gemma 4，无云端降级）
+litertlm = "0.18.0"           # 已核实：Google Maven 上 current release 即 0.18.0
+
+# ── MCP / 网络
+mcpSdk = "0.15.0"
+ktor = "3.5.1"
+
+# ── 持久化（宋砚秋 F5/F6：Room 2.8.5 + BundledSQLiteDriver）
+room = "2.8.5"
+sqliteBundled = "2.7.1"
+datastore = "1.2.1"
+protobuf = "4.32.1"
+protobufPlugin = "0.9.6"          # com.google.protobuf Gradle 插件（与上面是两回事）
+
+# ── AndroidX
+androidxCore = "1.19.1"
+lifecycle = "2.11.0"
+activityCompose = "1.13.0"
+navigationCompose = "2.10.2"
+webkit = "1.17.1"
+work = "2.12.0"
+appfunctions = "1.0.0-alpha13"
+composeBom = "2026.09.00"
+
+# ── 测试
+junit = "4.13.2"
+truth = "1.4.4"
+turbine = "1.2.1"
+
+[plugins]
+androidApplication = { id = "com.android.application", version.ref = "agp" }
+androidLibrary = { id = "com.android.library", version.ref = "agp" }
+kotlinAndroid = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+composeCompiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
+hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
+protobuf = { id = "com.google.protobuf", version.ref = "protobufPlugin" }
+room = { id = "androidx.room", version.ref = "room" }
+
+[libraries]
+
+# ── 推理引擎（仅 :llm 可见）
+litertlm = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
+
+# ── 协程
+coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines" }
+
+# ── 序列化
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "serialization" }
+
+# ── DI
+hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }
+hilt-android-compiler = { group = "com.google.dagger", name = "hilt-android-compiler", version.ref = "hilt" }
+hilt-core = { group = "com.google.dagger", name = "hilt-core", version.ref = "hilt" }
+javax-inject = { group = "javax.inject", name = "javax.inject", version = "1" }
+
+# ── AndroidX 基础
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "androidxCore" }
+androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
+androidx-lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-process", version.ref = "lifecycle" }
+# ★ 坐标已核实：androidx.lifecycle:lifecycle-runtime-compose **只发在 Google Maven**
+#   （repo1.maven.org 上 404，别去那里找）。2.11.0 与上面的 `lifecycle` 版本钉同步，
+#   与 lifecycle-runtime-ktx 2.11.0 同源 ⇒ 不会出现 "Didn't find class
+#   androidx.lifecycle.compose.*" 这类版本错配。
+#   `repeatOnLifecycle` / `collectAsStateWithLifecycle` 就在这个 artifact 里。
+androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
+androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "work" }
+
+# ── WebView
+androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "webkit" }
+
+# ── 持久化
+androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
+androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+androidx-sqlite-bundled = { group = "androidx.sqlite", name = "sqlite-bundled", version.ref = "sqliteBundled" }
+androidx-datastore = { group = "androidx.datastore", name = "datastore", version.ref = "datastore" }
+protobuf-kotlin-lite = { group = "com.google.protobuf", name = "protobuf-kotlin-lite", version.ref = "protobuf" }
+
+# ── MCP / 网络
+mcp-sdk-client = { group = "io.modelcontextprotocol", name = "kotlin-sdk-client", version.ref = "mcpSdk" }
+ktor-client-core = { group = "io.ktor", name = "ktor-client-core", version.ref = "ktor" }
+ktor-client-okhttp = { group = "io.ktor", name = "ktor-client-okhttp", version.ref = "ktor" }
+# ★ 已删除 `ktor-client-plugins-sse`（2026-10 实测：该坐标在任何版本都不存在，3.x 全系 404）。
+#   Ktor 3.x 的 SSE 客户端插件 `io.ktor.client.plugins.sse.SSE` 就定义在 ktor-client-core 内，
+#   靠 ktor-client-core 即可使用。误引会让依赖解析在 configuration 阶段直接失败、全工程编不过。
+#   ⚠ 任何人再往这里加回该坐标 = 一号红线。
+ktor-client-logging = { group = "io.ktor", name = "ktor-client-logging", version.ref = "ktor" }
+
+# ── AppFunctions（对外暴露，可整模块摘除）
+androidx-appfunctions = { group = "androidx.appfunctions", name = "appfunctions", version.ref = "appfunctions" }
+
+# ── Compose（仅 :ui / :app）
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
+androidx-hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navigation-compose", version.ref = "hiltNavigationCompose" }
+compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+compose-ui = { group = "androidx.compose.ui", name = "ui" }
+compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+
+# ── 测试
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+truth = { group = "com.google.truth", name = "truth", version.ref = "truth" }
+turbine = { group = "app.cash.turbine", name = "turbine", version.ref = "turbine" }
+
+[bundles]
+testUnit = ["junit", "truth", "turbine"]
+compose = [
+    "androidx-activity-compose",
+    "compose-ui",
+    "compose-ui-graphics",
+    "compose-ui-tooling-preview",
+    "compose-material3",
+]
