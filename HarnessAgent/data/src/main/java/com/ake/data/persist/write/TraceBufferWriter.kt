@@ -194,6 +194,12 @@ public class TraceBufferWriter(
                             answerPreview = op.answerPreview,
                         )
 
+                        is Op.TaskSuspend -> taskDao.markSuspended(
+                            id = op.taskId,
+                            status = op.status,
+                            at = op.at,
+                        )
+
                         is Op.Checkpoint -> checkpointDao.save(op.row)
                         else -> Unit
                     }
@@ -227,6 +233,7 @@ public class TraceBufferWriter(
             is Op.TaskUpsert -> op.row.id
             is Op.BudgetAdvance -> op.taskId
             is Op.TaskFinish -> op.taskId
+            is Op.TaskSuspend -> op.taskId
             is Op.SyntheticTraceDropped -> return null   // 不给自己记丢，避免递归
         }
         val now = System.currentTimeMillis()

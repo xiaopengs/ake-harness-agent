@@ -50,6 +50,21 @@ public sealed interface Op {
         override val priority: Priority = Priority.P0
     }
 
+    /**
+     * ★ 挂起（PAUSED / WAITING_HUMAN）—— 不可丢，但**不是** [TaskFinish]。
+     *
+     * 与 [TaskFinish] 的唯一差别是落盘时不动 `finished_at`、并把 `terminal_reason` 置空。
+     * 合成一个 Op 靠 `status` 分支写入会诱使后来者「顺手」把两者合并，
+     * 而合并的代价是暂停中的任务被清理作业当成已结束的捞走 —— 不值得省这一个 Op。
+     */
+    data class TaskSuspend(
+        val taskId: String,
+        val status: String,
+        val at: Long,
+    ) : Op {
+        override val priority: Priority = Priority.P0
+    }
+
     /** 断点 —— 不可丢（恢复的正确性依赖它）。 */
     data class Checkpoint(val row: TaskCheckpointEntity) : Op {
         override val priority: Priority = Priority.P0

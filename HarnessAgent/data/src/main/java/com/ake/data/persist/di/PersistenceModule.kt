@@ -34,6 +34,7 @@ import com.ake.data.persist.store.TraceStoreImpl
 import com.ake.data.persist.write.PersistenceGovernor
 import com.ake.data.persist.write.PersistenceMetrics
 import com.ake.data.persist.write.TraceBufferWriter
+import com.ake.data.persist.wipe.WipeEverythingUseCase
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -272,5 +273,30 @@ public abstract class PersistenceBindingsModule {
             db: AkeDatabase,
             gate: PersistenceRedactionGate,
         ): MemoryStoreImpl = MemoryStoreImpl(db, gate)
+
+        /**
+         * 「一键清除全部痕迹」。
+         *
+         * ★ 走 Hilt 而不是让调用方自己 `new`：`writer` 必须是**同一个** `TraceBufferWriter`
+         * 单例（② 停在途写入停错了队列就白停了），`Context` 必须是 `@ApplicationContext`。
+         * 之前 `:ui` 的 `AndroidPrivacyPort` 自己按 Context+Keystore 重写了一份，
+         * 与本类重复 —— 那份应改为注入本类（`@Inject` 后 `wipe(deleteModelFiles)` 一行）。
+         */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideWipeEverything(
+            @ApplicationContext context: Context,
+            db: AkeDatabase,
+            writer: TraceBufferWriter,
+            payloads: PayloadStore,
+            memory: MemoryStoreImpl,
+        ): WipeEverythingUseCase = WipeEverythingUseCase(
+            context = context,
+            db = db,
+            writer = writer,
+            payloads = payloads,
+            memory = memory,
+        )
     }
 }

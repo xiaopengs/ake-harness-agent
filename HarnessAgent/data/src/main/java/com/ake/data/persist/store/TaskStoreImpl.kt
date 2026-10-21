@@ -94,6 +94,13 @@ public class TaskStoreImpl(
         }
     }
 
+    /**
+     * 落一次状态跃迁。
+     *
+     * ★ **挂起态（PAUSED / WAITING_HUMAN）不走 `TaskFinish`**：那会把 `finished_at` 置上，
+     * 于是「暂停中、等着用户点继续」的任务会被历史查询与清理作业（`pickForDigest` 以
+     * `finished_at IS NOT NULL` 为入口）当成已结束的捞走。它其实还活着，只是停了一下。
+     */
     override suspend fun finish(
         taskId: TaskId,
         status: String,
@@ -101,6 +108,12 @@ public class TaskStoreImpl(
         answerEnc: ByteArray?,
         answerPreview: String?,
     ) {
+        if (!TaskStatus.isTerminal(status)) {
+            writer.append(Op.TaskSuspend(taskId = taskId.value, status = status, at = clock.nowMillis()))
+            // 挂起后合并缓存**必须留着**：恢复时 advance 要接着上次累计往下加，
+            // 清掉它等于「一次暂停白送一张预算卡」。
+            return
+        }
         val sealed = if (answerEnc == null && !answerPreview.isNullOrBlank()) {
             gate.sealField(answerPreview, taskId.value.toByteArray()).blob
         } else {
@@ -117,7 +130,7 @@ public class TaskStoreImpl(
             ),
         )
         // 终态后清掉合并缓存：这个任务不会再 advance
-        if (TaskStatus.isTerminal(status)) known.remove(taskId.value)
+        known.remove(taskId.value)
     }
 
     override suspend fun load(taskId: TaskId): TaskRecord? =
@@ -127,6 +140,35 @@ public class TaskStoreImpl(
 
     override fun observe(taskId: TaskId): Flow<TaskRecord?> =
         db.taskDao().observe(taskId.value).map { it?.let(EntityMappers::taskToDomain) }
+
+    /**
+     * `TaskStorePort.recent` —— 冷启动后的历史任务列表。
+     *
+     * ★ 含**未结束**的任务（暂停中的也在）。用户在历史页看到「已暂停」才想得起来回去点继续，
+     * 只给已结束的会让暂停的任务凭空消失。
+     *
+     * ## 一个必须知道的时序事实
+     *
+     * 写走 `TraceBufferWriter`（200 ms 合并窗口），所以「刚 finish 完立刻 recent()」
+     * 有可能读不到最后一条 —— 这不是 bug，是写入队列的既定代价。
+     * 需要「写完立刻看到」的界面请用 [observeRecent]（Room 的 Flow 在事务提交后自动重发）。
+     */
+    override suspend fun recent(limit: Int): List<TaskRecord> =
+        runCatching { db.taskDao().recent(limit.coerceAtLeast(0)).map(EntityMappers::taskToDomain) }
+            .onFailure { AkeLog.w(TAG, "recent failed: ${it.message}") }
+            .getOrDefault(emptyList())
+
+    /**
+     * [recent] 的 `Flow` 版：列表随写入自动刷新。
+     *
+     * 契约里只有挂起版（`core/ports/Persistence.kt` 由邝随行定稿，我不改 `core/`），
+     * 所以这一条**先备着**：等 `TaskStorePort` 加上它，UI 就能直接切过来，
+     * 不必再动 `:data`。我的建议是加 —— 历史页是常驻列表，
+     * 挂起版要 UI 自己找时机重查，而那个时机几乎必然和「写入落盘」对不齐。
+     */
+    fun observeRecent(limit: Int = 50): Flow<List<TaskRecord>> =
+        db.taskDao().observeRecent(limit.coerceAtLeast(0))
+            .map { list -> list.map(EntityMappers::taskToDomain) }
 
     /** 会话维度：给 UI 的历史列表。 */
     fun ofSession(sessionId: String): Flow<List<TaskRecord>> =

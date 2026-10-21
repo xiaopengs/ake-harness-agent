@@ -46,6 +46,12 @@ import kotlinx.coroutines.withContext
  * 删除 Keystore 条目后，所有 R1 密文（goal / answer / 工具入出参 / 快照文件 /
  * scratchpad / memory content）在数学上永久不可恢复 ——
  * 这是唯一「无论文件是否被真正擦除都成立」的保证。
+ *
+ * ## 用法
+ *
+ * 由 `:data` 的 `PersistenceModule` 提供单例（Hilt `@Provides`），**不要自己 new** ——
+ * 它的 `Context` 必须是 `@ApplicationContext`（`deleteDatabase` 用的是应用默认库路径），
+ * 且 `TraceBufferWriter` 必须是同一个单例，否则「停在途写入」停的是另一个队列。
  */
 class WipeEverythingUseCase(
     private val context: Context,
@@ -83,6 +89,17 @@ class WipeEverythingUseCase(
         runCatching {
             File(context.filesDir, "datastore").deleteRecursively()
         }.onFailure { AkeLog.w(TAG, "datastore delete failed: ${it.message}") }
+
+        // ⑤b ★ 过渡实现：MCP 服务器清单与 UI 设置项目前由 `:ui` 暂存在 filesDir/mcp、
+        //     filesDir/settings（org.json），因为 `core/ports` 还没有对应的 Store Port。
+        //     本类的清除范围必须与 `AndroidPrivacyPort` 一致，否则换成我这份实现后
+        //     会留下一批孤儿文件 —— 那比「有两份实现」更糟。
+        //     TODO(ownership)：`core/ports` 落地 McpServerStorePort / SettingsStorePort 后，
+        //     这里改成 `store.clearAll()`，本段删除。
+        runCatching {
+            File(context.filesDir, "mcp").deleteRecursively()
+            File(context.filesDir, "settings").deleteRecursively()
+        }.onFailure { AkeLog.w(TAG, "transition files delete failed: ${it.message}") }
 
         // ⑥ ★ WebView 痕迹 —— 架构文档完全没提的那一块
         runCatching {

@@ -38,6 +38,39 @@ interface TaskDao {
     @Query("SELECT * FROM task WHERE finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT :limit")
     fun finished(limit: Int = 50): Flow<List<TaskEntity>>
 
+    /**
+     * `TaskStorePort.recent` 的落点：**按最后活动倒序**，命中 idx_task_last_activity。
+     *
+     * 与 [finished] 只差一个 `finished_at IS NOT NULL` 谓词，而这个差别正是重点 ——
+     * 「暂停中、等着用户点继续」的任务**必须**出现在历史列表里，否则用户以为它丢了。
+     */
+    @Query("SELECT * FROM task ORDER BY last_activity_at DESC LIMIT :limit")
+    suspend fun recent(limit: Int): List<TaskEntity>
+
+    /** 同上，但能随写入自动刷新（`Flow` 版，供冷启动后的常驻列表）。 */
+    @Query("SELECT * FROM task ORDER BY last_activity_at DESC LIMIT :limit")
+    fun observeRecent(limit: Int): Flow<List<TaskEntity>>
+
+    /**
+     * ★ 挂起（PAUSED / WAITING_HUMAN）**不写 `finished_at`、不写 `terminal_reason`**。
+     *
+     * 走 [finish] 会把 `finished_at` 置上，后果是「暂停中的任务」被 [finished] 与
+     * `pickForDigest`（都以 `finished_at IS NOT NULL` 为入口）当成已结束的任务捞走 ——
+     * 用户点「继续」时它已经被降级成 DIGEST 甚至被清理了。
+     * 任务还活着，库里就不能说它结束了。
+     */
+    @Query(
+        """
+        UPDATE task
+           SET status = :status,
+               terminal_reason = NULL,
+               finished_at = NULL,
+               last_activity_at = :at
+         WHERE id = :id
+        """,
+    )
+    suspend fun markSuspended(id: String, status: String, at: Long)
+
     // ── 预算累计推进（★ 累计终值，不是增量）
     @Query(
         """

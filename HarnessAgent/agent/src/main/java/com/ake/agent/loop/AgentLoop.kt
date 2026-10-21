@@ -30,6 +30,7 @@ import com.ake.core.contract.StepStatus
 import com.ake.core.contract.TaskBudgetPatch
 import com.ake.core.contract.TaskSpec
 import com.ake.core.contract.TaskStatus
+import com.ake.core.contract.TaskSuspension
 import com.ake.core.contract.ToolCall
 import com.ake.core.contract.ToolResult
 import com.ake.core.modelapi.GenerationRequest
@@ -92,7 +93,8 @@ data class RunOptions(
  *
  * ## 事件流
  *
- * [run] 返回冷 Flow，**最后一条事件一定是 [TaskEvent.Terminal]**。
+ * [run] 返回冷 Flow，**最后一条事件一定是终结语**：正常运行结束是 [TaskEvent.Terminal]，
+ * 被挂起（暂停 / 等人工确认）是 [TaskEvent.Suspended]，二者互斥且穷尽（`AgentEvents.isEndOfStream`）。
  * 这让 UI 用一个 `collect` 就能表达「跑到结束」，不需要再配对一个 Result 返回值
  * （配对返回值是回调风格的典型泄漏）。
  *
@@ -206,6 +208,9 @@ class AgentLoop(
                             taskId = task.id,
                             seq = loop.stepSeq,
                             url = page.url,
+                            // ★ 与落库的 ObservationSummary.titleRedacted 同口径（同一个函数）。
+                            // 这一列会流到通知栏与历史列表，绝不能拿 page.title 原样发。
+                            titleRedacted = ObservationProjector.redactTitle(page.title),
                             pageDigest = page.digest.value,
                             candidates = page.candidates.size,
                             observationId = stepId.value,
@@ -597,18 +602,66 @@ class AgentLoop(
         out.emit(TaskEvent.CheckpointSaved(loop.task.id, loop.stepSeq))
     }
 
+    /**
+     * 挂起（**不是终止**）。调用后主循环立即 `return`，所以本函数是这条 Flow 的收尾。
+     *
+     * ## ★ 流的终点是 [TaskEvent.Suspended]，不再补发伪 Terminal
+     *
+     * 曾经这里在 `Paused` 之后再发一条 `Terminal(USER_ABORT, null, "paused:xxx")` —— 已删除。
+     * 它让「暂停」在库里是 `ABORTED`、在 UI 上要靠字符串前缀 `detail.startsWith("paused:")`
+     * 才能与真正的终止区分开。现在挂起就是挂起：[TaskEvent.Suspended] 与 [TaskEvent.Terminal]
+     * 互斥且穷尽了流的终点（见 `AgentEvents.isEndOfStream`），UI 在 `when` 里就能穷尽。
+     *
+     * ## 落盘口径
+     *
+     * `terminal_reason` 传 `null`（`TaskSuspension` 的契约：暂停没有终止原因），
+     * 且 `:data` 侧对挂起态不写 `finished_at` —— 否则「历史任务」与清理作业
+     * （`pickForDigest` 以 `finished_at IS NOT NULL` 为入口）会把还活着的任务捞走。
+     */
     private suspend fun pause(out: FlowCollector<TaskEvent>, loop: LoopState, reason: SuspendReason) {
         val cp = loop.snapshot(reason.status, humanGatePending = reason == SuspendReason.HUMAN_GATE, humanGateJson = null)
-        runCatching { checkpointStore.save(cp) }
-        runCatching {
-            taskStore.finish(loop.task.id, reason.status, reason.reasonKey, null, null)
-        }
-        AkeLog.w(TAG, "task paused: ${reason.reasonKey} @ step ${loop.stepSeq}")
-        out.emit(TaskEvent.Paused(loop.task.id, reason, loop.stepSeq))
+        // ★ 不许硬编码 true：「显示了继续按钮但点了恢复不了」比「直接说不能继续」糟得多
+        val checkpointSaved = runCatching { checkpointStore.save(cp) }
+            .onFailure { AkeLog.w(TAG, "checkpoint save failed on pause: ${it.message}") }
+            .isSuccess
+        runCatching { taskStore.finish(loop.task.id, reason.status, null, null, null) }
+            .onFailure { AkeLog.w(TAG, "task suspend persist failed: ${it.message}") }
+
+        val resumable = checkpointSaved && reason != SuspendReason.HUMAN_GATE
+        val atMillis = clock.nowMillis()
+        AkeLog.w(
+            TAG,
+            "task suspended: ${reason.reasonKey} @ step ${loop.stepSeq} " +
+                "checkpointSaved=$checkpointSaved resumable=$resumable",
+        )
+
+        out.emit(
+            TaskEvent.Paused(
+                taskId = loop.task.id,
+                reason = reason,
+                status = reason.status,
+                stepSeq = loop.stepSeq,
+                checkpointSaved = checkpointSaved,
+                resumable = resumable,
+                // 文案归 UI（`SuspendReason.humanAdvice()`），引擎只给 key —— 这里刻意留空
+                resumeHint = null,
+                atMillis = atMillis,
+            ),
+        )
         out.emit(TaskEvent.StatusChanged(loop.task.id, reason.status))
-        // 暂停不是终态 —— 但 Flow 必须有终点，所以这里发一条「ABORTED 语义的软终止」，
-        // keepCheckpoint=true 保证用户点继续时能恢复。UI 必须按 Paused 事件渲染，不是按这条。
-        out.emit(TaskEvent.Terminal(loop.task.id, TerminalReason.USER_ABORT, null, "paused:${reason.reasonKey}"))
+        // ★ 流终点。TaskSuspension 的构造器 require 了挂起态，终态塞不进来。
+        out.emit(
+            TaskEvent.Suspended(
+                loop.task.id,
+                TaskSuspension.of(
+                    taskId = loop.task.id,
+                    status = reason.status,
+                    reasonKey = reason.reasonKey,
+                    stepSeq = loop.stepSeq,
+                    checkpointSaved = checkpointSaved,
+                ),
+            ),
+        )
     }
 
     private suspend fun finish(
