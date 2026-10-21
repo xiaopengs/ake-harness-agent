@@ -1,0 +1,267 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Ake Harness Agent · CI
+#
+# 触发：push 到 main / PR 到 main / 手动
+# 五个作业，职责见 docs/03-build-and-deploy.md §4：
+#   1. jvm-tests     —— 内核层单测（纯 JVM，最快的闸门）
+#   2. compile       —— 11 个模块的 Kotlin 编译校验
+#   3. ksp-verify    —— Room / Hilt 注解处理器产物校验
+#   4. lint          —— Android Lint 门禁
+#   5. assemble-debug—— 出包 + 体积红线校验
+#
+# ★ 本项目硬约束：端侧模型（Gemma 4 E2B，约 2.6GB）不随包分发。
+#   CI 环境也没有模型文件。因此流水线里：
+#     - 不下载任何权重；
+#     - 「模型红线」步骤主动断言仓库内与 APK 内都不存在权重文件。
+# ─────────────────────────────────────────────────────────────────────────────
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一 ref 上只保留最新一次运行，避免 PR 连续推送把 runner 堵死
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: "17"
+  COMPILE_SDK: "36"
+  BUILD_TOOLS: "36.0.0"
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 1. JVM 层快速校验
+  #    :core:common 是 L1 内核层，零 Android 依赖、零第三方依赖，
+  #    可以在 JVM 上毫秒级跑完 —— 它应该永远是流水线里最先红的那个。
+  #    顺带编译 :mcp（同样纯 Kotlin/JVM，ktor 是 KMP，无 Android 绑定）。
+  # ═══════════════════════════════════════════════════════════════════════════
+  jvm-tests:
+    name: "1️⃣ JVM 层快速校验"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备构建环境
+        uses: ./.github/actions/setup-build-env
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          compile-sdk: ${{ env.COMPILE_SDK }}
+          build-tools: ${{ env.BUILD_TOOLS }}
+
+      - name: 🚫 模型红线：仓库内不得出现端侧权重
+        working-directory: HarnessAgent
+        run: |
+          set -euo pipefail
+          hits=$(find . -path './*/build' -prune -o -type f \
+            \( -name '*.litertlm' -o -name '*.task' -o -name '*.gguf' -o -name '*.bin' \) -print || true)
+          if [ -n "$hits" ]; then
+            echo "::error::仓库内出现模型权重文件，构建不得依赖它：$hits"
+            exit 1
+          fi
+          echo "✅ 无模型权重文件（模型由 App 内下载服务首次启动时拉取）"
+
+      - name: 🧪 :core:common 单元测试 + :mcp 编译
+        working-directory: HarnessAgent
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :core:common:test :mcp:compileKotlin --console=plain
+
+      - name: 📄 上传单测报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jvm-test-reports
+          path: HarnessAgent/core/common/build/reports/tests/test/
+          if-no-files-found: ignore
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 2. 编译校验
+  #    逐个模块 compileDebugKotlin。刻意不用 assemble（那会把编译错误推迟到
+  #    打包阶段，出错了还得先跑完资源合并）。debug 变体编译最快且能覆盖全部源码。
+  # ═══════════════════════════════════════════════════════════════════════════
+  compile:
+    name: "2️⃣ 编译校验（11 模块）"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备构建环境
+        uses: ./.github/actions/setup-build-env
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          compile-sdk: ${{ env.COMPILE_SDK }}
+          build-tools: ${{ env.BUILD_TOOLS }}
+
+      - name: 🔨 各模块 compileDebugKotlin / compileKotlin
+        working-directory: HarnessAgent
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --console=plain \
+            :core:common:compileKotlin \
+            :core:model-api:compileKotlin \
+            :core:contract:compileKotlin \
+            :core:ports:compileKotlin \
+            :mcp:compileKotlin \
+            :llm:compileDebugKotlin \
+            :browser:compileDebugKotlin \
+            :agent:compileDebugKotlin \
+            :data:compileDebugKotlin \
+            :ui:compileDebugKotlin \
+            :app:compileDebugKotlin
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 3. KSP 校验
+  #    KSP 出问题的方式和编译不一样：编译报错是「源码写错了」，
+  #    KSP 出问题往往是「注解处理器静默不产出」—— DAO_Impl 没生成，
+  #    编译照样过，跑起来才在 Room 建库时炸。所以这里**断言产物文件存在**。
+  # ═══════════════════════════════════════════════════════════════════════════
+  ksp-verify:
+    name: "3️⃣ KSP 校验（Room / Hilt）"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备构建环境
+        uses: ./.github/actions/setup-build-env
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          compile-sdk: ${{ env.COMPILE_SDK }}
+          build-tools: ${{ env.BUILD_TOOLS }}
+
+      - name: ⚙️ 触发 Room KSP（:data）与 Hilt KSP（:app）
+        working-directory: HarnessAgent
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :data:compileDebugKotlin :app:compileDebugKotlin --console=plain
+
+      - name: 🔍 断言 Room 生成产物存在
+        working-directory: HarnessAgent
+        run: |
+          set -euo pipefail
+          GEN=data/build/generated/ksp/debug/kotlin
+          echo "KSP 产物目录：$GEN"
+          db=$(find "$GEN" -name 'AkeDatabase_Impl.kt' | head -1)
+          if [ -z "$db" ]; then
+            echo "::error::Room 未生成 AkeDatabase_Impl，KSP 静默失败"
+            find "$GEN" -maxdepth 6 -type d | head -20
+            exit 1
+          fi
+          n_dao=$(find "$GEN" -name '*_Dao_Impl.kt' -o -name '*Dao_Impl.kt' | wc -l)
+          echo "✅ AkeDatabase_Impl 已生成：$db"
+          echo "✅ DAO_Impl 数量：$n_dao"
+          if [ "$n_dao" -lt 8 ]; then
+            echo "::error::DAO_Impl 仅 $n_dao 个（架构约定 8 个 DAO），KSP 产物不完整"
+            exit 1
+          fi
+
+      - name: 🔍 断言 Hilt 生成产物存在
+        working-directory: HarnessAgent
+        run: |
+          set -euo pipefail
+          GEN=app/build/generated/ksp/debug/kotlin
+          n=$(find "$GEN" -name '*_HiltComponents*.kt' -o -name '*HiltModules*.kt' | wc -l)
+          echo "Hilt 生成文件数：$n"
+          if [ "$n" -eq 0 ]; then
+            echo "::error::Hilt 未生成任何组件，KSP 静默失败"
+            exit 1
+          fi
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 4. Lint
+  #    :app 是组合根，Lint 在它上面才能看见合并后的完整 manifest 与资源。
+  #    :ui 单独跑是因为 Compose 有一批独立的检查项（Compose 只在这一层）。
+  # ═══════════════════════════════════════════════════════════════════════════
+  lint:
+    name: "4️⃣ Lint"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备构建环境
+        uses: ./.github/actions/setup-build-env
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          compile-sdk: ${{ env.COMPILE_SDK }}
+          build-tools: ${{ env.BUILD_TOOLS }}
+
+      - name: 🧹 :app / :ui Lint
+        working-directory: HarnessAgent
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:lintDebug :ui:lintDebug --console=plain
+
+      - name: 📄 上传 Lint 报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-reports
+          path: |
+            HarnessAgent/app/build/reports/lint-results-debug.*
+            HarnessAgent/ui/build/reports/lint-results-debug.*
+          if-no-files-found: ignore
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 5. 构建 debug APK + 体积红线
+  #    这个作业是本项目最有价值的一道闸门：端侧 App 最容易被「顺手把模型打进包」
+  #    搞成 2.6GB 的怪物。这里直接卡体积 + 卡后缀，比人工检查可靠。
+  #    传 -Pake.abiSplit=false 是为了固定产出单个 universal APK，好让后续路径确定。
+  # ═══════════════════════════════════════════════════════════════════════════
+  assemble-debug:
+    name: "5️⃣ 构建 debug APK"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [compile, ksp-verify]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备构建环境
+        uses: ./.github/actions/setup-build-env
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          compile-sdk: ${{ env.COMPILE_SDK }}
+          build-tools: ${{ env.BUILD_TOOLS }}
+
+      - name: 📱 assembleDebug
+        working-directory: HarnessAgent
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleDebug -Pake.abiSplit=false --console=plain
+
+      - name: 🚨 体积红线：APK 不得包含端侧模型
+        working-directory: HarnessAgent
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          if [ ! -f "$APK" ]; then echo "::error::未找到 $APK"; ls -R app/build/outputs | head -30; exit 1; fi
+          size=$(stat -c%s "$APK")
+          echo "APK 体积：$(( size / 1024 / 1024 )) MB ($size bytes)"
+          if unzip -l "$APK" | grep -Ei '\.(litertlm|task|bin|gguf)$'; then
+            echo "::error::APK 内发现模型权重文件 —— 模型必须由下载服务分发，不得随包"
+            exit 1
+          fi
+          # 2.6GB 模型一旦误打包，体积必然 >150MB；红线取 150MB 留足余量
+          if [ "$size" -gt 157286400 ]; then
+            echo "::error::debug APK 超过 150MB，疑似模型被打进包；请检查 assets/ 与 packaging 配置"
+            exit 1
+          fi
+          echo "✅ 体积红线通过"
+
+      - name: 📤 上传 debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: HarnessAgent/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

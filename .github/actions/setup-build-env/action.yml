@@ -1,0 +1,107 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 复合动作：准备 Ake Harness Agent 的构建环境
+#
+# 三个动作：
+#   1. JDK 17（AGP 9.4 要求的最低版本，见 docs/03-build-and-deploy.md §2.1）
+#   2. Android SDK —— 用 actions/cache 缓存到工作区内，命中即跳过安装
+#   3. Gradle 依赖/构建缓存 —— 用 actions/cache 缓存 ~/.gradle
+#
+# 为什么 SDK 装到工作区而不是用 runner 预装的 /usr/local/lib/android/sdk：
+#   runner 预装目录不可缓存（每次都从零装）；装到工作区内才能用 actions/cache
+#   整目录缓存，第二次起直接命中，省掉 sdkmanager 的下载时间。
+# ─────────────────────────────────────────────────────────────────────────────
+name: "Setup Android build env"
+description: "JDK 17 + Android SDK(带缓存) + Gradle 缓存，供 CI 各作业复用"
+
+inputs:
+  java-version:
+    description: "JDK 版本"
+    required: false
+    default: "17"
+  compile-sdk:
+    description: "compileSdk 对应的 platform"
+    required: false
+    default: "36"
+  build-tools:
+    description: "SDK Build Tools 版本"
+    required: false
+    default: "36.0.0"
+  install-ndk:
+    description: "是否安装 NDK（本项目无 CMake/externalNativeBuild，默认 false）"
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - name: ☕ JDK ${{ inputs.java-version }} (Temurin)
+      uses: actions/setup-java@v4
+      with:
+        distribution: "temurin"
+        java-version: ${{ inputs.java-version }}
+
+    # ── Android SDK：装在工作区内，可整目录缓存 ──
+    - name: 📦 缓存 Android SDK
+      id: sdk-cache
+      uses: actions/cache@v4
+      with:
+        path: .android-sdk
+        key: android-sdk-${{ runner.os }}-p${{ inputs.compile-sdk }}-bt${{ inputs.build-tools }}-ndk${{ inputs.install-ndk }}
+
+    - name: 🛠 安装 Android SDK 组件（仅缓存未命中时）
+      if: steps.sdk-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # runner 自带 cmdline-tools，用它把组件装进工作区目录（--sdk_root 指向自定义位置）
+        SDKMANAGER="$(command -v sdkmanager || echo "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager")"
+        echo "sdkmanager: $SDKMANAGER"
+        mkdir -p "$ANDROID_SDK_ROOT"
+        yes | "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses > /dev/null
+        "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --install \
+          "platform-tools" \
+          "platforms;android-${{ inputs.compile-sdk }}" \
+          "build-tools;${{ inputs.build-tools }}"
+        if [ "${{ inputs.install-ndk }}" = "true" ]; then
+          "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --install "ndk;28.2.13676358"
+        fi
+      env:
+        ANDROID_SDK_ROOT: ${{ github.workspace }}/.android-sdk
+
+    - name: 🔧 导出 ANDROID_HOME / ANDROID_SDK_ROOT
+      shell: bash
+      run: |
+        echo "ANDROID_HOME=$GITHUB_WORKSPACE/.android-sdk"        >> "$GITHUB_ENV"
+        echo "ANDROID_SDK_ROOT=$GITHUB_WORKSPACE/.android-sdk"    >> "$GITHUB_ENV"
+        echo "$GITHUB_WORKSPACE/.android-sdk/platform-tools"      >> "$GITHUB_PATH"
+
+    # 项目 gradle.properties 把守护进程堆设为 3GB；Android 全量构建（尤其 release + R8）
+    # 容易打满。用户级 gradle.properties 优先级高于项目级，这里覆盖成 4GB。
+    # 注意：org.gradle.jvmargs 不能靠命令行 -D 覆盖（JVM 已启动），只能走这个文件。
+    - name: 🧠 覆盖 Gradle 守护进程堆（4GB）
+      shell: bash
+      run: |
+        mkdir -p "$HOME/.gradle"
+        cat >> "$HOME/.gradle/gradle.properties" <<'EOF'
+        org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8
+        org.gradle.parallel=true
+        org.gradle.caching=true
+        org.gradle.vfs.watch=false
+        EOF
+
+    - name: 📦 缓存 Gradle 依赖与构建缓存
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: gradle-${{ runner.os }}-${{ hashFiles('HarnessAgent/**/*.gradle.kts', 'HarnessAgent/gradle/libs.versions.toml', 'HarnessAgent/gradle/wrapper/gradle-wrapper.properties', 'HarnessAgent/gradle.properties') }}
+        restore-keys: |
+          gradle-${{ runner.os }}-
+
+    - name: ✅ 环境自检
+      shell: bash
+      run: |
+        java -version 2>&1 | head -1
+        echo "ANDROID_HOME=$ANDROID_HOME"
+        ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools" 2>/dev/null || true

@@ -1,0 +1,160 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Ake Harness Agent · Release
+#
+# 触发：打 v* 标签（如 v0.1.0）或手动 dispatch
+#
+# 与 CI 的差别：
+#   - 开 R8 混淆 + 资源裁剪（debug 关着，便于排障）
+#   - 开 ABI 分包（release 才需要；debug 固定出 universal，见 ci.yml）
+#   - **真签名**：凭据全部来自 GitHub Secrets，仓库里一个字节的密钥都没有
+#
+# Secret 配置清单见 docs/03-build-and-deploy.md §5。
+# 本文件不含任何真实密钥，只有环境变量名。
+# ─────────────────────────────────────────────────────────────────────────────
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: "版本名，如 0.1.0"
+        required: true
+      version_code:
+        description: "versionCode（整数，单调递增）"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  JAVA_VERSION: "17"
+  COMPILE_SDK: "36"
+  BUILD_TOOLS: "36.0.0"
+
+jobs:
+  release:
+    name: "🔐 签名并构建 release"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备构建环境
+        uses: ./.github/actions/setup-build-env
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          compile-sdk: ${{ env.COMPILE_SDK }}
+          build-tools: ${{ env.BUILD_TOOLS }}
+
+      # ── 凭据落地：Secret 里的 base64 keystore 解成临时文件 ──
+      # 关键点：keystore 是二进制，GitHub Secret 只能存文本 ⇒ 存 base64，
+      #       运行时解码。文件落在 $RUNNER_TEMP，作业结束即随 runner 销毁。
+      - name: 🔑 还原签名 keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.AKE_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "::error::缺少 Secret AKE_KEYSTORE_BASE64，无法签名 release"
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/ake-release.jks"
+          echo "AKE_KEYSTORE_PATH=$RUNNER_TEMP/ake-release.jks" >> "$GITHUB_ENV"
+          echo "✅ keystore 已还原到临时目录（不入工作区、不落 artifacts）"
+
+      - name: 🧹 Lint 门禁（release 前必须过）
+        working-directory: HarnessAgent
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:lintDebug --console=plain
+
+      - name: 📱 assembleRelease（R8 + 资源裁剪 + ABI 分包）
+        working-directory: HarnessAgent
+        env:
+          AKE_KEYSTORE_PASSWORD: ${{ secrets.AKE_KEYSTORE_PASSWORD }}
+          AKE_KEY_ALIAS: ${{ secrets.AKE_KEY_ALIAS }}
+          AKE_KEY_PASSWORD: ${{ secrets.AKE_KEY_PASSWORD }}
+          AKE_VERSION_CODE: ${{ github.event.inputs.version_code }}
+          AKE_VERSION_NAME: ${{ github.event.inputs.version_name }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease -Pake.abiSplit=true --console=plain
+
+      - name: 📦 bundleRelease（上架用 AAB）
+        working-directory: HarnessAgent
+        env:
+          AKE_KEYSTORE_PASSWORD: ${{ secrets.AKE_KEYSTORE_PASSWORD }}
+          AKE_KEY_ALIAS: ${{ secrets.AKE_KEY_ALIAS }}
+          AKE_KEY_PASSWORD: ${{ secrets.AKE_KEY_PASSWORD }}
+          AKE_VERSION_CODE: ${{ github.event.inputs.version_code }}
+          AKE_VERSION_NAME: ${{ github.event.inputs.version_name }}
+        run: |
+          ./gradlew :app:bundleRelease --console=plain
+
+      - name: 🚨 体积红线
+        working-directory: HarnessAgent
+        run: |
+          set -euo pipefail
+          for f in app/build/outputs/apk/release/*.apk app/build/outputs/bundle/release/*.aab; do
+            [ -f "$f" ] || continue
+            size=$(stat -c%s "$f")
+            echo "$(basename "$f")：$(( size / 1024 / 1024 )) MB"
+            if [ "$size" -gt 157286400 ]; then
+              echo "::error::$f 超过 150MB，疑似模型被打进包"
+              exit 1
+            fi
+          done
+          echo "✅ 体积红线通过"
+
+      - name: 🔏 校验签名确实生效（不是 debug key）
+        working-directory: HarnessAgent
+        env:
+          AKE_KEY_ALIAS: ${{ secrets.AKE_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/release/app-universal-release.apk \
+                   app/build/outputs/apk/release/app-release.apk 2>/dev/null | head -1)
+          echo "校验对象：$APK"
+          "$ANDROID_HOME/build-tools/${{ env.BUILD_TOOLS }}/apksigner" verify --print-certs "$APK" \
+            | tee /tmp/signer.txt
+          if grep -qi "androiddebugkey" /tmp/signer.txt; then
+            echo "::error::release 包仍使用 debug 签名 —— 凭据未生效"
+            exit 1
+          fi
+          echo "✅ 已使用 release 密钥签名"
+
+      - name: 📤 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: |
+            HarnessAgent/app/build/outputs/apk/release/*.apk
+            HarnessAgent/app/build/outputs/bundle/release/*.aab
+            HarnessAgent/app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+          retention-days: 90
+
+      # ── 混淆映射表必须留档：没有它，线上崩溃栈全是 a.a.b() ──
+      # 注意：不要上传到公开 artifact 若包体含敏感逻辑；本项目为端侧离线 App，
+      #       映射表与 APK 一并留档，便于回溯。
+      - name: 📄 发布到 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            HarnessAgent/app/build/outputs/apk/release/*.apk
+            HarnessAgent/app/build/outputs/bundle/release/*.aab
+
+      # ── 上架 Play（暂未启用）──
+      # 需要 AKE_PLAY_SERVICE_ACCOUNT_JSON（Google Play Console 服务账号 JSON，base64）。
+      # 端侧模型不随包分发 ⇒ AAB 体积很小，可以直接走 Play 标准通道。
+      # - name: 🚀 上传到 Google Play（internal track）
+      #   uses: r0adkll/upload-google-play@v1
+      #   with:
+      #     serviceAccountJsonPlainText: ${{ secrets.AKE_PLAY_SERVICE_ACCOUNT_JSON }}
+      #     packageName: com.ake.harnessagent
+      #     releaseFiles: HarnessAgent/app/build/outputs/bundle/release/app-release.aab
+      #     track: internal
+      #     status: draft
