@@ -55,7 +55,10 @@ import javax.inject.Singleton
  * 所以 [unload] 与低内存回调里的释放是**保护 WebView 的手段**，不是省电优化（§6.4）。
  */
 @Singleton
-internal class LiteRtModelPort @Inject constructor(
+// ★ 必须 public：`:app` 的组合根要 `@Binds` 它到 `ModelPort`。
+//   `internal` 会让 `:app` 抛 "Cannot access 'class LiteRtModelPort': it is internal in file"
+//   —— 这是「模块封装」与「组合根必须看见实现类」之间唯一的、必要的破口。
+public class LiteRtModelPort @Inject constructor(
     private val appContext: Context,
     private val deviceHealth: DeviceHealthPort,
 ) : ModelPort {

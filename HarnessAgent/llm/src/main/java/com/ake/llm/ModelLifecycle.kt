@@ -38,7 +38,8 @@ import javax.inject.Singleton
  * 但 `ModelPort`/`SessionSpec` 天然支持多实例，加第二个模型不需要动 L4/L5。
  */
 @Singleton
-internal class LiteRtModelLifecycle @Inject constructor(
+// ★ 同 `LiteRtModelPort`：`:app` 要 `@Binds` 它到 `ModelLifecyclePort`，故必须 public。
+public class LiteRtModelLifecycle @Inject constructor(
     private val modelPort: LiteRtModelPort,
     private val downloader: ModelDownloader,
     private val deviceHealth: DeviceHealthPort,
