@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 唯一主题。MVP 不做深色模式：端侧 Agent 的体验重心在任务执行面板，不在主题系统。 -->
+    <style name="Theme.HarnessAgent" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

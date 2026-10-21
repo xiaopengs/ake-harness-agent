@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ★ Android 12+ 的云备份 / 换机迁移规则（数据库 F8）。
+
+  为什么光有 `android:allowBackup="false"` 还不够：
+  自 Android 12 起，备份与迁移被拆成两套独立机制 ——
+    - `allowBackup` 只管**云端/ADB 备份**
+    - **「换机迁移」（设备到设备 D2D）走的是 `dataExtractionRules`，不再受 allowBackup 约束**
+  只关前者，换机时数据仍会被带走。而本项目的红线是「数据不出机」，
+  所以这里必须显式声明：cloud 与 d2d 全部不含任何 domain（含 file/database/sharedpref/root）。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude
+            domain="root"
+            path="." />
+        <exclude
+            domain="file"
+            path="." />
+        <exclude
+            domain="database"
+            path="." />
+        <exclude
+            domain="sharedpref"
+            path="." />
+        <exclude
+            domain="external"
+            path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude
+            domain="root"
+            path="." />
+        <exclude
+            domain="file"
+            path="." />
+        <exclude
+            domain="database"
+            path="." />
+        <exclude
+            domain="sharedpref"
+            path="." />
+        <exclude
+            domain="external"
+            path="." />
+    </device-transfer>
+</data-extraction-rules>
