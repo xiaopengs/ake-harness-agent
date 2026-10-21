@@ -54,6 +54,8 @@ import com.ake.core.ports.ObservationStorePort
 import com.ake.core.ports.PolicyPort
 import com.ake.core.ports.PolicyVerdict
 import com.ake.core.ports.Resolved
+import com.ake.core.ports.TaskEvent
+import com.ake.core.ports.TaskRunnerPort
 import com.ake.core.ports.TaskStorePort
 import com.ake.core.ports.ThermalState
 import com.ake.core.ports.TraceStorePort
@@ -66,14 +68,18 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** 一次运行的入参。刻意做成不可变纯数据，便于黄金轨迹回放。 */
-data class RunOptions(
-    val abort: AbortSignal = NoAbortSignal,
-    val resumeFrom: LoopCheckpoint? = null,
-    val modelId: String = "gemma-4-E2B-it",
-    /** 每步结束是否落一次断点。落盘是 try-send，成本可忽略，MVP 默认每步都落。 */
-    val checkpointEveryStep: Boolean = true,
-)
+/**
+ * ★★ `RunOptions` 的主体已下移到 `com.ake.core.ports.RunOptions`（2026-10 Port 收口）。
+ *
+ * 它与 core 那份逐字段相同。这里改成 `typealias` 转发，顺带消掉一个真实隐患：
+ * 迁移前 `modelId` 的默认值 `"gemma-4-E2B-it"` 在本模块硬编码，
+ * 而 `UiRuntimeModule` 与 `AgentSessionCoordinator.DEFAULT_MODEL_ID` 各写了另外一份 ——
+ * 三处的代价是「UI 以为在用 A 模型、实际加载的是 B」。现在统一走
+ * `core:ports` 的 `DEFAULT_MODEL_ID` 常量，三者指向同一个值。
+ *
+ * 其余不变：一次运行的入参，不可变纯数据，便于黄金轨迹回放。
+ */
+public typealias RunOptions = com.ake.core.ports.RunOptions
 
 /**
  * # 单步 ReAct 主循环（架构 §3.2）
@@ -102,6 +108,12 @@ data class RunOptions(
  *
  * [AbortSignal.isAborted] 在每步开头、每次 `withTimeoutOrNull` 之后都会被查。
  * 它刻意不是挂起函数 —— 用户按停止时，不该出现「先等一圈再停」的中间态。
+ *
+ * ## 为什么它现在的类型是 `TaskRunnerPort`（2026-10 Port 收口）
+ *
+ * UI 驱动主循环的**唯一入口**已经收进 `core:ports`（见 `core/ports/Runtime.kt`）。
+ * [AgentLoop] 直接实现它 —— 于是 `:ui` 依赖 Port 而不是依赖本具体类，
+ * 那条 `:ui → :agent` 的 Gradle 边在「第 3 步」摘掉时不需要改动这里一行。
  */
 class AgentLoop(
     private val model: ModelPort,
@@ -126,9 +138,9 @@ class AgentLoop(
      * 引擎拿到流式 API 后由 `:app` 换实现，主循环与本事件契约都不用动。
      */
     private val tokenStream: TokenStream = TokenStream.SINGLE_SHOT,
-) {
+) : TaskRunnerPort {
 
-    fun run(task: TaskSpec, opts: RunOptions = RunOptions()): Flow<TaskEvent> = flow {
+    override fun run(task: TaskSpec, opts: RunOptions): Flow<TaskEvent> = flow {
         val budget = LoopBudget.forTier(health.memoryTier())
 
         // ── 断点恢复：预算累计原样带回（宋砚秋：丢了等于每次暂停白送一张预算卡）

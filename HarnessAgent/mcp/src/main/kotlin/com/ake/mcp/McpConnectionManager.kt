@@ -1,6 +1,12 @@
 package com.ake.mcp
 
 import com.ake.core.common.AkeLog
+// ★ 这些形状已下移到 `:core:ports`（同包 alias 见 McpServerConfig.kt）。
+//   必须显式 import core 的原类：typealias 不代理嵌套 classifier，
+//   否则 `McpServerState.Phase.READY` / `McpServerConfig.DEFAULT_LOOPBACK_ONLY` 都解析不到。
+import com.ake.core.ports.McpServerConfig
+import com.ake.core.ports.McpServerState
+import com.ake.core.ports.TransportKind
 import io.ktor.client.HttpClient
 import io.ktor.client.request.headers
 import io.modelcontextprotocol.kotlin.sdk.client.Client

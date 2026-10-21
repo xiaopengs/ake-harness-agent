@@ -79,12 +79,14 @@ data class LoopBudget(
 }
 
 /**
- * 预算累计。**这四个字段必须与 `LoopCheckpoint` 同口径（「累计终值」而非增量）** ——
- * `core/contract/Records.kt` 的 `TaskBudgetPatch` 注释里也写了同一条约定。
+ * ★★ `UsageTotals` 的主体已下移到 `com.ake.core.ports.UsageTotals`（2026-10 Port 收口）。
+ *
+ * 它原先定义在本文件底部，与 core 那份逐字段相同。这里改成 `typealias` 转发，
+ * 于是「`:agent` 累计出来的 usage」与「UI 从 `LoopBudgetPort` 读进来的 usage」是同一个类型，
+ * 不可能出现「两本预算账」。
+ *
+ * ★ 为什么这张预算表本身没有跟着下移：`LoopBudgetPort` 只需要一张**扁平的事实表**
+ * （`LoopBudgetFacts`），下面的 [LoopBudget] 还带着降级阶梯与分段配额等 UI 永不调用的实现，
+ * 那种东西搬进契约层谁都能改 UI 侧的预算算法了 —— 这个取舍 `core/ports/Runtime.kt` 已经写死。
  */
-data class UsageTotals(
-    val stepsDone: Int = 0,
-    val prefillTokensTotal: Long = 0L,
-    val decodeTokensTotal: Long = 0L,
-    val elapsedMsTotal: Long = 0L,
-)
+public typealias UsageTotals = com.ake.core.ports.UsageTotals

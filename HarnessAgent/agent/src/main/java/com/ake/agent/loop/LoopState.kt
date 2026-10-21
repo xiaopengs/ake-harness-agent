@@ -411,18 +411,13 @@ class LoopState internal constructor(
     }
 }
 
-/** 任务产出。 */
-data class TaskOutcome(
-    val taskId: TaskId,
-    val reason: TerminalReason,
-    val answer: String?,
-    val evidenceRefs: List<String>,
-    val stepsDone: Int,
-    val prefillTokensTotal: Long,
-    val decodeTokensTotal: Long,
-    val elapsedMsTotal: Long,
-    /** 通过 `local.export_records` 导出的表格文本（md/csv/json）。 */
-    val exported: String? = null,
-) {
-    val isSuccess: Boolean get() = reason.isSuccess
-}
+/**
+ * ★★ `TaskOutcome` 的主体已下移到 `com.ake.core.ports.TaskOutcome`（2026-10 Port 收口）。
+ *
+ * 它与 core 那份逐字段相同（含 `exported` 的 "md/csv/json" 口径）。这里改成 `typealias` 转发，
+ * 于是「主循环产出」与「UI 渲染 `TaskEvent.Terminal.outcome`」是同一个类型。
+ *
+ * ★ **判定仍在 `:agent`**：本结果类只承载产出，**谁判定成功与否是 `Verifier` 的职责** ——
+ * `isSuccess` 那行 getter 委托给 `TerminalReason`，本身不含任何判据。UI 只读不算，不去重算。
+ */
+public typealias TaskOutcome = com.ake.core.ports.TaskOutcome

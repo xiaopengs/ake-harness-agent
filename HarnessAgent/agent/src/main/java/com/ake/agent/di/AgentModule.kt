@@ -2,6 +2,7 @@ package com.ake.agent.di
 
 import com.ake.agent.context.ContextAssembler
 import com.ake.agent.context.InjectionIsolator
+import com.ake.agent.context.NonceSource
 import com.ake.agent.context.PocketDomSerializer
 import com.ake.agent.guard.ContentSanitizer
 import com.ake.agent.guard.DomainPolicy
@@ -14,6 +15,8 @@ import com.ake.agent.planner.DefaultSystemCharter
 import com.ake.agent.planner.StepActionParser
 import com.ake.agent.planner.StepPromptBuilder
 import com.ake.agent.planner.SystemCharterText
+import com.ake.agent.ports.AgentActionRiskPort
+import com.ake.agent.ports.AgentLoopBudgetPort
 import com.ake.agent.tools.CompositeToolRegistry
 import com.ake.agent.tools.LocalToolHost
 import com.ake.agent.tools.LocalToolSource
@@ -23,15 +26,18 @@ import com.ake.core.common.Clock
 import com.ake.core.contract.RiskClass
 import com.ake.core.contract.ToolId
 import com.ake.core.modelapi.ModelPort
+import com.ake.core.ports.ActionRiskPort
 import com.ake.core.ports.BrowserExecutorPort
 import com.ake.core.ports.CheckpointStorePort
 import com.ake.core.ports.DeviceHealthPort
 import com.ake.core.ports.DomPerceptionPort
 import com.ake.core.ports.HumanGate
+import com.ake.core.ports.LoopBudgetPort
 import com.ake.core.ports.MemoryStorePort
 import com.ake.core.ports.ObservationStorePort
 import com.ake.core.ports.PolicyDecisionSink
 import com.ake.core.ports.PolicyPort
+import com.ake.core.ports.TaskRunnerPort
 import com.ake.core.ports.TaskStorePort
 import com.ake.core.ports.ToolPermissionStorePort
 import com.ake.core.ports.ToolRegistryPort
@@ -74,6 +80,18 @@ public abstract class AgentBindingsModule {
     @Singleton
     public abstract fun bindToolRegistry(impl: CompositeToolRegistry): ToolRegistryPort
 
+    /**
+     * ★ UI 驱动主循环的入口：对外只暴露 `TaskRunnerPort` 这一个类型。
+     *
+     * `AgentLoop` 是 `:agent` 的实现类，`TaskRunnerPort` 是 `:core:ports` 的契约。
+     * 绑到这里之后，`:ui` 注入 Port 就够用了，不必也不该知道 `AgentLoop` 的存在 ——
+     * 这是「第 3 步」摘掉 `:ui → :agent` 那条 Gradle 边的**前提**：
+     * 少了这个绑定，UI 除了 `@Inject lateinit var loop: AgentLoop` 之外别无选择。
+     */
+    @Binds
+    @Singleton
+    public abstract fun bindTaskRunnerPort(impl: AgentLoop): TaskRunnerPort
+
     @Binds
     @Singleton
     public abstract fun bindLocalToolHost(impl: ResultCollector): LocalToolHost
@@ -94,6 +112,24 @@ public abstract class AgentBindingsModule {
         @Singleton
         @JvmStatic
         public fun provideDomainPolicy(): DomainPolicy = DomainPolicy.DEFAULT
+
+        /**
+         * 预算只读查询。实现见 `agent/ports/UiFacingPorts.kt`。
+         *
+         * ★ 必须写在 `companion object` 里且带 `@JvmStatic`：本模块的 `@Binds` 是 abstract 成员，
+         * Dagger 要求同一个 `@Module` 里的 `@Provides` 必须是 static，否则
+         * "A @Module may not contain both non-static and abstract binding methods"（真编译实测）。
+         */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideLoopBudgetPort(): LoopBudgetPort = AgentLoopBudgetPort
+
+        /** 风险分级。实现见 `agent/ports/UiFacingPorts.kt`（判定复用护栏那唯一的分类器）。 */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideActionRiskPort(): ActionRiskPort = AgentActionRiskPort
 
         /**
          * nonce 每进程随机：固定 nonce 会让网页内容有机会伪造闭合标记提前跳出数据区

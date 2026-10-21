@@ -5,6 +5,11 @@ import com.ake.core.contract.ToolId
 import com.ake.core.contract.ToolOrigin
 import com.ake.core.contract.ToolResult
 import com.ake.core.contract.ToolSpec
+// ★ 显式 import core 原类（理由见 McpServerConfig.kt 与 McpConnectionManager.kt 的注释）：
+//   同包 alias 只解决「旧坐标还能用」，不代理嵌套 classifier 与伴生对象成员。
+import com.ake.core.ports.McpServerConfig
+import com.ake.core.ports.McpServerState
+import com.ake.core.ports.McpConnectionPort
 import com.ake.core.ports.ToolPermissionStorePort
 import io.ktor.client.HttpClient
 import io.modelcontextprotocol.kotlin.sdk.client.Client
@@ -28,22 +33,23 @@ import kotlinx.coroutines.sync.withLock
  * 本文件的 import 里**没有** `io.modelcontextprotocol.*`（除 `Client`/`RequestOptions` 仅出现在
  * 私有实现细节中）。调用方（`:app` → `:agent`）从头到尾只见 `:core:contract` 的形状。
  */
-interface McpToolFacade {
+/**
+ * ★ 继承而非重抄：`McpToolFacade` 现在**就是** `:core:ports` 的 [McpConnectionPort]，
+ * 只在此基础上多一个 [invoke]。此前本接口把 `configure/discover/setEnabled/states/shutdown`
+ * 五个方法原样重抄了一遍 —— 那时 `:mcp` 与契约层同时存在两个互不相干的同构接口。
+ *
+ * 为什么是继承而不是留着旧接口再写一个 adapter：`:app` 侧有
+ * `McpToolSourceAdapter` 依赖 [McpToolFacade]，继承后 `McpToolAdapter` **同时**满足
+ * `McpToolFacade` 与 `McpConnectionPort`，`:app` 可以直接把同一个实例绑到 Port 上，
+ * 不需要第 4 个类去转发转发。
+ *
+ * 被刻意留在 Port 之外的 [invoke] 不属于 UI：真正调用工具的是 `:agent` 的
+ * `ToolRegistryPort`（注册表把本地工具与 MCP 工具收敛成同一形状），UI 从来不自己调工具。
+ */
+interface McpToolFacade : McpConnectionPort {
 
-    /** 重新装载 server 配置。下线的 server 会被断开。 */
-    suspend fun configure(servers: List<McpServerConfig>)
-
-    /** 全量发现。单台 server 失败不影响其它 server 的结果。 */
-    suspend fun discover(): List<ToolSpec>
-
+    /** 调用一个 MCP 工具。**只有 `:agent` 经 ToolRegistry 会走到这里，UI 不调。** */
     suspend fun invoke(toolId: ToolId, args: Map<String, String>): ToolResult
-
-    suspend fun setEnabled(toolId: ToolId, enabled: Boolean)
-
-    suspend fun states(): List<McpServerState>
-
-    /** 断掉全部连接。App 退到后台 / 用户清除痕迹时调用。 */
-    suspend fun shutdown()
 }
 
 /**
