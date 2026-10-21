@@ -33,6 +33,18 @@ ktor = "3.5.1"
 # ── 持久化（宋砚秋 F5/F6：Room 2.8.5 + BundledSQLiteDriver）
 room = "2.8.5"
 sqliteBundled = "2.7.1"
+# ─────────────────────────────────────────────────────────────────────────────
+# ⚠ 预留坐标（2026-10 起 **全工程暂无模块引用**）
+#
+# 随 `:data` 的 DataStore/Proto 死依赖清理（见 data/build.gradle.kts 头部注释）摘下来的：
+# 依赖边已删，但**版本刻意保留在此**，因为它们都已按文件头部的方式逐一校验过存在。
+# 白删的代价不是「再写一行」的成本，而是下次有人凭记忆填一个没核过的版本 ——
+# 那正是 `ktor-client-plugins-sse` 那条一号红线踩过的坑。
+#
+# 恢复条件：某个 Port 需要一个 `:data` 里的 Store 实现（候选是
+# `SettingsStorePort` / `McpServerStorePort`）时，由 `:data` 方一次性补齐
+# 「插件 + proto 定义 + Store 实现」三件套，届时把下面的标注删掉即可。
+# ─────────────────────────────────────────────────────────────────────────────
 datastore = "1.2.1"
 protobuf = "4.32.1"
 protobufPlugin = "0.9.6"          # com.google.protobuf Gradle 插件（与上面是两回事）
@@ -103,6 +115,7 @@ androidx-room-runtime = { group = "androidx.room", name = "room-runtime", versio
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 androidx-sqlite-bundled = { group = "androidx.sqlite", name = "sqlite-bundled", version.ref = "sqliteBundled" }
+# ★ 预留，暂无模块引用：恢复条件见上面 `[versions]` 区的「预留坐标」注释
 androidx-datastore = { group = "androidx.datastore", name = "datastore", version.ref = "datastore" }
 protobuf-kotlin-lite = { group = "com.google.protobuf", name = "protobuf-kotlin-lite", version.ref = "protobuf" }
 

@@ -25,19 +25,36 @@ rootProject.name = "HarnessAgent"
 
 // ── 模块总表（职责与分层见 01-architecture.md §2.1）
 //
-// L1/L2 纯 Kotlin（零 Android 依赖，JVM 毫秒级单测）：
+// 【2026-10 校正 · 邝随行】本表按**每个模块 build.gradle.kts 里实际 apply 的插件**重排。
+// 校正前它把 `:agent` 列在「纯 Kotlin / 零 Android 依赖」那一组，而事实是：
+//   · `agent/build.gradle.kts` apply 的是 `alias(libs.plugins.androidLibrary)`；
+//   · 它还写着 `implementation(project(":data"))`。
+// 两点都与旧注释相反。新增模块时请同步更新本表，**以实际插件为准**。
+//
+// ── JVM 组：`kotlinJvm`，纯 Kotlin / 零 Android 依赖，可在 JVM 上做毫秒级单测
 //   :core:common      Outcome / AppError / Id 原语 / ULID / Clock / 日志 / 脱敏原语
 //   :core:model-api   ModelPort / GenerationRequest / SessionSpec ...
-//   :core:contract    PocketDom / UiElement / StepAction / TaskRecord ...
+//   :core:contract    PocketDom / UiElement / StepAction / TaskRecord ...（领域单一事实来源）
 //   :core:ports       全部 Port 接口总表
+//   :agent            ❌ 见校正说明 —— 它是 `androidLibrary`，不属于本组
+//   :mcp              MCP 客户端（霍承钧）。ktor 是 KMP 产物、无 Android 绑定，
+//                     所以它虽然处在「实现层」仍是 JVM 模块
+//
+// ── Android 组：`com.android.library`（`:app` 是 `com.android.application`）
 //   :agent            ReAct 主循环 + planner + context（霍承钧）
-//   :mcp              MCP 客户端（霍承钧）
-// L3/L6 Android：
+//                     ★ 它依赖 `:data` —— 依赖方向 L4 → L3（见 agent/build.gradle.kts 原文）
 //   :llm              LiteRT-LM 接入 → ModelPort
 //   :browser          WebView 执行器 + DOM 感知
-//   :data             Room / DataStore / 轨迹落盘（霍承钧）
+//   :data             Room / 轨迹落盘（霍承钧）
+//                     ★ 2026-10 移除了 DataStore + protobuf 死依赖（见该模块头部注释）
 //   :ui               Compose UI（苏映棠）
 //   :app              组合根 + Hilt 装配
+//
+// ★ 关于层号：除上面 `:core:*` 自述的 L1/L2 之外，其余编号不由本文档断言 ——
+//   **真正被编译与 CI 守住的是依赖边，不是层号**。层号只在 `agent/build.gradle.kts`
+//   的「L4 → L3」这类地方被引用，作为读代码时的路标。
+//   （遗留小疑问：`:core:ports` 自述 L1，但它依赖 `:core:contract`（自述 L2），
+//    二者不可能同层。不影响编译，留给后续文档统一时一并处理。）
 //
 // 【模块粒度说明 · 需仲裁】`:core` 按架构 §2.1 原文拆成 4 个子项目，
 // 而不是合成一个 `:core`。原因：`agent/build.gradle.kts`（霍承钧已提交）

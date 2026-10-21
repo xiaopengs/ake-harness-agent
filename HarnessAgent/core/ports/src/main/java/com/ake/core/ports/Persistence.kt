@@ -65,6 +65,30 @@ public interface TaskStorePort {
      * @return 按「最近活动」倒序（`last_activity_at DESC`），最多 [limit] 条。
      */
     public suspend fun recent(limit: Int): List<TaskRecord>
+
+    /**
+     * [recent] 的 `Flow` 版：历史事件列表随写入自动刷新。
+     *
+     * ## ★ 为什么有了 [recent] 还要这一条
+     *
+     * `finish()` 走的是 200ms 合并队列（`:data` 的 `TaskStateWriter`），而 [recent] 是直连 Room 的一次性查询。
+     * 于是「任务刚结束」与「列表重查」这两个时刻必然出现 race —— 用户看到的症状是
+     * **历史列表里少一条刚刚跑完的任务，退出重进才出现**。这不是可接受的刷新时机问题，
+     * 而是缺少回填时会一直存在的竞态（上线验收 2026-10 已裁定：MVP 就加）。
+     *
+     * Room 的 Flow 在**事务提交后**重发，天然与「真正的落盘时刻」对齐，
+     * 调用方不需要再猜什么时候该重查一次。
+     *
+     * ## ★ 它不是写入可靠性的替代品
+     *
+     * 若 `TaskFinish` 根本没走到事务这一步，Flow 一条都不会发。
+     * 「写入被丢弃」那件事由 `TaskStateWriter` + `TaskReconciler` 负责，别指望这里兜得住。
+     *
+     * @param limit 取最近多少条。实现侧应 `coerceAtLeast(0)` 后下发到 SQL `LIMIT`；
+     *              实现侧可以给默认值（`:data` 的 `TaskStoreImpl` 目前给的是 50）。
+     * @return 按「最近活动」倒序（`last_activity_at DESC`），最多 [limit] 条。列表变化时会持续 emit。
+     */
+    public fun observeRecent(limit: Int): Flow<List<TaskRecord>>
 }
 
 public interface CheckpointStorePort {

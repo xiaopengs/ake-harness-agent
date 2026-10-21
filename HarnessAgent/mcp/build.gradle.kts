@@ -1,5 +1,12 @@
 plugins {
     alias(libs.plugins.kotlinJvm)
+    // ★ kotlinx-serialization 编译器插件（`libs.kotlinx.serialization.json` 的配套一半）。
+    //   只有 runtime 依赖、没有这个插件时，代码里一旦出现 `@Serializable` 就会报
+    //   "kotlinx.serialization compiler plugin is not applied to the module" ——
+    //   而 `:mcp` 的 `McpSchemaMapper` / ToolSpec 编解码迟早要用它，届时报错的会是
+    //   「刚写下 @Serializable 的那个人」，一处 unrelated 的位置。现在一次性补齐。
+    //   注意 version.ref 已在 root catalog 的 `serialization` alias 里锁住（= kotlin 版本）。
+    alias(libs.plugins.serialization)
 }
 
 /**

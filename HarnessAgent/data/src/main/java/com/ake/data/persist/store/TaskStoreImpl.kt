@@ -210,10 +210,12 @@ public class TaskStoreImpl(
 
     /**
      * [recent] 的 `Flow` 版：列表随写入自动刷新。契约层（`core/ports` 的 `TaskStorePort`，
-     * 属邝随行）还没有这个方法，所以它在实现侧**先备着**，签名与后续契约保持一致，
-     * 契约补上后只需在接口里加一行、这里补一个 `override` 即可（Kotlin 允许重写时带默认值）。
-     *
-     * 建议契约签名：
+     * ← 契约已由邝随行于 2026-10 补进 `TaskStorePort`，本方法现已是正式的 `override`。
+     * ★ 顺带更正原注释里的一处误判：**Kotlin 不允许重写方法再给参数默认值**
+     *   （编译期实测：`An overriding function is not allowed to specify default values
+     *   for its parameters`）。所以这里的 `DEFAULT_RECENT_LIMIT` 兜底已经撤掉 ——
+     *   `limit` 由调用方显式传。全仓无调用点依赖默认值，改动无副作用。
+     *   契约签名见 `core/ports/Persistence.kt`：
      * ```kotlin
      * public fun observeRecent(limit: Int): Flow<List<TaskRecord>>
      * ```
@@ -227,7 +229,7 @@ public class TaskStoreImpl(
      * （2026-10 上线验收的原话：「Flow 只在事务提交后重发，写入被丢弃时事务根本没发生」）。
      * 那件事由 `TaskStateWriter` + `TaskReconciler` 负责，别指望这里能兜。
      */
-    public fun observeRecent(limit: Int = DEFAULT_RECENT_LIMIT): Flow<List<TaskRecord>> =
+    public override fun observeRecent(limit: Int): Flow<List<TaskRecord>> =
         db.taskDao().observeRecent(limit.coerceAtLeast(0))
             .map { rows -> rows.map(EntityMappers::taskToDomain) }
             // Flow 里崩一个查询会把整条列表订阅打死；这里吞掉并保持上一次的值语义
