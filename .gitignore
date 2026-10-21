@@ -1,0 +1,36 @@
+# ===== 安全：凭据与密钥，绝不可入库 =====
+SECRET.md
+*.jks
+*.keystore
+*.p12
+*.pem
+local.properties
+google-services.json
+
+# ===== 构建产物 =====
+.gradle/
+build/
+**/build/
+!src/**/build/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ===== IDE =====
+*.iml
+.idea/
+.navigation/
+*.ipr
+*.iws
+.DS_Store
+
+# ===== 端侧模型文件（单文件 2.6GB，通过下载服务分发，不入库）=====
+*.task
+*.litertlm
+*.tflite
+*.bin
+*.gguf
+
+# ===== 工具目录 =====
+.codebuddy/
