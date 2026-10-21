@@ -22,6 +22,16 @@ interface CheckpointDao {
     suspend fun byTask(taskId: String): TaskCheckpointEntity?
 
     /**
+     * 只问「有没有」，不给数据。
+     *
+     * 给对账用的（有无断点决定孤儿收敛成「可恢复的 PAUSED」还是「终态 ABORTED」）。
+     * 刻意不用 [byTask]：那个会把 R1 的 `scratchpadEnc` 密文一起拉进内存，
+     * 而它在这个路径上一个字节都用不上。
+     */
+    @Query("SELECT COUNT(*) FROM task_checkpoint WHERE task_id = :taskId")
+    suspend fun countOfTask(taskId: String): Int
+
+    /**
      * 可恢复清单：断点存在 **且** 任务仍处于中间态。
      *
      * 「进程被杀后下次启动改写为 CRASH_RECOVERABLE」的判据就是这两条同时成立 ——

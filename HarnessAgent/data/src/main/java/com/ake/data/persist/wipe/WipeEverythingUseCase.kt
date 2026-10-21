@@ -9,6 +9,7 @@ import com.ake.core.common.AkeLog
 import com.ake.data.persist.db.AkeDatabase
 import com.ake.data.persist.payload.PayloadStore
 import com.ake.data.persist.store.MemoryStoreImpl
+import com.ake.data.persist.write.TaskStateWriter
 import com.ake.data.persist.write.TraceBufferWriter
 import java.io.File
 import java.security.KeyStore
@@ -57,6 +58,7 @@ class WipeEverythingUseCase(
     private val context: Context,
     private val db: AkeDatabase,
     private val writer: TraceBufferWriter,
+    private val state: TaskStateWriter,
     private val payloads: PayloadStore,
     private val memory: MemoryStoreImpl,
     private val keystoreAlias: String = KEY_ALIAS,
@@ -71,7 +73,9 @@ class WipeEverythingUseCase(
             KeyStore.getInstance(KEYSTORE).apply { load(null); deleteEntry(keystoreAlias) }
         }.onFailure { AkeLog.w(TAG, "keystore delete failed: ${it.message}") }
 
-        // ② 停在途写入
+        // ② 停在途写入。★ 两条泳道都要停 —— 只停轨迹那一条的话，
+        //    状态泳道里的 `TaskFinish` 会在删完库之后把行重新写回来（看着像「清不掉」的灵异现象）。
+        state.stopAndDropQueued()
         writer.stopAndDropQueued()
 
         // ③ 删 Room 库文件（含 -wal / -shm）

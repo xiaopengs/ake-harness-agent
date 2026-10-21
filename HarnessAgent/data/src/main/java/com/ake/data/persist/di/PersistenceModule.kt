@@ -20,6 +20,7 @@ import com.ake.data.persist.db.AkeMigrations
 import com.ake.data.persist.db.AkePragmaConfig
 import com.ake.data.persist.db.AkePragmaDriver
 import com.ake.data.persist.payload.PayloadStore
+import com.ake.data.persist.recovery.TaskReconciler
 import com.ake.data.persist.redact.PersistenceRedactionGate
 import com.ake.data.persist.store.CheckpointStoreImpl
 import com.ake.data.persist.store.MemoryStoreImpl
@@ -33,6 +34,8 @@ import com.ake.data.persist.store.ToolPermissionStoreImpl
 import com.ake.data.persist.store.TraceStoreImpl
 import com.ake.data.persist.write.PersistenceGovernor
 import com.ake.data.persist.write.PersistenceMetrics
+import com.ake.data.persist.write.TaskLivenessRegistry
+import com.ake.data.persist.write.TaskStateWriter
 import com.ake.data.persist.write.TraceBufferWriter
 import com.ake.data.persist.wipe.WipeEverythingUseCase
 import dagger.Binds
@@ -182,6 +185,38 @@ public abstract class PersistenceBindingsModule {
         @Provides
         @Singleton
         @JvmStatic
+        public fun provideLiveness(): TaskLivenessRegistry = TaskLivenessRegistry()
+
+        /**
+         * 孤儿对账器。
+         *
+         * ★ 它是 `TaskStateWriter` 的构造参数之一 ⇒ ** writer 单例一装配就自触发一轮 sweep **
+         * （见 `TaskStateWriter.init`）。这是本轮的关键接线：冷启动后第一次触库之前，
+         * 遗留的 RUNNING 行就已经被收敛了，UI 永远不会显示一个「正在跑」的死任务。
+         *
+         * ★ 它**不是** WorkManager 周期任务：那样的周期会被系统按 idle 条件推迟，
+         * 而我们需要的是「每次进程起来都先扫一眼」的确定性。
+         * 周期性复查可以后续由 `:app` 用 WorkManager 接 `sweep()` 补上（低频，非必需）。
+         */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideReconciler(
+            db: AkeDatabase,
+            liveness: TaskLivenessRegistry,
+            clock: Clock,
+            metrics: PersistenceMetrics,
+        ): TaskReconciler = TaskReconciler(
+            taskDao = db.taskDao(),
+            checkpointDao = db.checkpointDao(),
+            liveness = liveness,
+            clock = clock,
+            metrics = metrics,
+        )
+
+        @Provides
+        @Singleton
+        @JvmStatic
         public fun provideRedactionGate(cipher: FieldCipher): PersistenceRedactionGate =
             PersistenceRedactionGate(cipher)
 
@@ -202,15 +237,49 @@ public abstract class PersistenceBindingsModule {
             metrics = metrics,
         )
 
+        /**
+         * 任务状态类的可靠写入通道。
+         *
+         * ★ 与 [provideWriter] 用的是**同一个 `writeScope`**（同一个单线程 dispatcher），
+         * 这样 §6.2「单写者」这条纪律不会被打破：两条泳道的消费者在同一个线程上
+         * 协作式地串行执行，Room 的事务不会互相撞锁。
+         * 轨迹那边的 200 ms 合并延迟与这里是互相独立的（各有独立的排水协程）。
+         */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideStateWriter(
+            db: AkeDatabase,
+            writeScope: CoroutineScope,
+            governor: PersistenceGovernor,
+            metrics: PersistenceMetrics,
+            reconciler: TaskReconciler,
+        ): TaskStateWriter = TaskStateWriter(
+            db = db,
+            writeScope = writeScope,
+            governor = governor,
+            metrics = metrics,
+            reconciler = { reconciler.sweep() },
+        )
+
         @Provides
         @Singleton
         @JvmStatic
         public fun provideTaskStore(
             db: AkeDatabase,
-            writer: TraceBufferWriter,
+            state: TaskStateWriter,
             gate: PersistenceRedactionGate,
             clock: Clock,
-        ): TaskStoreImpl = TaskStoreImpl(db, writer, gate, clock)
+            liveness: TaskLivenessRegistry,
+            reconciler: TaskReconciler,
+        ): TaskStoreImpl = TaskStoreImpl(
+            db = db,
+            state = state,
+            gate = gate,
+            clock = clock,
+            liveness = liveness,
+            reconciler = reconciler,
+        )
 
         @Provides
         @Singleton
@@ -226,9 +295,9 @@ public abstract class PersistenceBindingsModule {
         @JvmStatic
         public fun provideCheckpointStore(
             db: AkeDatabase,
-            writer: TraceBufferWriter,
+            state: TaskStateWriter,
             gate: PersistenceRedactionGate,
-        ): CheckpointStoreImpl = CheckpointStoreImpl(db, writer, gate)
+        ): CheckpointStoreImpl = CheckpointStoreImpl(db, state, gate)
 
         /** 行反查投影：store 层不认识 Room Entity（§3.1 铁律 1 的延伸）。 */
         @Provides
@@ -251,8 +320,8 @@ public abstract class PersistenceBindingsModule {
         @JvmStatic
         public fun providePolicySink(
             db: AkeDatabase,
-            writer: TraceBufferWriter,
-        ): PolicyDecisionSinkImpl = PolicyDecisionSinkImpl(db, writer)
+            state: TaskStateWriter,
+        ): PolicyDecisionSinkImpl = PolicyDecisionSinkImpl(db, state)
 
         @Provides
         @Singleton
@@ -289,12 +358,14 @@ public abstract class PersistenceBindingsModule {
             @ApplicationContext context: Context,
             db: AkeDatabase,
             writer: TraceBufferWriter,
+            state: TaskStateWriter,
             payloads: PayloadStore,
             memory: MemoryStoreImpl,
         ): WipeEverythingUseCase = WipeEverythingUseCase(
             context = context,
             db = db,
             writer = writer,
+            state = state,
             payloads = payloads,
             memory = memory,
         )

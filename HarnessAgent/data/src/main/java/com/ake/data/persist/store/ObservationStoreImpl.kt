@@ -7,8 +7,8 @@ import com.ake.core.ports.ObservationStorePort
 import com.ake.data.persist.db.mapper.EntityMappers
 import com.ake.data.persist.payload.PayloadStore
 import com.ake.data.persist.redact.PersistenceRedactionGate
-import com.ake.data.persist.write.Op
 import com.ake.data.persist.write.TraceBufferWriter
+import com.ake.data.persist.write.TraceOp
 
 /**
  * `ObservationStorePort` 实现。
@@ -34,7 +34,10 @@ public class ObservationStoreImpl(
 ) : ObservationStorePort {
 
     /**
-     * @return false = 队列满，这一条被丢弃（writer 会写一条 `TRACE_DROPPED` 自证）。
+     * @return false = 队列满，这一条被丢弃。
+     *
+     * ★ 丢弃落在**轨迹泳道**，是有意的背压出口；writer 会在排水时按任务聚合写一条
+     * `TRACE_DROPPED` 自证（自证本身不会丢 —— 它是在事务里生成的）。
      */
     override fun append(summary: ObservationSummary, payload: String?): Boolean {
         val row = EntityMappers.observationToEntity(summary).run {
@@ -50,7 +53,7 @@ public class ObservationStoreImpl(
         } else {
             row.copy(payloadState = PayloadState.EXTERNAL, payloadCodec = "gzip")
         }
-        return writer.append(Op.Observation(withState, payload))
+        return writer.append(TraceOp.Observation(withState, payload))
     }
 
     override suspend fun loadPayload(observationId: String): String? {

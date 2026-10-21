@@ -125,6 +125,67 @@ interface TaskDao {
     @Query("UPDATE task SET starred = :starred WHERE id = :id")
     suspend fun setStarred(id: String, starred: Int)
 
+    // ── 孤儿对账（`TaskReconciler`，2026-10 P1） ─────────────────────
+    //
+    // ★ **为什么判定必须写在 UPDATE 的 WHERE 里，而不是「先查出来再 update」**：
+    // 「判定」和「写入」之间隔着一次主页 yielded 的空隙，而正常的 finish 可能正好在那时发生。
+    // 下面两条 UPDATE 自带守卫，幂等，且不可能把已经到达的终态掀回中间态 ——
+    // 把活着的任务误判成孤儿，是比漏扫严重得多的后果。
+
+    /**
+     * 孤儿候选：**活跃态 + 心跳过期**。命中 idx_task_last_activity。
+     *
+     * @param expectedStatus 只收 `{CREATED, RUNNING}`（由调用方从 `TaskStatus.ACTIVE` 取）。
+     * @return 按心跳升序（最老的先收敛），每轮上限见 `TaskReconciler.BATCH`。
+     */
+    @Query(
+        """
+        SELECT id FROM task
+         WHERE status = :expectedStatus
+           AND last_activity_at < :before
+         ORDER BY last_activity_at ASC
+         LIMIT :limit
+        """,
+    )
+    suspend fun staleActiveIds(expectedStatus: String, before: Long, limit: Int): List<String>
+
+    /**
+     * 有断点的孤儿 → **可恢复的暂停**（`finished_at` 保持 NULL，所以不会被
+     * `pickForDigest` / `finished()` 当成已结束的捞走 —— 它还活着，用户还能点继续）。
+     *
+     * @return 受影响行数；0 = 它在扫描与处理之间已经正常收尾了。
+     */
+    @Query(
+        """
+        UPDATE task
+           SET status = 'PAUSED',
+               terminal_reason = NULL,
+               finished_at = NULL,
+               last_activity_at = :at
+         WHERE id = :id
+           AND status IN ('CREATED','RUNNING')
+        """,
+    )
+    suspend fun convergeToPaused(id: String, at: Long): Int
+
+    /**
+     * 无断点的孤儿 → 终态 ABORTED，**必须写 `finished_at`**：
+     * 这是它能被保留策略（`pickForDigest` 以 `finished_at IS NOT NULL` 为入口）接管的唯一凭证。
+     * 只写 status 不写 finished_at，等于把一个「永久 RUNNING」换成一个「永久僵尸」。
+     */
+    @Query(
+        """
+        UPDATE task
+           SET status = 'ABORTED',
+               terminal_reason = :reason,
+               finished_at = :at,
+               last_activity_at = :at
+         WHERE id = :id
+           AND status IN ('CREATED','RUNNING')
+        """,
+    )
+    suspend fun convergeAborted(id: String, at: Long, reason: String): Int
+
     // ── §4.5 清理作业 ────────────────────────────
 
     /** FULL → DIGEST 的候选：按最后活动排序，小批量（每批 20）。 */

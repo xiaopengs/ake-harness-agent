@@ -7,17 +7,20 @@ import com.ake.core.ports.CheckpointStorePort
 import com.ake.data.persist.db.AkeDatabase
 import com.ake.data.persist.db.mapper.EntityMappers
 import com.ake.data.persist.redact.PersistenceRedactionGate
-import com.ake.data.persist.write.Op
-import com.ake.data.persist.write.TraceBufferWriter
+import com.ake.data.persist.write.StateOp
+import com.ake.data.persist.write.TaskStateWriter
 
 /**
  * `CheckpointStorePort` 实现。
  *
- * ## 为什么断点走 P0（不可丢）
+ * ## 为什么断点走 `TaskStateWriter`（不可丢泳道）
  *
  * 断点里装着**四个预算累计**。丢一次断点，用户点「继续」后的这个任务
  * 就拿到一整份全新的预算 —— 宋砚秋的原话是「等于每次暂停白送一张预算卡」。
  * 这个后果（用户以为任务被限流了，其实是我们的账记错了）比丢几行轨迹严重得多。
+ *
+ * 2026-10 之前它是 `TraceBufferWriter` 的 P0 优先级 —— 而那个 P0 通道同样是
+ * `DROP_OLDEST` 的：标注没有约束力，只有类型有。现在它连 compile 都进不去轨迹泳道。
  *
  * ## scratchpad 是 R1
  *
@@ -26,14 +29,15 @@ import com.ake.data.persist.write.TraceBufferWriter
  */
 public class CheckpointStoreImpl(
     private val db: AkeDatabase,
-    private val writer: TraceBufferWriter,
+    private val state: TaskStateWriter,
     private val gate: PersistenceRedactionGate,
 ) : CheckpointStorePort {
 
     override suspend fun save(cp: LoopCheckpoint) {
         val enc = cp.scratchpad?.takeIf { it.isNotBlank() }
             ?.let { gate.sealField(it, cp.taskId.value.toByteArray()).blob }
-        writer.append(Op.Checkpoint(EntityMappers.checkpointToEntity(cp, enc)))
+        // ★ 断点必须进不可丢泳道：四个预算累计全在里面，丢一次就是「暂停白送一张预算卡」。
+        state.submit(StateOp.Checkpoint(EntityMappers.checkpointToEntity(cp, enc)))
     }
 
     override suspend fun load(taskId: TaskId): LoopCheckpoint? {
@@ -59,7 +63,8 @@ public class CheckpointStoreImpl(
      * 这是全模块唯一一处「刻意阻塞主流程」的写入，因为正确性依赖它。
      */
     suspend fun flushBeforeSuspend() {
-        writer.flushNow()
+        // 状态泳道先落干净。轨迹行更新一笔诊断数据而已，优先级排在它后面。
+        state.flushNow()
     }
 
     companion object {

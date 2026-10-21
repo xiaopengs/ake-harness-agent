@@ -6,8 +6,8 @@ import com.ake.core.contract.StepRecord
 import com.ake.core.ports.TraceStorePort
 import com.ake.data.persist.db.AkeDatabase
 import com.ake.data.persist.db.mapper.EntityMappers
-import com.ake.data.persist.write.Op
 import com.ake.data.persist.write.TraceBufferWriter
+import com.ake.data.persist.write.TraceOp
 
 /**
  * `TraceStorePort` 实现。
@@ -16,6 +16,9 @@ import com.ake.data.persist.write.TraceBufferWriter
  *
  * `step` 是「每步一行」的常规行，走 P1。队列满时**丢弃并自证** ——
  * 丢一行轨迹的代价是回放少一步，而阻塞主循环的代价是超时归因失效，两者不对等。
+ *
+ * ★ 这条「允许丢弃」的语义 2026-10 之后**仍然成立**，但它只覆盖轨迹类：
+ * 任务状态类（含断点与审计）已经整体迁出去，见 `com.ake.data.persist.write.TaskStateWriter`。
  *
  * ## 读：`load()` 是有损的
  *
@@ -32,7 +35,7 @@ public class TraceStoreImpl(
 
     override suspend fun append(step: StepRecord) {
         writer.append(
-            Op.Step(
+            TraceOp.Step(
                 EntityMappers.stepToEntity(
                     rec = step,
                     actionKey = codec.actionKey(step.action),
