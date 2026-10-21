@@ -1,8 +1,9 @@
 package com.ake.ui.spi
 
 import android.content.Context
-import com.ake.mcp.McpServerConfig
-import com.ake.mcp.TransportKind
+import com.ake.core.ports.McpServerConfig
+import com.ake.core.ports.McpServerStorePort
+import com.ake.core.ports.TransportKind
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -29,17 +30,29 @@ import javax.inject.Singleton
  *  - **Header 是明文落盘的**，与 DataStore 版本同样受「不要放长期凭据」的约束，
  *    UI 上对此有明示提示。
  *
- * 等 `:data` 提供 `McpServerStorePort`，把本类换成那个实现即可，调用方只认 `McpServerStore`。
+ * 等 `:data` 提供真正的 `McpServerStorePort` 实现，把本类换成那个即可 ——
+ * 调用方（[com.ake.ui.feature.mcp.McpViewModel]）只认 Port 契约，不认本类。
+ *
+ * ## ★ 2026-10 跨层依赖整改：本类现在**实现** `core:ports` 的 [McpServerStorePort]
+ *
+ * 它本来就是这份清单的唯一实现，只是此前没对上契约的名字，于是调用方
+ * 只能按具体类型 `McpServerStore` 注入。现在它显式 `implements` Port，
+ * 并在 `UiRuntimeModule` 里 `@Binds` 到 `McpServerStorePort` ——
+ * 这一步之后 `:ui` 源码里再没有 `:mcp` 的符号，`:data` 的实现将来是纯替换。
+ *
+ * ⚠ **给邝随行的交接事项**：`:data` 一旦落地它自己的 `McpServerStorePort` 实现，
+ *   请删掉 `UiRuntimeModule.bindMcpServerStore` 那一条 `@Binds`，
+ *   否则同一个 Port 有两个绑定，Hilt 图会直接报 duplicate binding。
  */
 @Singleton
 public class McpServerStore @Inject constructor(
     @ApplicationContext private val ctx: Context,
-) {
+) : McpServerStorePort {
 
     private val mutex = Mutex()
     private val file: File get() = File(File(ctx.filesDir, "mcp"), "servers.json")
 
-    public suspend fun load(): List<McpServerConfig> = withContext(Dispatchers.IO) {
+    override suspend fun load(): List<McpServerConfig> = withContext(Dispatchers.IO) {
         mutex.withLock {
             val f = file
             if (!f.exists()) return@withContext emptyList()
@@ -71,7 +84,7 @@ public class McpServerStore @Inject constructor(
         }
     }
 
-    public suspend fun save(list: List<McpServerConfig>): Unit = withContext(Dispatchers.IO) {
+    override suspend fun save(list: List<McpServerConfig>): Unit = withContext(Dispatchers.IO) {
         mutex.withLock {
             runCatching {
                 file.parentFile?.mkdirs()
@@ -96,14 +109,19 @@ public class McpServerStore @Inject constructor(
         }
     }
 
-    public suspend fun upsert(config: McpServerConfig) {
+    override suspend fun upsert(config: McpServerConfig) {
         val cur = load().toMutableList()
         val idx = cur.indexOfFirst { it.id == config.id }
         if (idx >= 0) cur[idx] = config else cur += config
         save(cur)
     }
 
-    public suspend fun remove(id: String) {
+    override suspend fun remove(id: String) {
         save(load().filterNot { it.id == id })
+    }
+
+    /** 清空全部清单。一键清除走的就是这里。 */
+    override suspend fun clearAll() {
+        save(emptyList())
     }
 }

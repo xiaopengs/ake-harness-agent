@@ -1,12 +1,5 @@
 package com.ake.ui.runtime
 
-import com.ake.agent.context.ContextBudget
-import com.ake.agent.loop.AgentLoop
-import com.ake.agent.loop.LoopBudget
-import com.ake.agent.loop.RunOptions
-import com.ake.agent.loop.TaskEvent
-import com.ake.agent.loop.TerminalReason
-import com.ake.agent.loop.UsageTotals
 import com.ake.core.common.Clock
 import com.ake.core.common.SessionId
 import com.ake.core.common.TaskId
@@ -20,9 +13,18 @@ import com.ake.core.contract.TaskSuspension
 import com.ake.core.contract.ToolResult
 import com.ake.core.ports.AbortSignal
 import com.ake.core.ports.CheckpointStorePort
+import com.ake.core.ports.DEFAULT_MODEL_ID
 import com.ake.core.ports.DeviceHealthPort
+import com.ake.core.ports.LoopBudgetFacts
+import com.ake.core.ports.LoopBudgetPort
+import com.ake.core.ports.MemoryTier
 import com.ake.core.ports.ObservationStorePort
+import com.ake.core.ports.RunOptions
+import com.ake.core.ports.TaskEvent
+import com.ake.core.ports.TaskRunnerPort
 import com.ake.core.ports.TaskStorePort
+import com.ake.core.ports.TerminalReason
+import com.ake.core.ports.UsageTotals
 import com.ake.ui.model.MetricsUi
 import com.ake.ui.model.ObservationUi
 import com.ake.ui.model.RepairUi
@@ -51,6 +53,15 @@ import kotlin.coroutines.cancellation.CancellationException
 /**
  * 任务会话的编排者 —— UI 与 `AgentLoop` 之间**唯一**的那道桥。
  *
+ * ## ★ 本类不引用 `:agent` / `:mcp` / `:data` 的任何类型（2026-10 跨层依赖整改）
+ *
+ * 驱动主循环只认 [TaskRunnerPort]，读预算只认 [LoopBudgetPort] —— 两个都是
+ * `core:ports` 的契约，实现分别由 `:agent` 的 `AgentLoop` 与 `AgentLoopBudgetPort` 提供
+ * （绑定在 `:agent` 自己的 `AgentBindingsModule`，UI 看不见它们）。
+ *
+ * 这一条是「`:ui` 的 Gradle 边能不能摘」的**充要条件**：只要这里还写着 `AgentLoop`，
+ * 那条 `implementation(project(":agent"))` 就摘不掉，补多少个 Port 都是合规剧场。
+ *
  * ## 为什么它必须存在
  *
  * `AgentLoop.run()` 返回的是一条**冷 Flow**，而且「最后一条事件一定是 Terminal」。
@@ -72,7 +83,8 @@ import kotlin.coroutines.cancellation.CancellationException
  */
 @Singleton
 public class AgentSessionCoordinator @Inject constructor(
-    private val loop: AgentLoop,
+    private val runner: TaskRunnerPort,
+    private val budgets: LoopBudgetPort,
     private val tasks: TaskStorePort,
     private val checkpoints: CheckpointStorePort,
     private val observations: ObservationStorePort,
@@ -104,8 +116,15 @@ public class AgentSessionCoordinator @Inject constructor(
     /** 最近一次观察的宿主域名 —— 确认弹窗要显示「这个动作会去哪个域名」。 */
     private var lastHost: String = ""
 
-    private val tier get() = health.memoryTier()
-    private val budget: LoopBudget get() = LoopBudget.forTier(tier)
+    private val tier: MemoryTier get() = health.memoryTier()
+
+    /**
+     * 本机硬预算的只读投影（[LoopBudgetFacts]）。
+     *
+     * 走 [LoopBudgetPort] 而不是直接读 `:agent` 的 `LoopBudget`：后者带着降级阶梯与分段配额，
+     * 那是主循环自己的账本。UI 只显示，不参与算预算。
+     */
+    private val budget: LoopBudgetFacts get() = budgets.forTier(tier)
 
     // ──────────────────────────────────────────── 启动 / 恢复 / 停止
 
@@ -162,14 +181,14 @@ public class AgentSessionCoordinator @Inject constructor(
                         goalPreview = trimmed.take(120),
                         status = TaskStatus.CREATED,
                         modelId = DEFAULT_MODEL_ID,
-                        contextWindow = ContextBudget.forTier(tier).workingWindow,
+                        contextWindow = budget.workingWindowTokens,
                         memoryTier = tier.name,
                     ),
                 )
             }
             startClock()
             observeTaskRecord(id)
-            loop.run(spec, RunOptions(abort = abortSignal, modelId = DEFAULT_MODEL_ID))
+            runner.run(spec, RunOptions(abort = abortSignal, modelId = DEFAULT_MODEL_ID))
                 .collect { event -> reduce(event) }
         }.also { runJob = it }
     }
@@ -209,7 +228,7 @@ public class AgentSessionCoordinator @Inject constructor(
                 }
                 startClock()
                 observeTaskRecord(id)
-                loop.run(rebuilt, RunOptions(abort = abortSignal, resumeFrom = cp, modelId = DEFAULT_MODEL_ID))
+                runner.run(rebuilt, RunOptions(abort = abortSignal, resumeFrom = cp, modelId = DEFAULT_MODEL_ID))
                     .collect { event -> reduce(event) }
                 return@launch
             }
@@ -219,7 +238,7 @@ public class AgentSessionCoordinator @Inject constructor(
             _state.update { it.copy(runState = RunState.Preparing("正在从断点恢复…"), status = TaskStatus.RUNNING) }
             startClock()
             observeTaskRecord(id)
-            loop.run(spec, RunOptions(abort = abortSignal, resumeFrom = cp, modelId = DEFAULT_MODEL_ID))
+            runner.run(spec, RunOptions(abort = abortSignal, resumeFrom = cp, modelId = DEFAULT_MODEL_ID))
                 .collect { event -> reduce(event) }
         }.also { runJob = it }
     }
@@ -488,7 +507,7 @@ public class AgentSessionCoordinator @Inject constructor(
                     val running = s.runState is RunState.Running || s.runState is RunState.Preparing
                     if (!running) return@update s
                     val elapsed = s.metrics.elapsedMs + TICK_MS
-                    s.copy(metrics = s.metrics.copy(elapsedMs = elapsed).withBudget(budget))
+                    s.copy(metrics = s.metrics.copy(elapsedMs = elapsed).withFacts(budget))
                 }
             }
         }
@@ -510,7 +529,8 @@ public class AgentSessionCoordinator @Inject constructor(
                                 decodeTokens = rec.decodeTokensTotal,
                                 elapsedMs = rec.elapsedMsTotal.coerceAtLeast(s.metrics.elapsedMs),
                                 maxWallClockMs = budget.maxWallClockMs,
-                                budgetRemainingPct = budget.remainingPct(
+                                budgetRemainingPct = budgets.remainingPct(
+                                    tier,
                                     UsageTotals(
                                         stepsDone = rec.stepsDone,
                                         prefillTokensTotal = rec.prefillTokensTotal,
@@ -519,7 +539,7 @@ public class AgentSessionCoordinator @Inject constructor(
                                     ),
                                 ),
                                 contextUsedPct = contextUsedPct(s.metrics.promptTokensLastStep),
-                                contextWindowTokens = ContextBudget.forTier(tier).workingWindow,
+                                contextWindowTokens = budget.workingWindowTokens,
                                 promptTokensLastStep = s.metrics.promptTokensLastStep,
                                 memoryTier = tier.name,
                             ),
@@ -533,7 +553,7 @@ public class AgentSessionCoordinator @Inject constructor(
     }
 
     private fun contextUsedPct(promptTokens: Int): Int {
-        val window = ContextBudget.forTier(tier).usablePromptTokens
+        val window = budget.usablePromptTokens
         if (window <= 0) return 0
         return ((promptTokens.toDouble() / window.toDouble()) * 100).toInt().coerceIn(0, 100)
     }
@@ -542,14 +562,15 @@ public class AgentSessionCoordinator @Inject constructor(
         stepsDone = stepsDone,
         maxSteps = budget.maxSteps,
         maxWallClockMs = budget.maxWallClockMs,
-        contextWindowTokens = ContextBudget.forTier(tier).workingWindow,
+        contextWindowTokens = budget.workingWindowTokens,
         memoryTier = tier.name,
     )
 
-    private fun MetricsUi.withBudget(b: LoopBudget): MetricsUi = copy(
-        maxSteps = b.maxSteps,
-        maxWallClockMs = b.maxWallClockMs,
-        budgetRemainingPct = b.remainingPct(
+    private fun MetricsUi.withFacts(f: LoopBudgetFacts): MetricsUi = copy(
+        maxSteps = f.maxSteps,
+        maxWallClockMs = f.maxWallClockMs,
+        budgetRemainingPct = budgets.remainingPct(
+            tier,
             UsageTotals(
                 stepsDone = stepsDone,
                 prefillTokensTotal = prefillTokens,
@@ -565,10 +586,13 @@ public class AgentSessionCoordinator @Inject constructor(
 
     public companion object {
         /**
-         * 与 `RunOptions.modelId` 的默认值、`ModelCatalog.GEMMA4_E2B_ID` 同值。
-         * 这里不 import `:llm`，是为了不让 UI 依赖推理引擎模块。
+         * ★ 直接指向 `core:ports` 的 [DEFAULT_MODEL_ID]，不再自己硬编码一份。
+         *
+         * 「UI 显示用的是 A 模型、实际加载的是 B」这类不一致，根因就是同一个 id 散落在
+         * 三处各写一遍。这里保留这个别名只为不让 `ModelViewModel` 感知 `:core:ports`，
+         * 但**值的唯一事实来源已经收口到 Port** —— 改模型只需改那一处。
          */
-        public const val DEFAULT_MODEL_ID: String = "gemma-4-E2B-it"
+        public const val DEFAULT_MODEL_ID: String = com.ake.core.ports.DEFAULT_MODEL_ID
 
         private const val TICK_MS: Long = 500L
     }

@@ -4,11 +4,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ake.core.contract.ToolId
 import com.ake.core.contract.ToolSpec
-import com.ake.mcp.McpServerConfig
-import com.ake.mcp.McpServerState
-import com.ake.mcp.McpToolFacade
+import com.ake.core.ports.McpConnectionPort
+import com.ake.core.ports.McpServerConfig
+import com.ake.core.ports.McpServerState
+import com.ake.core.ports.McpServerStorePort
 import com.ake.core.ports.ToolPermissionStorePort
-import com.ake.ui.spi.McpServerStore
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -48,9 +48,9 @@ public data class McpUi(
  */
 @HiltViewModel
 public class McpViewModel @Inject constructor(
-    private val facade: McpToolFacade,
+    private val connections: McpConnectionPort,
     private val permissions: ToolPermissionStorePort,
-    private val store: McpServerStore,
+    private val store: McpServerStorePort,
 ) : ViewModel() {
 
     private val _ui = MutableStateFlow(McpUi())
@@ -61,7 +61,7 @@ public class McpViewModel @Inject constructor(
             store.load().also { list ->
                 _ui.update { it.copy(servers = list) }
                 // 配置装载会断开已下线的 server；不做全量 discover —— 懒连接是刻意的
-                runCatching { facade.configure(list) }
+                runCatching { connections.configure(list) }
             }
             refreshStates()
         }
@@ -96,7 +96,7 @@ public class McpViewModel @Inject constructor(
             store.upsert(cfg)
             val list = store.load()
             _ui.update { it.copy(servers = list, editing = null) }
-            runCatching { facade.configure(list) }
+            runCatching { connections.configure(list) }
             refreshStates()
             _ui.update {
                 it.copy(
@@ -111,7 +111,7 @@ public class McpViewModel @Inject constructor(
             store.remove(id)
             val list = store.load()
             _ui.update { it.copy(servers = list, editing = null, message = "已删除") }
-            runCatching { facade.configure(list) }
+            runCatching { connections.configure(list) }
             refreshStates()
         }
     }
@@ -120,7 +120,7 @@ public class McpViewModel @Inject constructor(
     public fun discover() {
         viewModelScope.launch {
             _ui.update { it.copy(busy = true, message = null) }
-            val specs = runCatching { facade.discover() }.getOrDefault(emptyList())
+            val specs = runCatching { connections.discover() }.getOrDefault(emptyList())
             if (specs.isEmpty()) {
                 _ui.update { it.copy(busy = false, message = "没有发现任何工具。检查 server 是否在运行、端口是否正确（默认只允许回环地址）。") }
             } else {
@@ -135,7 +135,7 @@ public class McpViewModel @Inject constructor(
     public fun setToolEnabled(toolId: ToolId, enabled: Boolean) {
         viewModelScope.launch {
             permissions.setEnabled(toolId, enabled)
-            runCatching { facade.setEnabled(toolId, enabled) }
+            runCatching { connections.setEnabled(toolId, enabled) }
         }
     }
 
@@ -151,7 +151,7 @@ public class McpViewModel @Inject constructor(
     /** 断开全部连接。App 退后台或用户想立刻切断外部工具时调用。 */
     public fun disconnectAll() {
         viewModelScope.launch {
-            runCatching { facade.shutdown() }
+            runCatching { connections.shutdown() }
             _ui.update { it.copy(message = "已断开全部外部工具连接") }
             refreshStates()
         }
@@ -160,7 +160,7 @@ public class McpViewModel @Inject constructor(
     public fun dismissMessage(): Unit = _ui.update { it.copy(message = null) }
 
     private suspend fun refreshStates() {
-        val states = runCatching { facade.states() }.getOrDefault(emptyList())
+        val states = runCatching { connections.states() }.getOrDefault(emptyList())
         _ui.update { it.copy(states = states.associateBy { s -> s.id }) }
     }
 }

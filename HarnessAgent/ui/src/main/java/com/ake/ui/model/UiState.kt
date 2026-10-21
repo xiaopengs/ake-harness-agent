@@ -1,7 +1,7 @@
 package com.ake.ui.model
 
-import com.ake.agent.loop.SuspendReason
-import com.ake.agent.loop.TerminalReason
+import com.ake.core.ports.SuspendReason
+import com.ake.core.ports.TerminalReason
 import com.ake.core.contract.StepAction
 import com.ake.core.contract.TaskPhase
 import com.ake.core.contract.TaskSuspension

@@ -2,9 +2,10 @@ package com.ake.ui.feature.task
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ake.core.ports.LocalSettings
+import com.ake.core.ports.SettingsStorePort
 import com.ake.ui.runtime.AgentSessionCoordinator
 import com.ake.ui.runtime.UiHumanGate
-import com.ake.ui.spi.UiLocalSettings
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -24,7 +25,7 @@ import javax.inject.Inject
 public class TaskViewModel @Inject constructor(
     private val coordinator: AgentSessionCoordinator,
     private val gate: UiHumanGate,
-    private val settings: UiLocalSettings,
+    private val settings: SettingsStorePort,
 ) : ViewModel() {
 
     public val session: StateFlow<com.ake.ui.model.TaskSessionUi> = coordinator.state
@@ -32,14 +33,13 @@ public class TaskViewModel @Inject constructor(
     /** 挂起中的确认请求。非空即应弹窗 —— Loop 此刻正挂在这一行上。 */
     public val pendingGate: StateFlow<UiHumanGate.PendingGate?> = gate.pending
 
-    public val localSettings: StateFlow<UiLocalSettings.Values> =
-        settings.values.stateIn(viewModelScope, SharingStarted.Eagerly, UiLocalSettings.Values())
+    public val localSettings: StateFlow<LocalSettings> =
+        settings.values().stateIn(viewModelScope, SharingStarted.Eagerly, LocalSettings())
 
     private val _domPayload = MutableStateFlow<String?>(null)
     public val domPayload: StateFlow<String?> = _domPayload.asStateFlow()
 
     init {
-        viewModelScope.launch { settings.refresh() }
         coordinator.refreshResumable()
     }
 

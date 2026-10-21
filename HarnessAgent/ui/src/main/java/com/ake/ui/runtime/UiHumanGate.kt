@@ -1,8 +1,8 @@
 package com.ake.ui.runtime
 
-import com.ake.agent.guard.SensitiveActionPolicy
 import com.ake.core.contract.StepAction
 import com.ake.core.contract.ToolId
+import com.ake.core.ports.ActionRiskPort
 import com.ake.core.ports.HumanGate
 import com.ake.core.ports.PolicyVerdict
 import com.ake.core.ports.Resolved
@@ -42,6 +42,15 @@ import javax.inject.Singleton
 @Singleton
 public class UiHumanGate @Inject constructor(
     private val permissions: ToolPermissionStorePort,
+    /**
+     * 风险分级。**只查询，不判定** —— 判据仍在 `:agent` 的护栏里（架构 §7.1）。
+     *
+     * ★ 这里刻意注入 `core:ports` 的 [ActionRiskPort] 而不是直接调 `:agent` 的
+     * `SensitiveActionPolicy.classify`：`UiFacingPorts.kt` 里那句注释是对的 ——
+     * 「一旦这里走另一套算法，『弹窗说只读、记录里写着 EXTERNAL_SIDE_EFFECT』就只是时间问题」。
+     * 走 Port 至少保证 UI 与决策记录读的是同一个分类器的输出。
+     */
+    private val risks: ActionRiskPort,
 ) : HumanGate {
 
     /** 一次挂起请求。deferred 的完成即 Loop 的恢复。 */
@@ -71,7 +80,7 @@ public class UiHumanGate @Inject constructor(
             verdict = verdict,
             action = action,
             deferred = deferred,
-            riskClass = SensitiveActionPolicy.classify(action).name,
+            riskClass = risks.classify(action).name,
         )
 
         return try {

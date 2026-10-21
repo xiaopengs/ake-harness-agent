@@ -6,9 +6,10 @@ import com.ake.core.common.Clock
 import com.ake.core.contract.TaskPhase
 import com.ake.core.contract.TaskStatus
 import com.ake.core.ports.CheckpointStorePort
+import com.ake.core.ports.LocalSettings
+import com.ake.core.ports.SettingsStorePort
 import com.ake.core.ports.TaskStorePort
 import com.ake.ui.runtime.AgentSessionCoordinator
-import com.ake.ui.spi.UiLocalSettings
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -57,7 +58,7 @@ public data class HistoryTaskItem(
 @HiltViewModel
 public class HomeViewModel @Inject constructor(
     private val coordinator: AgentSessionCoordinator,
-    private val settings: UiLocalSettings,
+    private val settings: SettingsStorePort,
     private val tasks: TaskStorePort,
     private val checkpoints: CheckpointStorePort,
     private val clock: Clock,
@@ -65,8 +66,8 @@ public class HomeViewModel @Inject constructor(
 
     public val session: StateFlow<com.ake.ui.model.TaskSessionUi> = coordinator.state
 
-    public val localSettings: StateFlow<UiLocalSettings.Values> =
-        settings.values.stateIn(viewModelScope, SharingStarted.Eagerly, UiLocalSettings.Values())
+    public val localSettings: StateFlow<LocalSettings> =
+        settings.values().stateIn(viewModelScope, SharingStarted.Eagerly, LocalSettings())
 
     private val _goal = MutableStateFlow("")
     public val goal: StateFlow<String> = _goal.asStateFlow()
@@ -78,10 +79,7 @@ public class HomeViewModel @Inject constructor(
     public val history: StateFlow<List<HistoryTaskItem>> = _history.asStateFlow()
 
     init {
-        viewModelScope.launch {
-            settings.refresh()
-            refreshHistory()
-        }
+        viewModelScope.launch { refreshHistory() }
     }
 
     public fun onGoalChange(v: String): Unit { _goal.value = v }

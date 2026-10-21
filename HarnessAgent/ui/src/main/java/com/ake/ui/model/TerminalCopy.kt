@@ -1,6 +1,6 @@
 package com.ake.ui.model
 
-import com.ake.agent.loop.TerminalReason
+import com.ake.core.ports.TerminalReason
 
 /**
  * 十二终态 → 人话。
@@ -147,6 +147,94 @@ public fun TerminalReason.copy(): TerminalCopy = when (this) {
         trust = TerminalCopy.Trust.NONE,
         resumableHint = true,
     )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 孤儿回收：不是主循环产生的终态，但同样会写进 `terminal_reason`
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ★ `TaskReconciler` 收敛孤儿任务时写入的两个 `terminal_reason` 取值。
+ *
+ * 它们是**字符串常量而不是 [TerminalReason] 枚举值**，原因写在 `data/.../TaskReconciler.kt`：
+ * 「语义上非主循环路径产生，靠 `ORPHANED_` 前缀即可区分」。
+ * 于是上面那张 `when` 表**容不下它们** —— 那张表刻意没有 `else` 分支，
+ * 靠「枚举新增第 13 项 ⇒ 编译失败」来逼着补文案；给字符串开口子就把这个保护废了。
+ *
+ * 所以这里单独开一张字符串表，并由 [terminalCopyOf] 统一收口。
+ *
+ * ## 这两个文案为什么必须单独讲清楚「能不能恢复」
+ *
+ * 用户在这两个场景下看到的不是一个失败结果，而是**「我明明没让它停，它却结束了」**。
+ * 如果不解释「进程被系统回收过」，用户会以为是模型或 App 出了问题。
+ * 而二者可恢复性不同 —— 跑过一半的留了断点、压根没跑起来的没有 ——
+ * 这点差异直接决定「继续」按钮该不该出现，不能含糊。
+ */
+public object OrphanedReason {
+
+    /**
+     * 任务卡在 `RUNNING` 上，但已经没有任何进程在推进它。
+     *
+     * 典型成因：App 进程被系统杀死（后台回收 / OOM / 用户划掉）、或上次异常退出。
+     * 库里的 `status` 还停在 `RUNNING`，而现实中没人会再往前推它一步。
+     */
+    public const val STALE_RUNNING: String = "ORPHANED_STALE_RUNNING"
+
+    /**
+     * 任务建好了但从未真正开始执行。
+     *
+     * 典型成因：下达任务后、主循环起来之前进程就没了。它一条断点都没有。
+     */
+    public const val NEVER_STARTED: String = "ORPHANED_NEVER_STARTED"
+}
+
+/** 孤儿回收 → 人话。与上面那张枚举表**互不相通**，刻意分开写。 */
+public fun orphanedCopyOf(reason: String): TerminalCopy? = when (reason) {
+
+    OrphanedReason.STALE_RUNNING -> TerminalCopy(
+        title = "任务被中断了，已由系统回收",
+        what = "这个任务还标记为「执行中」，但推进它的进程已经不在了 —— " +
+            "多数是 App 在后台被系统回收、异常退出，或被手动划掉。不是模型出错，" +
+            "也不是你下达的目标有问题，纯粹是这次运行没能走到终点。",
+        nextStep = "已完成的部分已经存成断点，可以直接「继续」从中断的那一步接上，" +
+            "不必从头再跑一遍。也可以重新下达一次任务，那会从头开始。",
+        trust = TerminalCopy.Trust.NONE,
+        resumableHint = true,
+    )
+
+    OrphanedReason.NEVER_STARTED -> TerminalCopy(
+        title = "任务还没开始就被中断了",
+        what = "这个任务刚刚建好、还没真正跑起来，推进它的进程就已经结束了 —— " +
+            "多数是下达后立刻退出了 App，或启动时进程被系统回收。它一步都没有执行过。",
+        nextStep = "这次没有留下任何进度，也没有可恢复的断点，所以「继续」不可用 —— " +
+            "重新下达一次即可，不需要先清理什么。",
+        trust = TerminalCopy.Trust.NONE,
+        resumableHint = false,
+    )
+
+    else -> null
+}
+
+/**
+ * ★ 落库的 `terminal_reason` 字符串 → 人话的**唯一入口**。
+ *
+ * 历史列表渲染的是库里的记录，拿到的是 `terminal_reason` 这个 **TEXT 字段**，
+ * 而不是枚举实例。它可能有三种来路，必须都接住：
+ *
+ * ```
+ *  ① "ORPHANED_*"           ← TaskReconciler 写的孤儿回收常量（纯字符串，不是枚举）
+ *  ② "terminal_completed"   ← TerminalReason.reasonKey，主循环的正常落法
+ *  ③ 其它 / null            ← 返回 null，由调用方决定兜底
+ * ```
+ *
+ * 刻意**不**给 ③ 编一句「看起来没问题」的文案：认不出来的终态，
+ * 正确做法是让上层显示为「状态未知」并提示可重新执行，
+ * 而不是拿一句通用的「任务已结束」把它抹平 —— 那正是这整张表要避免的事。
+ */
+public fun terminalCopyOf(reasonKey: String?): TerminalCopy? {
+    if (reasonKey == null) return null
+    orphanedCopyOf(reasonKey)?.let { return it }
+    return TerminalReason.entries.firstOrNull { it.reasonKey == reasonKey }?.copy()
 }
 
 /**

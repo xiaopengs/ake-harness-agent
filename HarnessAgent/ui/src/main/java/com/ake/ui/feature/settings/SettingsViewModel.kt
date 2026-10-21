@@ -2,12 +2,12 @@ package com.ake.ui.feature.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.ake.agent.context.ContextBudget
-import com.ake.agent.loop.LoopBudget
 import com.ake.core.ports.DeviceHealthPort
+import com.ake.core.ports.LocalSettings
+import com.ake.core.ports.LoopBudgetPort
+import com.ake.core.ports.SettingsStorePort
 import com.ake.ui.spi.PrivacyPort
 import com.ake.ui.spi.StorageUsage
-import com.ake.ui.spi.UiLocalSettings
 import com.ake.ui.spi.WipeReport
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -65,26 +65,32 @@ public data class BudgetFacts(
 @HiltViewModel
 public class SettingsViewModel @Inject constructor(
     private val privacy: PrivacyPort,
-    private val settings: UiLocalSettings,
+    private val settings: SettingsStorePort,
     private val health: DeviceHealthPort,
+    /**
+     * 预算只读查询。★ 注入 `core:ports` 的 [LoopBudgetPort]，不再直接读 `:agent` 的
+     * `LoopBudget` / `ContextBudget` —— 那两个是本文件此前唯一的 `:agent` 引用，
+     * 也是 `ui/build.gradle.kts` 里那条 `:agent` 依赖边在源码里的落点。
+     */
+    private val budgets: LoopBudgetPort,
 ) : ViewModel() {
 
-    public val local: StateFlow<UiLocalSettings.Values> =
-        settings.values.stateIn(viewModelScope, SharingStarted.Eagerly, UiLocalSettings.Values())
+    public val local: StateFlow<LocalSettings> =
+        settings.values().stateIn(viewModelScope, SharingStarted.Eagerly, LocalSettings())
 
     private val _ui = MutableStateFlow(SettingsUi())
     public val ui: StateFlow<SettingsUi> = _ui.asStateFlow()
 
     init {
-        viewModelScope.launch { settings.refresh() }
+        // ★ 没有 `settings.refresh()` 了 —— 装载由 `SettingsStorePort.values()` 的
+        //   `onStart` 自己保证，「调用方必须记得先 refresh」这类隐式契约已移除。
         refreshBudget()
         refreshUsage()
     }
 
     private fun refreshBudget() {
         val tier = health.memoryTier()
-        val b = LoopBudget.forTier(tier)
-        val c = ContextBudget.forTier(tier)
+        val b = budgets.forTier(tier)
         _ui.update {
             it.copy(
                 budget = BudgetFacts(
@@ -94,10 +100,10 @@ public class SettingsViewModel @Inject constructor(
                     perStepMs = b.perStepMs,
                     decodeMs = b.decodeMs,
                     actionMs = b.actionMs,
-                    maxPrefillTokens = b.maxPrefillTokensTotal,
-                    maxDecodeTokens = b.maxDecodeTokensTotal,
-                    workingWindow = c.workingWindow,
-                    outputReserve = c.outputReserve,
+                    maxPrefillTokens = b.maxPrefillTokens,
+                    maxDecodeTokens = b.maxDecodeTokens,
+                    workingWindow = b.workingWindowTokens,
+                    outputReserve = b.outputReserveTokens,
                     topK = b.currentTopK,
                 ),
             )

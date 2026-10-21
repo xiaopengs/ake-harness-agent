@@ -1,10 +1,14 @@
 package com.ake.ui.runtime
 
 import com.ake.core.ports.HumanGate
-import com.ake.mcp.McpToolFacade
+import com.ake.core.ports.McpConnectionPort
+import com.ake.core.ports.McpServerStorePort
+import com.ake.core.ports.SettingsStorePort
 import com.ake.ui.spi.AndroidPrivacyPort
+import com.ake.ui.spi.McpServerStore
 import com.ake.ui.spi.PrivacyPort
 import com.ake.ui.spi.ToolShutdownPort
+import com.ake.ui.spi.UiLocalSettings
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -39,19 +43,44 @@ public abstract class UiRuntimeModule {
     @Binds
     @Singleton
     public abstract fun bindToolShutdown(impl: McpToolShutdown): ToolShutdownPort
+
+    /**
+     * ★ 服务器清单的过渡实现（`McpServerStore` 用 `org.json` 手写，落在 `filesDir/mcp/`）。
+     *
+     * 契约在 `core:ports`，所以它现在是 `:ui` 自己绑定的 Port —— 好处是调用方只认
+     * [McpServerStorePort]，`:data` 将来给出真实现时是纯替换（删掉本条 `@Binds`）。
+     *
+     * ⚠ 两个实现同时存在会 duplicate binding，交接时务必先删这里。
+     */
+    @Binds
+    @Singleton
+    public abstract fun bindMcpServerStore(impl: McpServerStore): McpServerStorePort
+
+    /**
+     * ★ 本地设置的过渡实现（同样是 `org.json` 手写，落在 `filesDir/settings/`）。
+     *
+     * ⚠ 与上面那条同理：`:data` 落地真实现后请删掉本条，否则 duplicate binding。
+     */
+    @Binds
+    @Singleton
+    public abstract fun bindLocalSettings(impl: UiLocalSettings): SettingsStorePort
 }
 
 /**
- * 断开全部 MCP 连接。
+ * 断开全部外部工具连接。
  *
- * 它存在的唯一理由是把 `:mcp` 挡在 `PrivacyPort` 之外：
+ * 它存在的唯一理由是把工具生态挡在 `PrivacyPort` 之外：
  * 隐私那条路径不该认识「MCP」这个词 —— 换掉整个工具生态时它一行都不用改。
+ *
+ * ★ 注入的是 `core:ports` 的 [McpConnectionPort] 契约，不是 `:mcp` 的 facade 类型。
+ * 这一点是 `:ui → :mcp` 那条 Gradle 边能摘掉的前提：注入具体类的话，
+ * 边在源码里就还在，摘了 Gradle 只会变成编译失败。
  */
 @Singleton
 public class McpToolShutdown @Inject constructor(
-    private val facade: McpToolFacade,
+    private val connections: McpConnectionPort,
 ) : ToolShutdownPort {
     override suspend fun shutdown() {
-        runCatching { facade.shutdown() }
+        runCatching { connections.shutdown() }
     }
 }

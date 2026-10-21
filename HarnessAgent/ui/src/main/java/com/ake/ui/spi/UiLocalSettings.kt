@@ -1,17 +1,21 @@
 package com.ake.ui.spi
 
 import android.content.Context
+import com.ake.core.ports.LocalSettings
+import com.ake.core.ports.SettingsStorePort
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -37,45 +41,36 @@ import javax.inject.Singleton
  * 这里用 `org.json` 手写、落在 `filesDir/settings/ui_local.json`，
  * 与 `AndroidPrivacyPort` 的清除范围对齐（会被一并删掉）。
  * 等 `:data` 提供正式的设置 Store，把本类替换掉即可。
+ *
+ * ## ★ 2026-10 跨层依赖整改：本类现在**实现** `core:ports` 的 [SettingsStorePort]
+ *
+ * 此前它自带一份 `Values` 数据类，字段与 `LocalSettings` **逐字段同构** —— 这就是典型的两份定义：
+ * 谁在 Port 侧加一个字段，UI 这边不会报错，只会静默读不到。
+ * 现在删掉 `Values`、直接实现 Port，字段只有一份。
+ *
+ * ⚠ **给邝随行的交接事项**：`:data` 一旦落地它自己的 `SettingsStorePort` 实现，
+ *   请删掉 `UiRuntimeModule.bindLocalSettings` 那一条 `@Binds`，否则 duplicate binding。
  */
 @Singleton
 public class UiLocalSettings @Inject constructor(
     @ApplicationContext private val ctx: Context,
-) {
-
-    public data class Values(
-        /** 任务级域名白名单。空集 = 不限（由 `DomainPolicy` 的跨域名确认兜底）。 */
-        val allowHosts: List<String> = emptyList(),
-        /** 最大步数。`null` = 跟随档位默认值。 */
-        val maxSteps: Int? = null,
-        /** 是否显示「Agent 看到的 DOM 原文」。默认开 —— 这是本 App 的可解释性卖点。 */
-        val showDomPayload: Boolean = true,
-    )
+) : SettingsStorePort {
 
     private val mutex = Mutex()
     private val file: File get() = File(File(ctx.filesDir, "settings"), "ui_local.json")
-    private val _values = MutableStateFlow(Values())
-    public val values: Flow<Values> = _values.asStateFlow()
+    private val _values = MutableStateFlow(LocalSettings())
+    private val loaded = AtomicBoolean(false)
 
-    public suspend fun refresh(): Unit = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            val f = file
-            if (!f.exists()) return@withLock
-            runCatching {
-                val o = JSONObject(f.readText())
-                val hosts = ArrayList<String>()
-                val arr = o.optJSONArray("allowHosts")
-                if (arr != null) for (i in 0 until arr.length()) hosts += arr.optString(i)
-                _values.value = Values(
-                    allowHosts = hosts,
-                    maxSteps = if (o.has("maxSteps")) o.optInt("maxSteps") else null,
-                    showDomPayload = o.optBoolean("showDomPayload", true),
-                )
-            }
-        }
-    }
+    /**
+     * 首次订阅时装载一次，之后由 [update] 推进。
+     *
+     * ★ 刻意用 `onStart` 而不是让调用方手工 `refresh()`：此前 `SettingsViewModel.init`
+     *   里那句 `settings.refresh()` 是**调用方必须记得调用**的隐式契约，
+     *   少调一次就会静默读到默认值 —— 这类「靠人记住」的时序要求迟早会漏。
+     */
+    override fun values(): Flow<LocalSettings> = _values.asStateFlow().onStart { ensureLoaded() }
 
-    public suspend fun update(v: Values): Unit = withContext(Dispatchers.IO) {
+    override suspend fun update(v: LocalSettings): Unit = withContext(Dispatchers.IO) {
         mutex.withLock {
             _values.value = v
             runCatching {
@@ -87,6 +82,31 @@ public class UiLocalSettings @Inject constructor(
                 if (v.maxSteps != null) o.put("maxSteps", v.maxSteps)
                 o.put("showDomPayload", v.showDomPayload)
                 file.writeText(o.toString())
+            }
+        }
+    }
+
+    /** 清空全部设置。一键清除走的就是这里（会被 `WipeEverythingUseCase` 一并删文件）。 */
+    override suspend fun clearAll(): Unit = update(LocalSettings())
+
+    private suspend fun ensureLoaded(): Unit {
+        if (loaded.compareAndSet(false, true)) refresh()
+    }
+
+    private suspend fun refresh(): Unit = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            val f = file
+            if (!f.exists()) return@withLock
+            runCatching {
+                val o = JSONObject(f.readText())
+                val hosts = ArrayList<String>()
+                val arr = o.optJSONArray("allowHosts")
+                if (arr != null) for (i in 0 until arr.length()) hosts += arr.optString(i)
+                _values.value = LocalSettings(
+                    allowHosts = hosts,
+                    maxSteps = if (o.has("maxSteps")) o.optInt("maxSteps") else null,
+                    showDomPayload = o.optBoolean("showDomPayload", true),
+                )
             }
         }
     }

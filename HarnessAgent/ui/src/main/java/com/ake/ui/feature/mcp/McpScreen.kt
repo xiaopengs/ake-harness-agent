@@ -25,9 +25,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.ake.mcp.McpServerConfig
-import com.ake.mcp.McpServerState
-import com.ake.mcp.TransportKind
+import com.ake.core.ports.McpServerConfig
+import com.ake.core.ports.McpServerState
+import com.ake.core.ports.TransportKind
 import com.ake.ui.components.AlertBar
 import com.ake.ui.components.EmptyHint
 import com.ake.ui.components.FactRow

@@ -32,7 +32,9 @@ import com.ake.ui.components.LabeledField
 import com.ake.ui.components.SectionCard
 import com.ake.ui.components.Tag
 import com.ake.ui.model.RunState
+import com.ake.ui.model.TerminalCopy
 import com.ake.ui.model.statusLabelOf
+import com.ake.ui.model.terminalCopyOf
 import com.ake.ui.util.collectAsStateWithLifecycle
 import com.ake.ui.theme.AkeColors
 
@@ -153,6 +155,23 @@ public fun HomeScreen(
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
                                     }
+                                }
+
+                                // ★ 终态原因的人话结论。孤儿回收（ORPHANED_*）**只有走这里才会被看见**：
+                                //   它落库是 ABORTED，单看 status 与「用户自己按了停止」无法区分，
+                                //   用户只会觉得「我没让它停，它怎么结束了」，而不知道进程被回收过。
+                                val endCopy = terminalCopyOf(item.terminalReason)
+                                if (item.phase == TaskPhase.TERMINAL && endCopy != null) {
+                                    Spacer(Modifier.height(2.dp))
+                                    Text(
+                                        endCopy.title,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (endCopy.trust == TerminalCopy.Trust.UNTRUSTED) {
+                                            MaterialTheme.colorScheme.error
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                    )
                                 }
                             }
                             if (item.resumable) {
