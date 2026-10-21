@@ -122,6 +122,8 @@ L1  内核层         :core:common
 | [`HarnessAgent/agent/EXPECTED_CORE_API.md`](HarnessAgent/agent/EXPECTED_CORE_API.md) | `agent`/`mcp`/`data` 对 `core` 的接口契约（跨模块对齐依据） |
 | [`HarnessAgent/mcp/APPFUNCTIONS.md`](HarnessAgent/mcp/APPFUNCTIONS.md) | AppFunctions 对接可行性评估与风险 |
 | [`HarnessAgent/mcp/MCP_BRIDGE.md`](HarnessAgent/mcp/MCP_BRIDGE.md) | `:app` 侧 Hilt 转发桥代码 |
+| [`docs/03-build-and-deploy.md`](docs/03-build-and-deploy.md) | 构建部署：CI 流水线、签名与混淆、模型分发策略、版本策略、故障排查 |
+| [`docs/04-release-gate.md`](docs/04-release-gate.md) | 上线验收：检查清单、风险评估、回归用例、三项裁定、最小真机验证集 |
 
 ---
 
@@ -148,16 +150,45 @@ cd HarnessAgent
 - `:core` —— 含单元测试
 - 依赖红线已排除：`ktor-client-plugins-sse` 该坐标在任何版本都不存在（SSE 已收进 `ktor-client-core`），已从 catalog 移除
 
-**待修复（已知具体位置）**
+### 已修复的阻塞（原清单已清空）
 
-| 阻塞 | 位置 | 影响 |
-|---|---|---|
-| 约 12 处编译错误 | `:browser`（`DomExtractBridge` 重复 companion、`WebViewExecutor` 缺 `onMain`/`PageDigest`、`WebViewFactory:50` CookieManager 类型） | 模块编不过 |
-| `NonceSource` unresolved | `:agent` `AgentModule.kt:105` | 模块编不过 |
-| `DomPerceptionPort`/`BrowserExecutorPort` 无人绑定 | `:app` Hilt 图 | 依赖图断裂，App 无法启动 |
-| 「已暂停」语义不干净 | `:agent` `AgentLoop.pause()` | 目前补发伪 `Terminal(USER_ABORT, ...)`，UI 靠字符串前缀识别，需根治 |
+| 原阻塞 | 修复 |
+|---|---|
+| `:browser` 约 12 处编译错误 | 已修（`DomExtractBridge` 重复 companion、`WebViewExecutor` 缺 `onMain`/`PageDigest`、`WebViewFactory` CookieManager 类型），新增 `BrowserRuntime` 统一生命周期与主线程调度 |
+| `NonceSource` unresolved | 已提到顶层根治 |
+| `DomPerceptionPort`/`BrowserExecutorPort` 无人绑定 | 已补 `BrowserModule`，Hilt 依赖图接通 |
+| 暂停伪 `Terminal` 语义 | 已根治为 `Paused → StatusChanged → Suspended`，并发现暂停写 `finished_at` 会导致任务被保留策略误删 |
+| `recent()` 编译错误 | 已实现（这是历史列表为空的真正根因） |
 
-**环境限制**：开发环境无 Android SDK，上述验证在 Kotlin/JVM 层与 KSP 层完成，尚未产出可安装 APK。
+### ⚠️ 验收结论：NO-GO，不可对外发布
+
+上线验收（[`docs/04-release-gate.md`](docs/04-release-gate.md)）判定为 **NO-GO**，核心理由是一个既定事实：
+
+> **本项目从未产出过可安装 APK，从未在任何真机上运行过一次。**
+
+开发环境无 Android SDK，所有验证停留在 Kotlin/JVM 层与 KSP 层，**AGP 与 R8 从未真正执行**。而这恰好是最危险的组合——本项目的四个核心依赖（JNI、GPU delegate、WebView 渲染、2.6GB 常驻内存）正是"意图正确"与"实际能跑"之间鸿沟最深、且编译期不可见的领域。
+
+**P0 阻塞项**：从未真机运行 / R8 与 AGP 从未执行 / 端侧 OOM（基线已约 3.0GB）/ 延迟与热节流（4.5 秒是旗舰机数字）/ backend SoC 兼容 / 提示注入 / 模型分发的 CDN 与 manifest 尚不存在 / 安全护栏未实测 / 七个模块零测试 / 隐私政策与 Data Safety 未备。
+
+**最需要警惕的一点**：不要把「编译通过」当成「验证通过」。本项目高危点的共性是**静默失效**——JS 回调改名不崩溃、GPU 缺声明时 `initialize()` 照常成功、KV cache 不复用只是悄悄慢 6.8 倍、一键清除失败而 UI 报成功。它们不会让 CI 变红、不会产崩溃栈、不会触发告警，只让用户觉得"这 App 有点怪"。
+
+### 已知待办
+
+- **P1**：`TraceBufferWriter` 是可丢弃队列，而 `Op.TaskUpsert`/`TaskFinish` 也走它 —— 丢弃后果是任务凭空消失或永久 RUNNING 不被清理。需将任务状态类写入改为可靠队列。
+- **P2**：`:ui` 存在跨层依赖（直接引用 `:agent`/`:mcp`/`:data` 的类）。**根源在 Gradle 而非 Kotlin**：只要 `ui/build.gradle.kts` 写着 `implementation(project(":data"))`，L3 的每个 public 类都对 UI 可见，只在 L4/L5 补 Port 而不动 Gradle 依赖是零收益的。
+- **P2**：`:data` 的 protobuf 插件被临时禁用却仍留着 datastore + protobuf 依赖，`src/main/proto/` 为空目录（死依赖）。
+- **P3**：`:mcp` 引了 serialization 但没 apply 插件，目前未用 `@Serializable` 故不报错，后续使用会失败。
+
+### 下一步：最小真机验证集
+
+放行前必须先在真机跑通（详见验收文档 M1–M21），其中 **M10（WebView DOM 抽取）是咽喉项** —— 它失效时的表现是"不崩溃、无日志、就是不动"。
+
+1. **M1–M6 产物存在性**：`buildEnvironment` → `assembleDebug` → 安装 → 冷启 → 建库 → DI 图
+2. **M7–M11 核心链路**：2.6GB 下载校验 → 加载后首次推理 → backend 降级 → DOM 抽取 → 端到端用例（release 包）
+3. **M12–M16 安全与终止**：支付硬禁止 / 提示注入拦截 / 预算耗尽告知 / 弹窗与杀后台 / 清除核验
+4. **M17–M21 性能与合规**：SoC 矩阵（Tensor / 骁龙 / 天玑 / 6GB 低端机）+ OOM + 延迟 + 热节流 + 两个 `specialUse` 前台服务的演示视频
+
+> **把「第一次真机运行」当作本项目事实上的起点，而不是第 18 个 commit 之后的收尾。**
 
 ---
 
@@ -180,5 +211,7 @@ cd HarnessAgent
 | 端侧能力层与工程骨架 | 邝随行（mobile-app-builder） | `core` / `llm` / `browser` / `app` |
 | Agent 引擎与工具生态 | 霍承钧（backend-architect） | `agent` / `mcp` / `data` |
 | UI 层 | 苏映棠（frontend-developer） | `ui` |
+| 构建与部署 | 韩渡川（devops-engineer） | `docs/03-build-and-deploy.md`、CI 流水线、签名与混淆、模型分发策略 |
+| 上线验收 | 关千锤（release-gatekeeper） | `docs/04-release-gate.md`：检查清单、风险评估、回归用例、三项裁定、NO-GO 判定 |
 
 跨成员信息一律经主理人中转：架构文档 → 持久化设计 → 并行开发；霍承钧的接口契约（`EXPECTED_CORE_API.md`）经主理人转交邝随行落地 `core`，UI 的事件需求再回传霍承钧。
