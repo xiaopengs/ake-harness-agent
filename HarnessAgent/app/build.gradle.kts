@@ -66,6 +66,32 @@ android {
         // 端侧 Agent 需要可读的崩溃栈跑真机排障；当前未写仪器化测试，
         // 这里先声明 runner，等 :app 补 androidTest 时直接可用。
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // ─────────────────────────────────────────────────────────────────────
+        // ★ 只保留 64 位 ABI —— 这是**门禁**，不是优化 ★
+        //
+        // 起因（2026-10 首次出包实测）：默认关闭 abiSplit 时出的是 universal 包，
+        // AGP 会把依赖里的**全部** ABI 原样打进 APK。实测产物 native-code 声明了
+        // 4 个 ABI，而 `liblitertlm_jni.so` 只有 arm64-v8a / x86_64 两个版本：
+        //
+        //   lib/arm64-v8a/liblitertlm_jni.so  21 MB   ✓
+        //   lib/x86_64/liblitertlm_jni.so     25 MB   ✓
+        //   lib/armeabi-v7a/  → 只有 graphics.path / sqliteJni，无 litertlm  ✗
+        //   lib/x86/          → 同上                                          ✗
+        //
+        // 后果比「装不上」更糟：armeabi-v7a / x86 机器**能装上**（因为清单里声明了
+        // 该 ABI），启动后在 Engine.initialize() 处才炸 UnsatisfiedLinkError。
+        // 用户视角是「下载 96MB、装好、点开就闪退」，且日志里看不出是 ABI 问题。
+        //
+        // 与其让它在运行时崩，不如让 PackageManager 直接判不兼容
+        // （INSTALL_FAILED_NO_MATCHING_ABIS）—— 反正 2.6 GB 权重在 32 位进程
+        // 的地址空间里本来就放不下，这条路径**不可能**跑通。
+        // 下面的 splits 只在 -Pake.abiSplit=true 时生效，管不到 universal 包，
+        // 所以必须在这里用 abiFilters 兜住。
+        // ─────────────────────────────────────────────────────────────────────
+        ndk {
+            abiFilters += setOf("arm64-v8a", "x86_64")
+        }
     }
 
     // ── 一致性：与其余 10 个模块完全对齐（Java 17 / Kotlin jvmTarget 17）──
