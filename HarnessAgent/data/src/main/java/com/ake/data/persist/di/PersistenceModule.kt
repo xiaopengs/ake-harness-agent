@@ -8,13 +8,16 @@ import com.ake.core.common.Clock
 import com.ake.core.common.FieldCipher
 import com.ake.core.ports.CheckpointStorePort
 import com.ake.core.ports.DeviceHealthPort
+import com.ake.core.ports.McpServerStorePort
 import com.ake.core.ports.MemoryStorePort
 import com.ake.core.ports.ModelAssetStorePort
 import com.ake.core.ports.ObservationStorePort
 import com.ake.core.ports.PolicyDecisionSink
+import com.ake.core.ports.SettingsStorePort
 import com.ake.core.ports.TaskStorePort
 import com.ake.core.ports.ToolPermissionStorePort
 import com.ake.core.ports.TraceStorePort
+import com.ake.core.ports.WipePort
 import com.ake.data.persist.db.AkeDatabase
 import com.ake.data.persist.db.AkeMigrations
 import com.ake.data.persist.db.AkePragmaConfig
@@ -23,11 +26,13 @@ import com.ake.data.persist.payload.PayloadStore
 import com.ake.data.persist.recovery.TaskReconciler
 import com.ake.data.persist.redact.PersistenceRedactionGate
 import com.ake.data.persist.store.CheckpointStoreImpl
+import com.ake.data.persist.store.McpServerStoreImpl
 import com.ake.data.persist.store.MemoryStoreImpl
 import com.ake.data.persist.store.ModelAssetStoreImpl
 import com.ake.data.persist.store.ObservationRow
 import com.ake.data.persist.store.ObservationStoreImpl
 import com.ake.data.persist.store.PolicyDecisionSinkImpl
+import com.ake.data.persist.store.SettingsStoreImpl
 import com.ake.data.persist.store.StepTraceCodec
 import com.ake.data.persist.store.TaskStoreImpl
 import com.ake.data.persist.store.ToolPermissionStoreImpl
@@ -110,6 +115,44 @@ public abstract class PersistenceBindingsModule {
     @Binds
     @Singleton
     public abstract fun bindMemoryStore(impl: MemoryStoreImpl): MemoryStorePort
+
+    // ────────────────────────────────────────────────────────────────────────
+    // 2026-10：接手 `:ui` 那两个过渡实现的 Port
+    //
+    // ⚠⚠ **交接给苏映棠**：下面三条绑定一旦生效，`:ui` 的
+    //    `UiRuntimeModule.bindMcpServerStore` 与 `bindLocalSettings`
+    //    两条 `@Binds` 必须删除，否则同一个 Port 有两个绑定，
+    //    Hilt 编译期直接红（`[Dagger/DuplicateBindings]`）。
+    //    `bindWipePort` 那条不冲突（`:ui` 侧从未绑过 `WipePort`）——
+    //    它要等 `AndroidPrivacyPort` 改成注入 `WipePort` 之后才算完成交接。
+    // ────────────────────────────────────────────────────────────────────────
+
+    /**
+     * MCP 服务器清单（落 Room `mcp_server` 表）。
+     *
+     * 替代 `:ui` 的 `McpServerStore`（`filesDir/mcp/servers.json`，org.json 手写）。
+     * 落 Room 的理由见 `db/entity/ConfigEntities.kt` 的类注释 —— 最硬的一条是
+     * **清除范围只有一处判据**。
+     */
+    @Binds
+    @Singleton
+    public abstract fun bindMcpServerStore(impl: McpServerStoreImpl): McpServerStorePort
+
+    /** 本地设置（落 Room `app_settings` 单行表）。替代 `:ui` 的 `UiLocalSettings`。 */
+    @Binds
+    @Singleton
+    public abstract fun bindSettingsStore(impl: SettingsStoreImpl): SettingsStorePort
+
+    /**
+     * 「一键清除全部痕迹」的执行契约。
+     *
+     * ★ `:ui` 的 `AndroidPrivacyPort` 目前注入的是具体类 `WipeEverythingUseCase`
+     *   （它自己的 `invoke()` 还在，见该类注释的待办）。注入 Port 之后
+     *   `ui/build.gradle.kts` 的 `implementation(project(":data"))` 才能摘掉。
+     */
+    @Binds
+    @Singleton
+    public abstract fun bindWipePort(impl: WipeEverythingUseCase): WipePort
 
     public companion object {
 
@@ -361,6 +404,8 @@ public abstract class PersistenceBindingsModule {
             state: TaskStateWriter,
             payloads: PayloadStore,
             memory: MemoryStoreImpl,
+            mcpServers: McpServerStorePort,
+            settings: SettingsStorePort,
         ): WipeEverythingUseCase = WipeEverythingUseCase(
             context = context,
             db = db,
@@ -368,6 +413,8 @@ public abstract class PersistenceBindingsModule {
             state = state,
             payloads = payloads,
             memory = memory,
+            mcpServers = mcpServers,
+            settings = settings,
         )
     }
 }

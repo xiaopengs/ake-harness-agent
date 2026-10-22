@@ -103,7 +103,13 @@ object JsonTolerant {
         var s = raw.trim()
         s = FENCE.replace(s, "$1")
         s = s.replace('“', '"').replace('”', '"').replace('‘', '\'').replace('’', '\'')
-        s = UNQUOTED_KEY.replace(s, "\"$1\"")
+        // ★★ 这里踩过两个坑，都在 2026-10 补单测时被抓出来：
+        //  ① 原写法是 `"$1"` —— 引用的是**分隔符**（`{` / `, `）而不是 key，
+        //     于是 `{act:` 被修成 `"{"act:`，比不修更不可解析；
+        //  ② 只改成 `$1"$2"` 仍不够：这个正则的**匹配范围包含末尾的冒号**
+        //     （`(…)\s*:`），而替换串里不写回冒号就会把它吃掉 ⇒ `{"act""click"`。
+        //  正确形态：`$1"$2":` —— 分隔符 + 加引号的 key + 补回冒号。
+        s = UNQUOTED_KEY.replace(s, "$1\"$2\":")
         s = TRAILING_COMMA.replace(s, "$1")
         s = SINGLE_QUOTED.replace(s, "\"$1\"")
         s = BARE_NEWLINE_IN_STRING.replace(s, "\\n")

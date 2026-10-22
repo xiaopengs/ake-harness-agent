@@ -3,6 +3,9 @@ package com.ake.data.persist.write
 import androidx.room.withTransaction
 import com.ake.core.common.AkeLog
 import com.ake.data.persist.db.AkeDatabase
+import com.ake.data.persist.db.dao.CheckpointDao
+import com.ake.data.persist.db.dao.PolicyDao
+import com.ake.data.persist.db.dao.TaskDao
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -76,14 +79,48 @@ import kotlinx.coroutines.withTimeout
  * 所以即便是「不可丢」，也必须是一条**有消费者**的通道，而不是到处直接开写。
  */
 public class TaskStateWriter(
-    private val db: AkeDatabase,
+    /** 落盘目标（事务 + 三张表的入口）。生产由 [RoomStateWriteTarget] 包 `AkeDatabase` 提供。 */
+    private val target: StateWriteTarget,
     /** SupervisorJob + **单线程** dispatcher（§6.2 单写者） */
     private val writeScope: CoroutineScope,
     private val governor: PersistenceGovernor,
     private val metrics: PersistenceMetrics,
     /** 启动对账钩子。见 [init] 注释：它不需要挡住新来的 Op。 */
     private val reconciler: (suspend () -> Unit)? = null,
+    /**
+     * 写失败重试的退避基数。默认 `StateLaneCaps.RETRY_BASE_MS`。
+     *
+     * ★ 真实值 250 ms、五次退避合计约 7.75 s —— 这个时长在生产里是**正确的**
+     *   （磁盘抖动需要时间恢复），但让一个单测真的等 7.75 s 只为了验证
+     *   「退避次数对不对」不划算，所以留成可注入的。
+     */
+    private val retryBaseMs: Long = StateLaneCaps.RETRY_BASE_MS,
 ) {
+
+    /**
+     * 生产入口：`AkeDatabase` → [StateWriteTarget]。
+     *
+     * 它是**次级**构造器而不是主构造器，因为「本类的真实依赖是 [StateWriteTarget]」
+     * （这一点在 `StateWriteTarget.kt` 里论证过）：`AkeDatabase` 只是它在生产里的唯一来源。
+     *
+     * ★ 现有的命名实参调用点（`PersistenceModule.provideStateWriter` 写的是
+     *   `TaskStateWriter(db = db, writeScope = ..., governor = ..., metrics = ..., reconciler = ...)`）
+     *   会命中本构造器 —— 两个构造器的首参类型与元数都不同，不存在重载冲突。
+     */
+    public constructor(
+        db: AkeDatabase,
+        writeScope: CoroutineScope,
+        governor: PersistenceGovernor,
+        metrics: PersistenceMetrics,
+        reconciler: (suspend () -> Unit)? = null,
+    ) : this(
+        target = RoomStateWriteTarget(db),
+        writeScope = writeScope,
+        governor = governor,
+        metrics = metrics,
+        reconciler = reconciler,
+        retryBaseMs = StateLaneCaps.RETRY_BASE_MS,
+    )
 
     /**
      * ★ `BufferOverflow.SUSPEND`：**满了排队，不是丢**。
@@ -116,10 +153,26 @@ public class TaskStateWriter(
      * 只有在高水位下才会挂起等待槽位（T2），且有 5 秒封顶。
      *
      * 用于每步一次的 Op（BudgetAdvance / Checkpoint / PolicyDecision）与挂起态 finish。
+     *
+     * ## ★ 已停止（§8.5 一键清除）之后：静默拒绝，**绝不抛 CancellationException**
+     *
+     * 这个分支是 2026-10 补测试时抓到的真实缺陷。
+     * `stopAndDropQueued()` 会 `lane.cancel()`，而原来的实现在 `tryOffer` 失败后
+     * 直接走 `handOff()` ⇒ `lane.send()` 打到一个**已取消**的通道上 ⇒ 抛 `CancellationException`。
+     *
+     * 它的危害比「抛个普通异常」大得多：
+     *  - 协程的取消是**控制流**，`CancellationException` 会顺着结构化并发一路往上冒泡，
+     *    把「我只是想写一行状态」变成「把整个 `coroutineScope` 连带兄弟协程一起取消」；
+     *  - 「清除之后还在写」是**预期之内的时序**（清除与在途的循环谁先谁后没有保证），
+     *    它该有的语义是「这一笔不要了」，而不是「宣布当前作用域被取消」。
+     *
+     * 所以这里与 [flushNow] 保持一致：`stopped` 时直接返回。
+     * 丢弃是**有意的** —— 库马上就要被删掉了，这一笔写不写都不影响结果。
      */
     public suspend fun submit(op: StateOp) {
         val env = Envelope(op, ack = null)
         if (tryOffer(env)) return
+        if (stopped) return
         metrics.recordStateBacklog()
         AkeLog.w(TAG, "state lane at high water (${pending.get()}), waiting for a slot")
         withTimeout(StateLaneCaps.SUBMIT_GRACE_MS) { handOff(env) }
@@ -138,6 +191,14 @@ public class TaskStateWriter(
     ): Boolean {
         val ack = CompletableDeferred<Boolean>()
         val env = Envelope(op, ack)
+        // 与 [submit] 同一条理由：已停止时静默拒绝，不要去碰已取消的通道。
+        // ★ 刻意**不**记 `stateGiveUp`：那一栏的含义是「写不进去，交给对账兜底」，
+        //   而这里是「库马上就要被删了，这一笔本来就不该写」——
+        //   混记会让它出现在 `criticalAlerts` 里，把一次正常的清除报成一次事故。
+        if (stopped) {
+            ack.complete(false)
+            return false
+        }
         if (!tryOffer(env)) {
             metrics.recordStateBacklog()
             val handed = runCatching {
@@ -167,6 +228,8 @@ public class TaskStateWriter(
      */
     public fun trySubmit(op: StateOp): Boolean {
         if (tryOffer(Envelope(op, ack = null))) return true
+        // 已停止（§8.5 一键清除）：见 [submit] 的注释。这里连后台投递都不必发起。
+        if (stopped) return false
         metrics.recordStateBacklog()
         val env = Envelope(op, ack = null)
         writeScope.launch { runCatching { handOff(env) } }
@@ -250,7 +313,7 @@ public class TaskStateWriter(
      */
     private suspend fun commitWithRetry(batch: List<Envelope>) {
         var attempt = 0
-        var wait = StateLaneCaps.RETRY_BASE_MS
+        var wait = retryBaseMs
         while (true) {
             val ok = runCatching { commitOnce(batch) }
                 .onFailure { t -> metrics.recordStateWriteFailure(t) }
@@ -265,7 +328,7 @@ public class TaskStateWriter(
             }
             metrics.recordStateRetry()
             delay(wait)
-            wait = (wait * 2).coerceAtMost(StateLaneCaps.RETRY_BASE_MS * 16)
+            wait = (wait * 2).coerceAtMost(retryBaseMs * 16)
         }
     }
 
@@ -273,10 +336,10 @@ public class TaskStateWriter(
     private suspend fun commitOnce(batch: List<Envelope>): Boolean {
         val started = metrics.beginFlush()
         try {
-            db.withTransaction {
-                val taskDao = db.taskDao()
-                val checkpointDao = db.checkpointDao()
-                val policyDao = db.policyDao()
+            target.inTransaction {
+                val taskDao = target.taskDao
+                val checkpointDao = target.checkpointDao
+                val policyDao = target.policyDao
 
                 // ★ ★ 单一严格有序的循环：**刻意不做「先按表攒一批再批量 insert」**。
                 //

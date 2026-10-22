@@ -47,18 +47,43 @@ class InjectionIsolator(
                 tripwires = s.tripwires,
             )
         }
-        val body = neutralizePseudoTags(s.text)
         val escalation = when {
             s.tripwires >= 2 -> Escalation.BLOCKED
             s.tripwires == 1 -> Escalation.FLAGGED
             else -> Escalation.NONE
         }
-        val prefix = if (escalation == Escalation.FLAGGED) FLAG_NOTICE else ""
-        return IsolationResult(
-            rendered = fence(tag, prefix + body),
-            escalation = escalation,
-            tripwires = s.tripwires,
-        )
+
+        // ★★ `Escalation.BLOCKED` 必须真的把内容换掉（2026-10 补单测时抓到的一处契约缺口）。
+        //
+        // 原实现只把 `escalation` 置成 BLOCKED，**正文原样进了 prompt**。
+        // 这比不置更危险：下游（`ContextAssembler` 的 truncated 打标、UI 的警示行）
+        // 会把 `escalation == BLOCKED` 理解成「这一段已经安全了」，
+        // 而实际上注入文本一个字节都没少。
+        //
+        // 为什么它此前没有暴露：`ContentSanitizer` 对 `ContentSource.PAGE`
+        // 在 `hits >= 2` 时**已经**返回 `redacted = true`，于是 PAGE 路径走的是上面那个
+        // 「闸 1 已判定」分支。真正踩到这条的是 `ContentSource.TOOL_RETURN`
+        // （`ContentSanitizer` 刻意只对 PAGE 屏蔽 —— 工具返回里的指令性语言是合法的），
+        // 而 MCP 工具返回恰恰是「第三方内容」这一大类。
+        return when (escalation) {
+            Escalation.BLOCKED -> IsolationResult(
+                rendered = fence(tag, BLOCKED_NOTICE),
+                escalation = Escalation.BLOCKED,
+                tripwires = s.tripwires,
+            )
+
+            Escalation.FLAGGED -> IsolationResult(
+                rendered = fence(tag, FLAG_NOTICE + neutralizePseudoTags(s.text)),
+                escalation = Escalation.FLAGGED,
+                tripwires = s.tripwires,
+            )
+
+            Escalation.NONE -> IsolationResult(
+                rendered = fence(tag, neutralizePseudoTags(s.text)),
+                escalation = Escalation.NONE,
+                tripwires = s.tripwires,
+            )
+        }
     }
 
     /** ③ 逐条围栏：候选元素列表 */

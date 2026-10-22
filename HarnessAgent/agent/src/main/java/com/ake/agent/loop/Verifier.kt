@@ -90,11 +90,25 @@ class DefaultVerifier(
         if (aborted) return Termination.Terminal(TerminalReason.USER_ABORT)
 
         // ⑫ / 挂起：电量。低于 8% 且未充电 → 落盘停止；15% 以下未充电 → 暂停
-        if (!battery.isCharging && battery.levelPct in 0..BATTERY_STOP_PCT) {
-            return Termination.Terminal(TerminalReason.BATTERY_STOP)
-        }
-        if (!battery.isCharging && battery.levelPct < BATTERY_PAUSE_PCT) {
-            return Termination.Suspend(SuspendReason.BATTERY_LOW)
+        //
+        // ★★ `levelPct >= 0` 这道守卫是 2026-10 补单测时抓到的真实缺陷。
+        //    `BatteryState.unknown()` 的 `levelPct` 是 **-1**（契约里写明「未知为 -1」），
+        //    而 -1 同时满足 `in 0..8` 为假、`< 15` 为真 ⇒ **「没读到电量」被当成了「快没电了」**。
+        //
+        //    触发路径是真实存在的：主循环在 `supervisorScope` 里用 `launchIn` 订阅
+        //    `health.battery()`，而 `launchIn` 是**异步**的 ——
+        //    在首个 `checkTermination` 之前它不保证已经 emit 过。
+        //    于是「刚点开始、任务立刻因为低电量暂停」这个故障，取决于一次调度时序。
+        //
+        //    失败方向必须选对：**读不到电量时不该动**，下一次判定还有机会读到；
+        //    而误挂起一次会让用户看到「刚开始就暂停了」，那是最难解释的一类故障。
+        if (battery.levelPct >= 0 && !battery.isCharging) {
+            if (battery.levelPct in 0..BATTERY_STOP_PCT) {
+                return Termination.Terminal(TerminalReason.BATTERY_STOP)
+            }
+            if (battery.levelPct < BATTERY_PAUSE_PCT) {
+                return Termination.Suspend(SuspendReason.BATTERY_LOW)
+            }
         }
 
         // 挂起：热节流（可恢复，不是终态）
