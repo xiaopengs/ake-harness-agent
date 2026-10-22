@@ -1,6 +1,7 @@
 package com.ake.app.di
 
 import com.ake.agent.tools.ToolSource
+import com.ake.core.ports.McpConnectionPort
 import com.ake.core.ports.ToolPermissionStorePort
 import com.ake.mcp.McpToolAdapter
 import com.ake.mcp.McpToolFacade
@@ -33,6 +34,22 @@ public abstract class McpHiltModule {
     @Binds
     @Singleton
     public abstract fun bindMcpFacade(impl: McpToolAdapter): McpToolFacade
+
+    /**
+     * ★ Dagger 按**精确类型**绑定：上面那条只覆盖了 `McpToolFacade`，
+     *   不覆盖它的父接口 [McpConnectionPort]（`McpToolFacade : McpConnectionPort`）。
+     *
+     *   UI 侧（`AndroidPrivacyPort` / 设置页）注入的是 `McpConnectionPort` 这个
+     *   `:core:ports` 契约，于是这条缺失会让整张图在 `McpConnectionPort` 上断掉 ——
+     *   「类层次上的继承」在 Dagger 里**不会**自动产生绑定。
+     *
+     *   同一个 impl 绑到两个类型不是重复绑定：Dagger 的 key 是 (类型, 限定符)，
+     *   两个 key 不同，且都指向单例 `McpToolAdapter`，运行期是同一个对象
+     *   —— 这正是我们想要的（连接状态只有一份）。
+     */
+    @Binds
+    @Singleton
+    public abstract fun bindMcpConnection(impl: McpToolAdapter): McpConnectionPort
 
     /**
      * ★ 唯一的桥接：`:mcp` 的 facade → `:agent` 的 ToolSource。

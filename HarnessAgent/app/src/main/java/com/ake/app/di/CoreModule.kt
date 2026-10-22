@@ -87,6 +87,39 @@ public abstract class CoreBindingsModule {
 @InstallIn(SingletonComponent::class)
 public object ProvidesModule {
 
+    /**
+     * ★ **无注解** `Context`（与 Hilt 内置的 `@ApplicationContext Context` 是两个不同的 key）。
+     *
+     * ## 为什么需要它
+     *
+     * `LiteRtModelPort` 的构造参数是**不带任何限定符**的 `Context`（它按「Application
+     * 的 Context」语义使用：`applicationInfo.nativeLibraryDir` 找 NPU 库、`cacheDir`
+     * 放 LiteRT 缓存）。Hilt 只内置了 `@ApplicationContext Context`，
+     * 无注解 `Context` 没有任何绑定 ⇒ `hiltJavaCompileDebug` 直接报
+     * `[Dagger/MissingBinding] android.content.Context`。
+     *
+     * ## 语义边界（别绑错）
+     *
+     * - 这里绑的一定是 **Application Context**，不是 Activity Context：
+     *   本模块 `InstallIn(SingletonComponent)`，单例比任何 Activity 活得久，
+     *   绑 Activity Context 就是稳定的内存泄漏。
+     * - 与 `@ApplicationContext` 指向**同一个对象**，只是换了个 key。
+     *   不改 `LiteRtModelPort` 的签名，是因为那是 `:llm` 的地盘（边界约束）。
+     *
+     * ## ⚠ 已知 footgun（留给后来人）
+     *
+     * 有了这条绑定之后，**任何地方请求无注解 `Context` 都会拿到 Application Context**，
+     * 包括那些本意想要 Activity Context 的地方 —— 而后者不会报错，只会静默拿错。
+     * 需要 Activity Context 时必须显式写 `@ActivityContext`。
+     * 更彻底的修法是让 `:llm` 改成 `@ApplicationContext`（那时本方法可以删除），
+     * 但那属于 `:llm` 源码改动，本轮不越界。
+     */
+    @Provides
+    @Singleton
+    public fun provideUnqualifiedApplicationContext(
+        @ApplicationContext context: Context,
+    ): Context = context
+
     /** 模型文件目录：必须在 app 私有存储，用绝对路径传给 EngineConfig（官方明示） */
     @Provides
     @Singleton

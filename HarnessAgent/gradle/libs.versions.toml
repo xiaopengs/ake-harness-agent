@@ -17,7 +17,12 @@ ksp = "2.3.12"
 
 # ── DI
 hilt = "2.60.1"
-hiltNavigationCompose = "1.4.0"
+# ★ 降 1.4.0 → 1.3.0（2026-10 · 岑执衡裁决：compileSdk 钉死 36，降级依赖而非升 SDK）
+#   依据：AAR 元数据 META-INF/com/android/build/gradle/aar-metadata.properties
+#     1.4.0 → minCompileSdk=37  ✗ 本机只有 android-36
+#     1.3.0 → minCompileSdk=35  ✓
+#   1.4.0 还会拉入 hilt-lifecycle-viewmodel-compose:1.4.0（同为 37），随本条一并降到 1.3.0。
+hiltNavigationCompose = "1.3.0"
 
 # ── 协程 / 序列化
 coroutines = "1.11.0"
@@ -50,14 +55,35 @@ protobuf = "4.32.1"
 protobufPlugin = "0.9.6"          # com.google.protobuf Gradle 插件（与上面是两回事）
 
 # ── AndroidX
-androidxCore = "1.19.1"
-lifecycle = "2.11.0"
+#
+# ★★ compileSdk 兼容性总闸（2026-10 · 岑执衡裁决：compileSdk 钉死 36）★★
+#
+# 本机 Android SDK 只有 `platforms/android-36`，CI 也统一用 36。因此下面每一行
+# **都不是「选最新」，而是「选 minCompileSdk ≤ 36 的最新版本」**。
+# 判定依据是各 AAR 内 `META-INF/com/android/build/gradle/aar-metadata.properties`
+# 的 `minCompileSdk` 字段（AGP 的 `checkDebugAarMetadata` 就是读它），
+# 全部为联网实测值，非记忆值：
+#
+#   坐标                      现用       minCompileSdk   上一版（已废弃）
+#   core-ktx                  1.18.0     36              1.19.1 → 37 ✗
+#   lifecycle-*               2.10.0     35              2.11.0 → 37 ✗
+#   navigation-compose        2.9.7      35              2.10.2 → 37 ✗
+#   compose (BOM→ui)          2026.06.01 35 (ui 1.11.4)  2026.09.00 → 37 (ui 1.12.1) ✗
+#   activity-compose          1.13.0     36（恰好卡线，保留）
+#   webkit                    1.17.1     33（安全）
+#   room / sqlite-bundled     2.8.5/2.7.1 34（安全）
+#
+# ⚠ 升级纪律：**任何 AndroidX 升版前必须先查 AAR 元数据**，否则 `assembleDebug`
+#   会在 `checkDebugAarMetadata` 上直接红（不是警告，是错误）。
+#   将来 SDK 补齐 android-37 后，本注释整段作废，届时可整体回到最新线。
+androidxCore = "1.18.0"
+lifecycle = "2.10.0"
 activityCompose = "1.13.0"
-navigationCompose = "2.10.2"
+navigationCompose = "2.9.7"
 webkit = "1.17.1"
 work = "2.12.0"
 appfunctions = "1.0.0-alpha13"
-composeBom = "2026.09.00"
+composeBom = "2026.06.01"
 
 # ── 测试
 junit = "4.13.2"
