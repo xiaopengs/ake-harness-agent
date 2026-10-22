@@ -6,6 +6,8 @@ import android.webkit.CookieManager
 import android.webkit.WebStorage
 import android.webkit.WebView
 import com.ake.core.common.AkeLog
+import com.ake.core.ports.WipePort
+import com.ake.core.ports.WipeResult
 import com.ake.data.persist.db.AkeDatabase
 import com.ake.data.persist.payload.PayloadStore
 import com.ake.data.persist.store.MemoryStoreImpl

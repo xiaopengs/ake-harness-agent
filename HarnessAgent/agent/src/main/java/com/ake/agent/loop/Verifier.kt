@@ -9,6 +9,7 @@ import com.ake.core.contract.TaskSpec
 import com.ake.core.contract.ToolResult
 import com.ake.core.ports.BatteryState
 import com.ake.core.ports.ThermalState
+import javax.inject.Inject
 
 /**
  * 终态判定器（架构 §3.5）。**三重判定，模型的意见只占一票。**
@@ -64,6 +65,20 @@ sealed interface Judge {
 class DefaultVerifier(
     private val grounding: AnswerGrounding = AnswerGrounding(),
 ) : Verifier {
+
+    /**
+     * Hilt 入口（`AgentModule.bindVerifier` 绑的是本类，不是 `Verifier` 的默认实现）。
+     *
+     * ★ 刻意做成**次级**构造函数，而不是把 `@Inject` 直接打在主键上：
+     * Dagger 只看**形参列表**，看不见 Kotlin 的默认实参 —— 打在主键上会要求图上再有一条
+     * `AnswerGrounding` 绑定，而它自己的 `minRatio` 也有默认值，会连环扩散出一串
+     * 只为「填一个没人想改的默认值」而存在的绑定。次级构造函数把「默认 grounding」
+     * 这一事实固定在类内部，图里不引入任何新类型，也不引入回边（本类无状态，无循环依赖风险）。
+     *
+     * 主键保留带参形态：阈值调优 / 回归测试要注入自定义 `minRatio` 时不必改装配。
+     */
+    @Inject
+    constructor() : this(AnswerGrounding())
 
     override fun checkTermination(
         loop: LoopState,

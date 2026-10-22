@@ -1,6 +1,7 @@
 package com.ake.agent.planner
 
 import com.ake.core.contract.ToolSpec
+import javax.inject.Inject
 
 /**
  * 闸 3 —— System Prompt 安全宪章（架构 §8.3）。
@@ -13,7 +14,11 @@ interface SystemCharterText {
     fun render(enabledTools: List<ToolSpec>, stepIndex: Int): String
 }
 
-class DefaultSystemCharter : SystemCharterText {
+/**
+ * 无构造参数、无状态（宪章文本是 `companion object` 里的常量），
+ * 所以 `@Inject constructor()` 即可 —— 不引入任何新绑定，也不可能有循环依赖。
+ */
+class DefaultSystemCharter @Inject constructor() : SystemCharterText {
 
     override fun render(enabledTools: List<ToolSpec>, stepIndex: Int): String = buildString {
         append(CHARTER)
