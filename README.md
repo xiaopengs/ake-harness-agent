@@ -61,14 +61,29 @@ L1  内核层         :core:common
 | `:core:common` | `Outcome`/`AppError`/ULID/日志/脱敏闸口（含单测） |
 | `:core:contract` | 领域模型：Task / Dom / Action / Execution / Records / Tool |
 | `:core:model-api` | `ModelPort`/`ModelSession`/`GenerationRequest` 等推理契约 |
-| `:core:ports` | 感知、执行、策略、持久化、设备健康等全部 Port |
+| `:core:ports` | 全部 Port 契约：感知、执行、策略、持久化、设备健康，以及 7 个面向 UI 的 Port |
 | `:llm` | LiteRT-LM 接入、backend 选择与降级、模型下载管理、token 估算 |
-| `:browser` | WebView 执行器、DOM 抽取与压缩、页面稳定检测、JS Bridge |
-| `:agent` | Agent Loop、十二终态状态机、上下文预算、提示注入隔离、策略引擎 |
+| `:browser` | WebView 执行器、DOM 抽取与压缩、页面稳定检测、JS Bridge、`BrowserRuntime` 生命周期 |
+| `:agent` | Agent Loop、十二终态状态机、上下文预算、提示注入隔离、策略引擎、`UiFacingPorts` 实现 |
 | `:mcp` | MCP 客户端、连接管理、工具注册表、Schema 映射 |
-| `:data` | Room 11 表 / 8 DAO、异步写入管线、脱敏加密、保留与清除 |
-| `:ui` | Compose 全部页面与状态模型 |
+| `:data` | Room 11 表 / 8 DAO、双泳道写入管线、脱敏加密、保留与清理、启动对账 |
+| `:ui` | Compose 全部页面与状态模型（只依赖 `core` 契约，不引用任何 L3/L4 具体类） |
 | `:app` | Hilt 装配、前台服务、下载服务、Keystore 加密、入口 |
+
+### 依赖收敛（跨层依赖整改结果）
+
+架构规则要求 L6 不得直接依赖 L3。整改前 `:ui` 有 **11 个文件 / 6 个包 / 3 个模块**的直接引用，且**根源不在 Kotlin 而在 Gradle**——只要 `ui/build.gradle.kts` 写着 `implementation(project(":data"))`，L3 的每个 public 类都对 UI 可见，只在 L4/L5 补 Port 而不动 Gradle 依赖是零收益的。
+
+整改做法：
+
+1. **契约上收**：在 `:core:ports` 新增 7 个面向 UI 的 Port —— `TaskRunnerPort` / `LoopBudgetPort` / `ActionRiskPort` / `WipePort` / `McpConnectionPort` / `McpServerStorePort` / `SettingsStorePort`
+2. **实现下移**：`:agent`/`:mcp`/`:data` 提供实现并删除模块内重复定义（见 `:agent` 的 `UiFacingPorts.kt`）
+3. **代码改注入**：`ui/` 全部改为消费契约
+4. **最后摘边**：`ui/build.gradle.kts` 移除 `:agent`、`:mcp` 两条 `implementation(project(...))`
+
+现状：`:ui` 对 `:agent`、`:mcp` 的源码引用为 **0** 且 Gradle 边已摘除；对 `:data` 仅剩 1 处（`WipePort` 的 Store 层接入），待落地后摘除。
+
+> 顺序不能颠倒：**先补契约 → 再改实现 → 最后摘 Gradle 边**。反过来摘边会让编译直接失败；而为了"通过"把边加回去，等于假装整改。
 
 ---
 
@@ -129,26 +144,51 @@ L1  内核层         :core:common
 
 ## 七、构建与运行
 
-前置：Android Studio（AGP 9.4.1+）、JDK、Android SDK。模型**不随包分发**，首次启动由 App 内下载服务拉取 Gemma 4 E2B（约 2.6GB）到设备存储。
+前置：Android Studio（AGP 9.4.1+）、**JDK 17**、Android SDK（**compileSdk 36**；若只有 36 请勿把依赖升到要求 37 的版本）。模型**不随包分发**，首次启动由 App 内下载服务拉取 Gemma 4 E2B（约 2.6GB）到设备存储。
 
 ```bash
 cd HarnessAgent
-./gradlew :core:common:test                 # 内核层单测（JVM，无需 Android SDK）
-./gradlew :data:compileDebugKotlin          # 持久层编译 + Room KSP 校验
-./gradlew :ui:compileDebugKotlin            # UI 层编译 + Hilt 校验
-./gradlew assembleDebug                     # 完整构建
+
+# 内核层单测（JVM，无需 Android SDK）
+./gradlew :core:common:test
+
+# 编译校验（含 Room KSP / Hilt KSP）
+./gradlew :data:compileDebugKotlin
+./gradlew :ui:compileDebugKotlin
+./gradlew :app:compileDebugKotlin
+
+# 完整打包 —— 注意必须 --no-daemon
+./gradlew assembleDebug --no-daemon --console=plain \
+  -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1024m"
 ```
+
+产物：`app/build/outputs/apk/debug/app-debug.apk`（约 93 MB，arm64-v8a + x86_64）
+
+> ⚠️ **已知构建坑**：Gradle daemon 在打包阶段会崩溃（`Gradle build daemon disappeared unexpectedly`），加 `--no-daemon` 可稳定通过。这不是代码问题，是本环境 daemon 生命周期问题。
+>
+> ⚠️ **compileSdk 必须钉在 36**：`hilt-navigation-compose` 1.4.0 与 `core-ktx` 1.19.1 要求 `minCompileSdk=37`，会直接导致 AAR 元数据校验失败。仓库已锁定 1.3.0 等兼容版本，**升级前请先确认 AAR 元数据里的 minCompileSdk**。
 
 ---
 
 ## 八、当前状态（诚实标注）
 
-**已完成并通过编译验证**
+**已完成并通过真机级编译验证**
 
+- **全部 11 个模块 `compileDebugKotlin` / `compileKotlin` 均 BUILD SUCCESSFUL**（含 Hilt KSP 与 Room KSP）
 - `:data` —— Room KSP 校验通过，8 个 `DAO_Impl` 与 `AkeDatabase_Impl` 已生成
-- `:ui` —— `:ui:compileDebugKotlin` BUILD SUCCESSFUL，Hilt 已为 5 个 ViewModel 与 3 个绑定生成 Factory
-- `:core` —— 含单元测试
+- `:ui` —— Hilt 已为 5 个 ViewModel 与 3 个绑定生成 Factory
+- `:core` —— 含单元测试（`UiFacingPortSufficiencyTest` 的 import 清单不含 agent/mcp/data，反证契约充分）
+- `:app` —— Dagger 依赖图贯通，MissingBinding 清零
 - 依赖红线已排除：`ktor-client-plugins-sse` 该坐标在任何版本都不存在（SSE 已收进 `ktor-client-core`），已从 catalog 移除
+
+### ✅ 首次产出可安装产物
+
+```
+app/build/outputs/apk/debug/app-debug.apk
+93 MB / ABI: arm64-v8a + x86_64 / v2 签名，apksigner verify 通过
+```
+
+> 构建注意：Gradle daemon 在打包阶段会崩溃（`Gradle build daemon disappeared unexpectedly`），需以 `--no-daemon` 运行。
 
 ### 已修复的阻塞（原清单已清空）
 
@@ -159,36 +199,48 @@ cd HarnessAgent
 | `DomPerceptionPort`/`BrowserExecutorPort` 无人绑定 | 已补 `BrowserModule`，Hilt 依赖图接通 |
 | 暂停伪 `Terminal` 语义 | 已根治为 `Paused → StatusChanged → Suspended`，并发现暂停写 `finished_at` 会导致任务被保留策略误删 |
 | `recent()` 编译错误 | 已实现（这是历史列表为空的真正根因） |
+| **P1**：任务状态写入可被丢弃 | 已修：`Op` 拆为互斥的 `TraceOp`/`StateOp`，状态类走独立可靠泳道（有界 2048 + SUSPEND，溢出等槽位而非丢弃）；新增 `TaskReconciler` 启动对账消除永久 RUNNING |
+| **P2**：`:ui` 跨层依赖 | 已修：7 个 Port 上收至 `core`、实现下移、`:agent`/`:mcp` 两条 Gradle 边摘除 |
+| **P2**：`:data` protobuf 死依赖 | 已移除（真实引用为 0，catalog 坐标保留标注预留） |
+| **P3**：`:mcp` 缺 serialization 插件 | 已 apply。实证：缺插件时 `@Serializable` 编译照样通过但不生成 serializer，炸点在运行时 |
 
-### ⚠️ 验收结论：NO-GO，不可对外发布
+### ⚠️ 验收结论：仍为 NO-GO，不可对外发布
 
-上线验收（[`docs/04-release-gate.md`](docs/04-release-gate.md)）判定为 **NO-GO**，核心理由是一个既定事实：
+上线验收（[`docs/04-release-gate.md`](docs/04-release-gate.md)）判定 **NO-GO**。其中两条理由已解除，但核心那条仍然成立：
 
-> **本项目从未产出过可安装 APK，从未在任何真机上运行过一次。**
+| 原 P0 理由 | 当前状态 |
+|---|---|
+| 从未产出过 APK | ✅ **已解除** —— 已产出 93MB debug APK |
+| AGP 与 R8 从未执行 | ⚠️ 部分解除 —— AGP 已真实执行；R8 仅在 release 构建时生效，尚未跑过 |
+| **从未在任何真机上运行过一次** | ❌ **仍然成立** —— 这是当前唯一的核心理由 |
 
-开发环境无 Android SDK，所有验证停留在 Kotlin/JVM 层与 KSP 层，**AGP 与 R8 从未真正执行**。而这恰好是最危险的组合——本项目的四个核心依赖（JNI、GPU delegate、WebView 渲染、2.6GB 常驻内存）正是"意图正确"与"实际能跑"之间鸿沟最深、且编译期不可见的领域。
+`adb devices` 为空，APK 只经过静态验证（签名、清单、Hilt 图）。**"可安装"经静态验证，"可运行 / 可出结果"必须等一台 arm64 真机**。
 
-**P0 阻塞项**：从未真机运行 / R8 与 AGP 从未执行 / 端侧 OOM（基线已约 3.0GB）/ 延迟与热节流（4.5 秒是旗舰机数字）/ backend SoC 兼容 / 提示注入 / 模型分发的 CDN 与 manifest 尚不存在 / 安全护栏未实测 / 七个模块零测试 / 隐私政策与 Data Safety 未备。
+本项目的四个核心依赖——JNI、GPU delegate、WebView 渲染、2.6GB 常驻内存——正是"意图正确"与"实际能跑"之间鸿沟最深、且**编译期不可见**的领域。APK 产出只证明它能被打包，不证明它能跑。
 
-**最需要警惕的一点**：不要把「编译通过」当成「验证通过」。本项目高危点的共性是**静默失效**——JS 回调改名不崩溃、GPU 缺声明时 `initialize()` 照常成功、KV cache 不复用只是悄悄慢 6.8 倍、一键清除失败而 UI 报成功。它们不会让 CI 变红、不会产崩溃栈、不会触发告警，只让用户觉得"这 App 有点怪"。
+**最需要警惕的一点**：不要把「编译通过」当成「验证通过」。本项目高危点的共性是**静默失效**——JS 回调改名不崩溃、GPU 缺声明时 `initialize()` 照常成功、KV cache 不复用只是悄悄慢 6.8 倍、一键清除失败而 UI 报成功。它们不会让 CI 变红、不会产崩溃栈，只让用户觉得"这 App 有点怪"。
 
 ### 已知待办
 
-- **P1**：`TraceBufferWriter` 是可丢弃队列，而 `Op.TaskUpsert`/`TaskFinish` 也走它 —— 丢弃后果是任务凭空消失或永久 RUNNING 不被清理。需将任务状态类写入改为可靠队列。
-- **P2**：`:ui` 存在跨层依赖（直接引用 `:agent`/`:mcp`/`:data` 的类）。**根源在 Gradle 而非 Kotlin**：只要 `ui/build.gradle.kts` 写着 `implementation(project(":data"))`，L3 的每个 public 类都对 UI 可见，只在 L4/L5 补 Port 而不动 Gradle 依赖是零收益的。
-- **P2**：`:data` 的 protobuf 插件被临时禁用却仍留着 datastore + protobuf 依赖，`src/main/proto/` 为空目录（死依赖）。
-- **P3**：`:mcp` 引了 serialization 但没 apply 插件，目前未用 `@Serializable` 故不报错，后续使用会失败。
+- **P1**：`adb devices` 为空，真机验证 M7–M21 全部待跑（M10 WebView DOM 抽取向为咽喉项）
+- **P1**：模型分发的 CDN 与 manifest 尚不存在（应用内下载策略已设计，服务端未落地）
+- **P1**：安全护栏未实测（支付硬禁止 / 提示注入拦截 / 预算告知）
+- **P1**：七个模块零测试，`androidTest` 完全不存在
+- **P2**：`:ui → :data` 最后一条 Gradle 边待摘（需 `WipePort` 的 Store 层真实现接入）
+- **P2**：`UiRuntimeModule` 自绑的 `McpServerStorePort` / `SettingsStorePort` 是 UI 侧过渡实现，`:data` 真实现落地后必须删除，否则 duplicate binding
+- **P2**：隐私政策与 Data Safety 未备（需如实申报以登录态访问第三方网站）；两个 `specialUse` 前台服务各需演示视频
+- **P3**：`TaskStateWriter` 端到端与两条新 SQL 未经真机 SQLite 验证
 
 ### 下一步：最小真机验证集
 
-放行前必须先在真机跑通（详见验收文档 M1–M21），其中 **M10（WebView DOM 抽取）是咽喉项** —— 它失效时的表现是"不崩溃、无日志、就是不动"。
+放行前必须先在真机跑通（详见验收文档 M1–M21）：
 
-1. **M1–M6 产物存在性**：`buildEnvironment` → `assembleDebug` → 安装 → 冷启 → 建库 → DI 图
-2. **M7–M11 核心链路**：2.6GB 下载校验 → 加载后首次推理 → backend 降级 → DOM 抽取 → 端到端用例（release 包）
+1. **M1–M6 产物存在性** —— ✅ **已完成 5/6**（`buildEnvironment` → `assembleDebug` → APK 产出 → 签名校验）；**剩安装与冷启**
+2. **M7–M11 核心链路**：2.6GB 下载校验 → 加载后首次推理 → backend 降级 → **DOM 抽取（咽喉项）** → 端到端用例（release 包）
 3. **M12–M16 安全与终止**：支付硬禁止 / 提示注入拦截 / 预算耗尽告知 / 弹窗与杀后台 / 清除核验
-4. **M17–M21 性能与合规**：SoC 矩阵（Tensor / 骁龙 / 天玑 / 6GB 低端机）+ OOM + 延迟 + 热节流 + 两个 `specialUse` 前台服务的演示视频
+4. **M17–M21 性能与合规**：SoC 矩阵（Tensor / 骁龙 / 天玑 / 6GB 低端机）+ OOM + 延迟 + 热节流 + 演示视频
 
-> **把「第一次真机运行」当作本项目事实上的起点，而不是第 18 个 commit 之后的收尾。**
+> **把「第一次真机运行」当作本项目事实上的起点。** APK 在手只是拿到了入场券。
 
 ---
 
