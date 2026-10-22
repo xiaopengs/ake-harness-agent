@@ -47,26 +47,25 @@ dependencies {
     // implementation(project(":agent"))
     // implementation(project(":mcp"))
 
-    // ★ 持久化：**只为注入一个类型** —— `WipeEverythingUseCase`。
-    //   「一键清除痕迹」的执行属于 `:data`（关库 / 停在途写入 / 删外置轨迹目录），
-    //   UI 之前自己按 Context+Keystore 重写了一份，结果两边范围会静默分叉。
-    //   现在 `AndroidPrivacyPort` 只做门面：断 MCP、卸模型、把结果翻成人话，删除全委托给它。
-    //   注意它的签名（`invoke(Boolean) -> Result`）不含任何 Room 类型，
-    //   所以 Room 不会顺着这条依赖漏进 `:ui` 的源码 —— 这与「直接 import Room」是两回事。
+    // ─────────────────────────────────────────────────────────────────────────
+    // 【2026-10 · 邝随行】`:data` 这条边**已摘除**。至此 `:ui` 对 L3 的全部 Gradle 边
+    // （`:agent` / `:mcp` / `:data`）都已清空，L6 → L3 的直连在构建图上不再存在。
     //
-    // ────────────────────────────────────────────────────────────────────────
-    // ⚠⚠ 【待办 · 苏映棠点名 · 邝随行登记】这条边**暂时保留**（岑执衡 2026-10 裁决），
-    //   等 `:data` 落地 `WipePort` 真实现后再安排摘除。
+    // 这条边此前唯一的用途是注入 `WipeEverythingUseCase`。整改后：
+    //   · `WipePort` 契约上收到 `:core:ports`，真实现 `WipeEverythingUseCase` 留在 `:data`；
+    //   · `AndroidPrivacyPort` 改为注入 `WipePort`，删除动作全权委托，不再持有 `:data` 类型；
+    //   · `UiRuntimeModule` 里两条过渡期自绑（`McpServerStorePort` ← `McpServerStore`、
+    //     `SettingsStorePort` ← `UiLocalSettings`）已由苏映棠删除，改由 `:mcp`/`:data`
+    //     的 `McpServerStoreImpl` / `SettingsStoreImpl` 提供真实现，无 duplicate binding。
     //
-    //   ★ 同时必须删掉 `ui/.../UiRuntimeModule` 里的两条**过渡期自绑** `@Binds`：
-    //       · `McpServerStorePort` ← `McpServerStore`（UI 侧 org.json 兜底实现）
-    //       · `SettingsStorePort`  ← `UiLocalSettings`
-    //     这两条是 UI 侧的临时实现。`:data` 一旦落地同名 Port 的真实现并绑定，
-    //     它们就会变成 **duplicate binding**，Hilt 编译期直接红
-    //     （`[Dagger/DuplicateBindings] ... is bound multiple times`）。
-    //     删这两行属于 `:ui` 源码改动 ⇒ 由苏映棠或拿到授权者执行，此处只登记。
-    // ────────────────────────────────────────────────────────────────────────
-    implementation(project(":data"))
+    // 摘除前已 grep 自查：`ui/` 全目录（含 build/）对 `com.ake.data.*` /
+    // `com.ake.agent.*` / `com.ake.mcp.*` 命中数为 0；摘除后 `:ui:compileDebugKotlin`
+    // 真编译通过，证明引用确实归零、无隐藏引用。
+    //
+    // ⚠ 若将来有人要加回任一条边，请先在 PR 里说明**新增的源码引用是什么** ——
+    //   「编译不过就加回去」是把架构防线当成障碍绕开。
+    // ─────────────────────────────────────────────────────────────────────────
+    // implementation(project(":data"))
 
     implementation(platform(libs.compose.bom))
     implementation(libs.bundles.compose)

@@ -2,13 +2,9 @@ package com.ake.ui.runtime
 
 import com.ake.core.ports.HumanGate
 import com.ake.core.ports.McpConnectionPort
-import com.ake.core.ports.McpServerStorePort
-import com.ake.core.ports.SettingsStorePort
 import com.ake.ui.spi.AndroidPrivacyPort
-import com.ake.ui.spi.McpServerStore
 import com.ake.ui.spi.PrivacyPort
 import com.ake.ui.spi.ToolShutdownPort
-import com.ake.ui.spi.UiLocalSettings
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -27,6 +23,17 @@ import javax.inject.Singleton
  *
  * 其余两条是 `:ui` 自己定义的门面（`PrivacyPort` / `ToolShutdownPort`），
  * 等 `core:ports` 有正式定义后，改这里的 `@Binds` 目标即可，调用方不动。
+ *
+ * ## ★ 2026-10 交接完成：`McpServerStorePort` / `SettingsStorePort` 已从这里摘除
+ *
+ * 此前 `:ui` 为了跑通，自绑过两个过渡实现（`filesDir/mcp/servers.json` 与
+ * `filesDir/settings/ui_local.json`，都是 `org.json` 手写）。`:data` 已给出落 Room 的
+ * 真实现（`McpServerStoreImpl` / `SettingsStoreImpl`）并在 `PersistenceBindingsModule`
+ * 里绑定 —— 同一 Port 有两个绑定会 `[Dagger/DuplicateBindings]`，所以这两条连同
+ * 那两个过渡实现文件一起删除。
+ *
+ * 调用方（`McpViewModel` / `SettingsViewModel` / `TaskViewModel` / `HomeViewModel`）
+ * 注入的一直是 `core:ports` 的 Port，不是具体类，所以这次是**纯删**，一行调用方都没动。
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -43,27 +50,6 @@ public abstract class UiRuntimeModule {
     @Binds
     @Singleton
     public abstract fun bindToolShutdown(impl: McpToolShutdown): ToolShutdownPort
-
-    /**
-     * ★ 服务器清单的过渡实现（`McpServerStore` 用 `org.json` 手写，落在 `filesDir/mcp/`）。
-     *
-     * 契约在 `core:ports`，所以它现在是 `:ui` 自己绑定的 Port —— 好处是调用方只认
-     * [McpServerStorePort]，`:data` 将来给出真实现时是纯替换（删掉本条 `@Binds`）。
-     *
-     * ⚠ 两个实现同时存在会 duplicate binding，交接时务必先删这里。
-     */
-    @Binds
-    @Singleton
-    public abstract fun bindMcpServerStore(impl: McpServerStore): McpServerStorePort
-
-    /**
-     * ★ 本地设置的过渡实现（同样是 `org.json` 手写，落在 `filesDir/settings/`）。
-     *
-     * ⚠ 与上面那条同理：`:data` 落地真实现后请删掉本条，否则 duplicate binding。
-     */
-    @Binds
-    @Singleton
-    public abstract fun bindLocalSettings(impl: UiLocalSettings): SettingsStorePort
 }
 
 /**

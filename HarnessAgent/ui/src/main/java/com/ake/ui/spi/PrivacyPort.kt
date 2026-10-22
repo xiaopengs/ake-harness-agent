@@ -4,7 +4,8 @@ import android.content.Context
 import com.ake.core.common.Outcome
 import com.ake.core.modelapi.ModelPort
 import com.ake.core.ports.ModelLifecyclePort
-import com.ake.data.persist.wipe.WipeEverythingUseCase
+import com.ake.core.ports.WipePort
+import com.ake.core.ports.WipeResult
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -27,7 +28,16 @@ import javax.inject.Singleton
  *  两份实现最危险的不是冗余，而是**范围会悄悄分叉**：这边补了 `app_webview/` 而那边没补，
  *  于是「一键清除」到底清没清干净取决于谁来回答。现在只有一份。）
  *
- * ## ★ 清除范围（由 `WipeEverythingUseCase` 保证，`AndroidPrivacyPort` 只做核验）
+ * ## ★ 2026-10：注入的是 `core:ports` 的 [WipePort] 契约，不是 `:data` 的具体类
+ *
+ * 此前这里注入的是 `:data` 里那个清除用例的**具体类** —— 那是 `:ui → :data`
+ * Gradle 边摘不掉的最后一处源码引用。现在改注入 [WipePort]（实现仍在 `:data`，
+ * 由 `PersistenceBindingsModule.bindWipePort` 绑定），`:ui` 源码里的 `:data` 引用归零。
+ *
+ * 顺带补上了下面那条「诚实性缺口」：`WipePort.wipeEverything()` 返回的 [WipeResult]
+ * 自带逐步汇总的 `failures`，这里并进 [WipeReport.failures] 如实上报。
+ *
+ * ## ★ 清除范围（由 `WipePort` 的实现保证，`AndroidPrivacyPort` 只做核验）
  *
  * ```
  *  ① Keystore 密钥粉碎   ← 主手段：删密钥后 R1 密文数学上不可恢复
@@ -74,30 +84,29 @@ public data class WipeReport(
 /**
  * `PrivacyPort` 的 Android 实现 —— **薄门面**。
  *
- * 删除动作全部委托给注入的 [WipeEverythingUseCase]（`@Singleton`，由 `:data` 的
- * `PersistenceModule` 提供）。这里只做三件它不该知道的事：
+ * 删除动作全部委托给注入的 [WipePort]（实现在 `:data`，`@Singleton`）。这里只做三件
+ * 实现方不该知道的事：
  *
  *  1. **先断 MCP 连接** —— 否则清完可能立刻又被外部工具写回来；
  *  2. **先卸载模型** —— 释放 2.6 GB 常驻内存，同时让它停止往缓存写；
- *  3. **把结果翻成人话** —— `WipeEverythingUseCase.Result` 只有一个 `modelsDeleted`，
- *     而设置页要的是「删了几个库、WebView 清干净没、有没有失败的项」。
- *     所以这里在委托**前后各快照一次** Keystore 别名数与数据库文件数，用差值如实汇报 ——
- *     是核验，不是重新实现一遍删除。
+ *  3. **把结果翻成人话** —— [WipeResult] 只有 `modelsDeleted` 与逐步汇总的 `failures`，
+ *     而设置页要的是「删了几个库、WebView 清干净没」。所以这里在委托**前后各快照一次**
+ *     Keystore 别名数与数据库文件数，用差值如实汇报 —— 是核验，不是重新实现一遍删除。
  *
  * 刻意在 `Dispatchers.IO` 上跑：删几百个轨迹小文件是同步 IO，
  * 放到主线程会直接 ANR —— 而「点了一键清除之后卡死」是最伤信任的一种故障。
  *
- * ## ⚠ 一个已知的诚实性缺口（已反馈给 `:data`）
+ * ## ★ 已闭合的诚实性缺口（2026-10）
  *
- * `WipeEverythingUseCase` 内部每一步都是 `runCatching { }.onFailure { log }`，**失败不外抛**，
- * 所以 `failures` 里只可能有「整个用例抛异常」这一种。上面用差值兜住了
- * 「密钥没删掉 / 库没删掉」这两种最严重的静默失败，但更细的项仍需
- * `WipeEverythingUseCase.Result` 自己汇总 `failures` 才能如实告知用户。
+ * 曾经实现内部每一步都是 `runCatching { }.onFailure { log }`，失败不外抛，
+ * 于是 `failures` 里只可能有「整个用例抛异常」这一种。现在 [WipeResult.failures]
+ * 由实现方逐步汇总，这里直接并进 [WipeReport.failures]，另有上面第 3 点的差值兜住
+ * 「密钥没删掉 / 库没删掉」这两种最严重的静默失败。
  */
 @Singleton
 public class AndroidPrivacyPort @Inject constructor(
     @ApplicationContext private val ctx: Context,
-    private val wipeEverything: WipeEverythingUseCase,
+    private val wipe: WipePort,
     private val modelLifecycle: ModelLifecyclePort,
     private val modelPort: ModelPort,
     private val toolShutdown: ToolShutdownPort,
@@ -142,10 +151,13 @@ public class AndroidPrivacyPort @Inject constructor(
         val keysBefore = keystoreAliases().size
         val dbsBefore = ctx.databaseList().orEmpty().size
 
-        val result = runCatching { wipeEverything(deleteModelFiles) }
+        val result = runCatching { wipe.wipeEverything(deleteModelFiles) }
             .onFailure { failures += "清除失败：${it.message}" }
             .getOrNull()
         if (result?.modelsDeleted == true) modelDeleted = true
+        // ★ 实现方逐步汇总的失败项（keystore / db / webview / …）原样并进来。
+        //   这些是最该让用户看见的一类失败：「密钥删了、库没删掉」原本只在 logcat 里留一行。
+        result?.failures?.let { failures += it }
 
         // ③ 核验。差值而不是「假定成功」：清没清干净要用文件系统回答，不能用返回值假装
         WipeReport(
@@ -164,7 +176,7 @@ public class AndroidPrivacyPort @Inject constructor(
         runCatching { toolShutdown.shutdown() }
     }
 
-    /** 本 App 名下的 Keystore 别名。只数不删 —— 删除是 `WipeEverythingUseCase` 的职责。 */
+    /** 本 App 名下的 Keystore 别名。只数不删 —— 删除是 [WipePort] 实现的职责。 */
     private fun keystoreAliases(): List<String> = runCatching {
         KeyStore.getInstance(KEYSTORE)
             .apply { load(null) }
