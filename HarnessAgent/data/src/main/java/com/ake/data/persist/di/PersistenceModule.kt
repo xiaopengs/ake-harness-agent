@@ -146,9 +146,9 @@ public abstract class PersistenceBindingsModule {
     /**
      * 「一键清除全部痕迹」的执行契约。
      *
-     * ★ `:ui` 的 `AndroidPrivacyPort` 目前注入的是具体类 `WipeEverythingUseCase`
-     *   （它自己的 `invoke()` 还在，见该类注释的待办）。注入 Port 之后
-     *   `ui/build.gradle.kts` 的 `implementation(project(":data"))` 才能摘掉。
+     * ★ `:ui` 的 `AndroidPrivacyPort` 注入的就是本契约（[WipePort]），真实现
+     *   `WipeEverythingUseCase` 只留在 `:data` 内部被绑上来 —— 它那个
+     *   `invoke()` 兼容垫片因此已无调用方，于 2026-10 删除。
      */
     @Binds
     @Singleton

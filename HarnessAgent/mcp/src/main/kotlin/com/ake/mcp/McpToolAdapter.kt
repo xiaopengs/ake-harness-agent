@@ -74,7 +74,31 @@ class McpToolAdapter(
     private val loopbackOnly: Boolean = McpServerConfig.DEFAULT_LOOPBACK_ONLY,
 ) : McpToolFacade {
 
-    private val connections = McpConnectionManager(httpClient = httpClient, loopbackOnly = loopbackOnly)
+    /**
+     * ★ 仅供单测：注入 [McpConnectionManager.TransportFactory]，让连接层跑在 fake transport 上。
+     *
+     * 为什么是次构造函数而不是给主构造函数加第 4 个参数：
+     * [McpConnectionManager.TransportFactory] 是 `internal`，它**不能出现在 public 构造签名里**
+     * （Kotlin 的暴露检查），而主构造函数是 `:app` 的 Hilt 装配点在用的签名，不能动。
+     *
+     * 除 `connections` 之外，实例与主构造函数产出的**完全一致** ——
+     * 这里不 override 任何方法，所以测试跑的就是生产路径上的代码。
+     */
+    internal constructor(
+        httpClient: HttpClient,
+        permissions: ToolPermissionStorePort?,
+        loopbackOnly: Boolean,
+        transportFactory: McpConnectionManager.TransportFactory,
+    ) : this(httpClient, permissions, loopbackOnly) {
+        connections = McpConnectionManager(
+            httpClient = httpClient,
+            loopbackOnly = loopbackOnly,
+            transportFactory = transportFactory,
+        )
+    }
+
+    /** 见 [McpToolAdapter] 次构造函数的说明：次构造函数会把它换成带 fake transport 的实例。 */
+    private var connections = McpConnectionManager(httpClient = httpClient, loopbackOnly = loopbackOnly)
     private val catalogMutex = Mutex()
 
     /** 最近一次 discover 的结果。为空时 `invoke` 也能工作（按 id 反解 server 名直连）。 */

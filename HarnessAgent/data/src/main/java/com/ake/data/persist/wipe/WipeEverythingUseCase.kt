@@ -82,7 +82,11 @@ public class WipeEverythingUseCase(
 ) : WipePort {
 
     /**
-     * `core:ports` 的契约入口。**新代码一律走这里。**
+     * `core:ports` 的契约入口，也是**唯一**入口。
+     *
+     * （2026-10 清理：此前另有一个 `operator fun invoke(...)` 兼容垫片，
+     *   供 `:ui` 直接注入本具体类时使用。苏映棠已把 `AndroidPrivacyPort`
+     *   改为注入 `core:ports` 的 [WipePort]，该垫片连同其 `Result` 类一并删除。）
      */
     override suspend fun wipeEverything(deleteModelFiles: Boolean): WipeResult = withContext(Dispatchers.IO) {
         AkeLog.w(TAG, "wipeEverything started")
@@ -169,18 +173,6 @@ public class WipeEverythingUseCase(
         WipeResult(modelsDeleted = modelsDeleted, failures = failures)
     }
 
-    /**
-     * 兼容 `:ui` 现有调用点的旧入口（`AndroidPrivacyPort.wipe()` 目前直接注入本类）。
-     *
-     * ⚠ **待办（交接给苏映棠）**：`:ui` 改成注入 `core:ports` 的 [WipePort] 之后，
-     *   本方法连同 [Result] 一起删除 —— 那时 `:ui → :data` 那条 Gradle 边也能摘掉。
-     *   在那之前保留它是必要的：`:ui` 不在我的边界内，不能让它编译不过。
-     *
-     * @param deleteModelFiles false = 保留模型（2.58 GB，重下代价高，默认由用户决定）。
-     */
-    suspend operator fun invoke(deleteModelFiles: Boolean = false): Result =
-        Result(modelsDeleted = wipeEverything(deleteModelFiles).modelsDeleted)
-
     private fun dbFile(): File? = runCatching { context.getDatabasePath(AkeDatabase.DB_FILE_NAME) }.getOrNull()
 
     /** 统一的一步失败记账：日志里留一份（便于捞），同时作为「说给用户听」的一条失败项。 */
@@ -188,9 +180,6 @@ public class WipeEverythingUseCase(
         AkeLog.w(TAG, "$what delete failed: ${t.message}")
         return "$what: ${t.message ?: t.javaClass.simpleName}"
     }
-
-    /** @see invoke 的待办说明：`:ui` 切到 [WipePort] 后连同它一起删除。 */
-    data class Result(val modelsDeleted: Boolean)
 
     companion object {
         const val TAG: String = "WipeEverything"

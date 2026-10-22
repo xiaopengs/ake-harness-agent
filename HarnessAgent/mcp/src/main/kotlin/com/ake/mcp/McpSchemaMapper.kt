@@ -130,10 +130,16 @@ internal object McpSchemaMapper {
     internal fun clip(text: String, maxChars: Int): String {
         if (text.length <= maxChars) return text
         val head = maxChars * HEAD_RATIO / 100
-        val tail = maxChars - head - OMISSION_TAG.length
+        // ★ 先按「省略数取最大可能值」把标记长度算足，再定尾部长度。
+        //   旧写法用占位符 `{n}` 的长度（3）算 tail，而实际渲染出的位数可能更多 ⇒
+        //   输出会超出预算（位数 − 3）个字符。「绝不超预算」是本函数的唯一契约，
+        //   而它守的是 TOOL_RETURN 段的 768 token 上限 —— 超了就要在下游被二次截断。
+        val widestTag = OMISSION_TAG.replace(PLACEHOLDER, text.length.toString())
+        val tail = maxChars - head - widestTag.length
         if (tail <= 0) return text.substring(0, maxChars)
+        val omitted = text.length - head - tail
         return text.substring(0, head) +
-            OMISSION_TAG.replace("{n}", (text.length - head - tail).toString()) +
+            OMISSION_TAG.replace(PLACEHOLDER, omitted.toString()) +
             text.substring(text.length - tail)
     }
 
@@ -142,6 +148,7 @@ internal object McpSchemaMapper {
     private const val ERROR_MESSAGE_CHARS: Int = 240
     private const val HEAD_RATIO: Int = 60
     private const val OMISSION_TAG: String = "\n…[中间省略 {n} 字符]…\n"
+    private const val PLACEHOLDER: String = "{n}"
 
     /** schema 序列化失败时的兜底：宁可给一个空对象，也不要把 null 写进 SYSTEM 段。 */
     private const val FALLBACK_SCHEMA: String = """{"type":"object","properties":{}}"""

@@ -48,7 +48,23 @@ internal class McpConnectionManager(
     private val clientName: String = "ake-agent",
     private val clientVersion: String = "1.0.0",
     private val loopbackOnly: Boolean = McpServerConfig.DEFAULT_LOOPBACK_ONLY,
+    /**
+     * ★ 测试接缝：注入后由它代替 [defaultTransport] 生产 transport。
+     *
+     * 为什么需要它：真实 MCP SDK 的 ktor transport 在 JVM 单测里连不出去，
+     * 而本文件要测的是**我们自己的**状态机（懒连接 / 每 server 锁 / 重试上限 → DEAD / 超时），
+     * 与网络无关。注入 fake transport 后这些分支都能在毫秒级跑完，
+     * 且不会把「SDK 会不会握手」变成测试目标。
+     *
+     * 生产路径为 `null` ⇒ 行为与加入本参数之前**逐字节一致**。
+     */
+    private val transportFactory: TransportFactory? = null,
 ) {
+
+    /** transport 的构造接缝。见 [McpConnectionManager] 的同名参数说明。 */
+    internal fun interface TransportFactory {
+        fun create(cfg: McpServerConfig): Transport
+    }
 
     private class Entry(
         val config: McpServerConfig,
@@ -151,7 +167,7 @@ internal class McpConnectionManager(
         )
         try {
             // ★ 握手超时必须自己管：SDK 的 transport 不会替我们做整体超时
-            val transport = buildTransport(cfg)
+            val transport = transportFactory?.create(cfg) ?: buildTransport(cfg)
             withMcpTimeout(cfg.connectTimeoutMs) { client.connect(transport) }
             e.client = client
             e.attempts = 0
@@ -200,12 +216,19 @@ internal class McpConnectionManager(
         }
     }
 
-    /** 连接层故障的形态很杂，这里按消息特征识别；识别错了的代价只是一次多余重连。 */
+    /**
+     * 连接层故障的形态很杂，这里按消息特征识别；识别错了的代价只是一次多余重连。
+     *
+     * ★ `"timed out"` 与 `"timeout"` 是**两种写法**：JDK 的 `SocketInputStream` 抛
+     *   `SocketTimeoutException("Read timed out")`，而 OkHttp/ktor 侧多写 `"timeout"`。
+     *   只认后者会让最常见的读超时**漏判**，于是连接明明已经断了、状态却还显示 READY
+     *   —— 漏判（假阴性）比多判（一次多余重连）贵，所以两种都收。
+     */
     private fun looksLikeTransportFailure(t: Throwable): Boolean {
         val m = (t.message ?: return false).lowercase()
         return m.contains("closed") || m.contains("broken pipe") || m.contains("connection reset") ||
-            m.contains("timeout") || m.contains("unable to resolve") || m.contains("refused") ||
-            m.contains("not connected") || m.contains("eof")
+            m.contains("timeout") || m.contains("timed out") || m.contains("unable to resolve") ||
+            m.contains("refused") || m.contains("not connected") || m.contains("eof")
     }
 
     private suspend fun <T> withMcpTimeout(ms: Long, block: suspend () -> T): T =
