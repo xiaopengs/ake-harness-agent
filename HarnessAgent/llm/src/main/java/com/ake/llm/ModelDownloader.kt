@@ -35,7 +35,8 @@ import kotlin.coroutines.cancellation.CancellationException
  *    而损坏的模型表现为「随机输出乱码」而不是崩溃 —— 这类 bug 极难定位。
  */
 public class ModelDownloader(
-    private val modelsDir: File,
+    /** 公开给 `ModelDistributionSync`：盘点目录与账本的 `ModelFileLayout` 名字同源。 */
+    public val modelsDir: File,
 ) {
 
     public data class Request(
@@ -82,6 +83,10 @@ public class ModelDownloader(
 
         var attempt = 0
         var lastError: Throwable? = null
+        // ★ 摘要不符是一个**独立的失败类别**，不能混进 DOWNLOAD_FAILED：
+        //   `ModelDistributionSync` 靠它决定「让 `ModelAssetLedger` 裁决」还是「保留字节等续传」。
+        //   混在一起的话，一次静默损坏会被当成网络抖动 ⇒ 账本记 PAUSED ⇒ 故障被永久留下。
+        var checksumMismatch = false
 
         while (attempt < maxAttempts) {
             if (!isActive) return@withContext Outcome.Err(cancelled())
@@ -92,8 +97,12 @@ public class ModelDownloader(
                     // 校验失败 = 文件已损坏 ⇒ 必须重头再来，不能续传接着错
                     part.delete()
                     lastError = IllegalStateException("sha256 mismatch")
-                    if (attempt < maxAttempts) delay(backoffMs(attempt))
-                    continue
+                    checksumMismatch = true
+                    // ★ 摘要不符**不在这里重试**：一次重试就是 2.6 GB。
+                    //   「还要不要再下一次」归 `ModelAssetLedger` 裁决（它有重试预算与失败原因落库），
+                    //   这里只负责把「摘要不符」如实报上去。
+                    //   传输类错误（网络抖动）保留下面的 `maxAttempts` 退避重试 —— 它走 Range 续传，便宜。
+                    break
                 }
                 if (part.renameTo(final)) Unit else {
                     lastError = IllegalStateException("rename failed")
@@ -109,9 +118,15 @@ public class ModelDownloader(
             }
         }
 
-        Outcome.Err(
-            AppError(ModelErrorCodes.DOWNLOAD_FAILED, "err_model_download_failed", lastError, Severity.HIGH),
-        )
+        if (checksumMismatch) {
+            Outcome.Err(
+                AppError(ModelErrorCodes.CHECKSUM_MISMATCH, "err_model_checksum_mismatch", lastError, Severity.HIGH),
+            )
+        } else {
+            Outcome.Err(
+                AppError(ModelErrorCodes.DOWNLOAD_FAILED, "err_model_download_failed", lastError, Severity.HIGH),
+            )
+        }
     }
 
     /** 单次取最终下载段（带 Range 续传）。 */
@@ -164,7 +179,18 @@ public class ModelDownloader(
 
     /** 流式 SHA-256 —— 2.6 GB 不能读进内存。 */
     private fun verify(file: File, expected: String): Boolean {
-        if (!file.exists()) return false
+        val actual = sha256Of(file) ?: return false
+        return actual.equals(expected, ignoreCase = true)
+    }
+
+    /**
+     * 流式 SHA-256，返回小写 hex；文件不存在返回 `null`。
+     *
+     * 公开的必要：`ModelAssetLedger.finish()` 要的是**实际摘要**（不是「对不对」），
+     * 它得把值写进 `actual_sha256` 才能事后回答「上次的模型为什么坏」。
+     */
+    public fun sha256Of(file: File): String? {
+        if (!file.exists()) return null
         val md = MessageDigest.getInstance("SHA-256")
         RandomAccessFile(file, "r").use { raf ->
             val buf = ByteArray(BUFFER_SIZE)
@@ -174,8 +200,7 @@ public class ModelDownloader(
                 md.update(buf, 0, n)
             }
         }
-        val hex = md.digest().joinToString("") { b -> "%02x".format(b) }
-        return hex.equals(expected, ignoreCase = true)
+        return md.digest().joinToString("") { b -> "%02x".format(b) }
     }
 
     private fun usableBytes(dir: File): Long = try {
@@ -198,13 +223,15 @@ public class ModelDownloader(
         Outcome.Ok(Unit)
     }
 
-    private companion object {
-        const val BUFFER_SIZE = 256 * 1024
+    public companion object {
+        private const val BUFFER_SIZE = 256 * 1024
         const val CONNECT_TIMEOUT_MS = 20_000
         const val READ_TIMEOUT_MS = 60_000
         const val PROGRESS_EMIT_INTERVAL_MS = 500L
         const val SPACE_HEADROOM = 1.15
-        const val DEFAULT_MAX_ATTEMPTS = 5
+
+        /** 传输类错误的重试上限；摘要不符不走这里（见 `download` 内注释）。 */
+        public const val DEFAULT_MAX_ATTEMPTS: Int = 5
         const val BASE_BACKOFF_MS = 2_000L
         const val MAX_BACKOFF_MS = 60_000L
     }

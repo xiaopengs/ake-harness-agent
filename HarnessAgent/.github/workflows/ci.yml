@@ -36,7 +36,7 @@ jobs:
         run: ./gradlew checkModuleDependencies --no-daemon --console=plain
 
   # ───────────────────────────────────────────────────────────────────────────
-  # 单测（11 模块 / 265 用例）
+  # 单测（11 模块 / 362 用例 · 2026-10 模型分发接线后；上一轮为 350）
   # ───────────────────────────────────────────────────────────────────────────
   test:
     name: 单测
@@ -57,6 +57,14 @@ jobs:
   #   （android.nonFinalResIds=false 与 optimized resource shrinking 冲突）。
   #   debug 全绿完全掩盖它 ⇒ 这里固定跑一次，并断言 mapping.txt 真的产出了。
   #   签名不在此处要求：无 Secret 时出 unsigned 包，签名校验由 release 工作流兜底。
+  #
+  # ⚠ 内存（2026-10 实测，邝随行）：R8 这一步是**全工程最吃内存**的任务，
+  #   而且症状是「Gradle build daemon disappeared unexpectedly」—— 报的是守护进程
+  #   消失，不是 OOM，极易误判成代码问题。
+  #   实测：8 GB 上限的容器里 `-Xmx3g` 与 `-Xmx6g` 都崩在 `:app:minifyReleaseWithR8`，
+  #   `-Xmx2g --no-parallel` 稳定通过（约 3 分钟）。原因是 R8 会另起一个约 800 MB 的
+  #   worker 进程，daemon 堆给得越大，worker 越抢不到；并行又叠加了多个 Kotlin/KSP worker。
+  #   ⇒ 本 job **刻意不跟 test job 一样用 -Xmx4g**。若将来 CI 报守护进程消失，先看这里。
   # ───────────────────────────────────────────────────────────────────────────
   release-r8:
     name: R8 冒烟 · release 变体
@@ -70,7 +78,8 @@ jobs:
           java-version: '21'
       - uses: android-actions/setup-android@v3
       - name: ./gradlew assembleRelease
-        run: ./gradlew assembleRelease --no-daemon --console=plain -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1024m"
+        # 堆只给 2g 且关并行 —— 理由见本 job 头部「内存」注释，别照 test job 抄 4g。
+        run: ./gradlew assembleRelease --no-daemon --console=plain --no-parallel -Dorg.gradle.jvmargs="-Xmx2g -XX:MaxMetaspaceSize=768m"
       - name: 断言 R8 真的执行了（mapping.txt 存在且非空）
         run: |
           test -s app/build/outputs/mapping/release/mapping.txt \

@@ -51,7 +51,13 @@ val archAllowedEdges: Map<String, Set<String>> = buildMap {
     put(":core:contract", setOf(":core:common"))
     put(":core:ports", setOf(":core:common", ":core:contract"))
     // 实现层只认 core 契约 —— 彼此之间不得横向依赖
-    put(":llm", archCoreModules)
+    //
+    // ★ `:llm → :data`（2026-10 · P1 模型分发接线）：`:llm` 是模型文件的所有者，
+    //   `:data` 的 `modeldist` 只产出**决议与文件动作意图**（`ModelResolution` /
+    //   `ModelFileOp`），真正的 rename / 丢 part 由 `:llm` 执行 ⇒ 这条边方向是对的。
+    //   它由源码断言 ② 收紧为「只许碰 `com.ake.data.persist.modeldist`，
+    //   不许碰 Room / `persist.db`」—— 与 `:agent → :data` 同一套收紧手法。
+    put(":llm", archCoreModules + ":data")
     put(":browser", archCoreModules)
     put(":mcp", archCoreModules)
     put(":data", archCoreModules)
@@ -70,6 +76,10 @@ val archForbiddenImports: Map<String, Set<String>> = mapOf(
     ":ui" to setOf("com.ake.agent.", "com.ake.mcp.", "com.ake.data."),
     // 「不得依赖 :data 的具体实现」：Room 与 db 包一律不许进 :agent
     ":agent" to setOf("com.ake.mcp.", "com.ake.data.persist.db.", "androidx.room."),
+    // 同 `:agent`：`:llm` 只能看见 `modeldist` 这一层决议，Room / db 实体不许越过。
+    // 理由是这条边**刚被打开**，最容易被「这里少个 Entity 就顺手 import 一下」磨穿 ——
+    // `ModelAssetDao` / `ModelAssetEntity` 若进了 `:llm`，:llm 就绕过了账本状态机直接改库。
+    ":llm" to setOf("com.ake.data.persist.db.", "androidx.room."),
     ":core:common" to setOf("com.ake.agent.", "com.ake.mcp.", "com.ake.data."),
 )
 

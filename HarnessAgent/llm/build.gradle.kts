@@ -29,6 +29,11 @@ dependencies {
     implementation(project(":core:ports"))
     implementation(project(":core:contract"))
 
+    // ★ 模型分发（霍承钧 · `persist/modeldist`）：manifest 决议 + `model_asset` 账本状态机。
+    //   `:llm` 是文件系统的所有者，账本只描述意图（`ModelFileOp`），改名/丢 part 由本模块执行。
+    //   依赖方向 `:llm → :data` 已进根 build.gradle.kts 的 `archAllowedEdges` 白名单。
+    implementation(project(":data"))
+
     // ★ LiteRT-LM —— 唯一的推理 SDK，锁版本 0.18.0（README 里的 latest.release 禁止上生产）
     implementation(libs.litertlm)
 
