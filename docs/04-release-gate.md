@@ -4,55 +4,118 @@
 > 上游输入：`docs/01-architecture.md`（顾图南）、`docs/02-database.md`（宋砚秋）、`docs/03-build-and-deploy.md`（韩渡川）
 > 工程根：`HarnessAgent/` · 11 个 Gradle 模块 · 包名 `com.ake.*`
 
+> ---
+> **🔄 复审记录（第 2 轮 · 关千锤）**
+>
+> | 项 | 内容 |
+> |---|---|
+> | 复审触发 | 主理人岑执衡：上一轮裁定的三项整改已执行完毕，要求重新裁定 |
+> | 本轮新事实 | ① `assembleRelease` 跑通、R8 真实执行 ② 单测 4 → **386 通过 / 0 失败** ③ 跨层依赖三条边摘除 + 架构守卫 ④ `TraceOp`/`StateOp` 双泳道 ⑤ 模型分发客户端链路打通 |
+> | 本轮裁定 | **NO-GO（维持）** —— 见 §0 |
+> | 裁定变了的部分 | 上轮 5 条 P0 依据中 **3 条已解除**（出包 / R8 执行 / 零测试）；**2 条未动**（从未上真机 + 依赖它的四个运行时域）；另有 1 条由 P0 降为 P1（R-G），1 条新增/暴露（release 包未签名 ⇒ 连安装都做不到） |
+> | 证据获取方式 | 本文档中标注「🔬 实跑」的条目为复审时在本机（SDK `/opt/android-sdk`）实际执行或实际取数核对，非引用自述 |
+>
+> ---
+
 ---
 
 ## 0. 结论摘要（先读这里）
 
-### 🔴 判定：**NO-GO —— 不可对外发布**
+### 🔴 判定（复审）：**NO-GO —— 仍不可对外发布**
 
-| 项 | 结论 |
-|---|---|
-| **能否上架 Google Play / 对外分发** | **不能** |
-| **能否进入内部 Alpha / 封闭测试轨道** | 可以，但**必须**先完成 §5.2 的最小真机验证集 |
-| **代码质量** | 良好。分层、护栏、脱敏设计均属上乘水准 |
-| **致命缺陷** | **唯一且充分的一条：本项目从未在真机上运行过一次** |
-
-### 一句话理由
-
-> 本项目的全部验证停留在 **Kotlin 编译层**与 **KSP 代码生成层**。它证明了「代码写得对」，**完全没有证明「程序跑得起来」**。
-> 而这是一个重度依赖 JNI、GPU delegate、WebView 渲染与 2.6GB 常驻内存的端侧 Agent —— **这四类组件恰恰是「编译通过」与「能跑」之间鸿沟最深的领域**。
->
-> 更精确地说：AGP 与 R8 **从未真正执行过一次**，`LiteRT-LM` 的 `.so` 从未被加载过一次，`@JavascriptInterface` 的 JS 回调从未被触发过一次。
-
-### 已验证 vs 未验证的真实边界
-
-| 层 | 状态 | 证据 |
+| 项 | 结论 | 与上轮对比 |
 |---|---|---|
-| Kotlin 源码语法与类型 | ✅ 已通过 | `:ui:compileDebugKotlin` BUILD SUCCESSFUL |
-| Room 注解处理 | ✅ 已通过 | 8 个 `DAO_Impl` + `AkeDatabase_Impl` 已生成 |
-| Hilt 依赖图（编译期） | ✅ 已通过 | 5 个 ViewModel + 3 个绑定已生成 Factory |
-| 内核层单元逻辑 | ✅ 已通过 | `:core:common` 4 个测试文件 |
-| 版本栈自洽性 | ✅ 已通过 | 见 `docs/03` §2 |
-| 仓库无密钥泄露 | ✅ 已通过 | 已确认 git 未追踪任何密钥文件 |
-| **AGP 资源合并 / 打包** | ⚠️ **未验证** | 无 SDK，从未出包 |
-| **R8 混淆后行为** | ⚠️ **未验证** | **release 变体从未构建过** |
-| **LiteRT-LM JNI 加载** | ⚠️ **未验证** | 运行时才解析 |
-| **WebView DOM 抽取链路** | ⚠️ **未验证** | 一次都没跑过 |
-| **端侧内存 / 延迟 / 热节流** | ⚠️ **未验证** | 无设备 |
-| **提示注入防护实效** | ⚠️ **未验证** | 无端到端运行 |
+| **能否上架 Google Play / 对外分发** | **不能** | 未变 |
+| **能否进入内部 Alpha / 封闭测试轨道** | **不能** | 未变，但**阻挡原因变了**：上轮是「没有 APK」，现在是「APK 未签名 ⇒ 装不上」+「无设备跑过一次」 |
+| **能否侧载给内部人员做存在性验证（M3–M6）** | ✅ **今天就可以，且应该今天就做** | **新放开**（debug APK 已签名，见 §5.5 Q2） |
+| **代码质量** | 良好，且本轮有实质提升 | 提升 |
+| **唯一剩余的充分理由** | **从未在任何真机上运行过一次**（`adb devices` 仍为空，本机 `adb` 未安装） | **未变** |
 
-### ⚠️ 关于「测试覆盖率」的诚实陈述
+### 一句话理由（复审）
 
-**本工程没有任何插桩测试（androidTest），单元测试仅存在于 `:core:common` 一个模块：**
+> 上一轮我写的是「本项目的验证停在 Kotlin 编译层」。这一轮它**前进了一整层** —— 现在停在了**打包层与 R8 符号层**。
+>
+> 386 个 JVM 单测 + 一次真实的 `assembleRelease`，把结论从「代码写得对」升级成了「**能被打成 APK，且混淆后高危符号确实存活**」。这是实打实的进步，我在下面逐条认账。
+>
+> **但它仍然没有执行过这个 App 的任何一个指令周期。** 而这是一个重度依赖 JNI、GPU delegate、WebView 渲染与 2.6GB 常驻内存的端侧 Agent —— 这四个域恰恰是**打包层视野之外**的。
+>
+> 更精确地说：`liblitertlm_jni.so` **已经躺在 APK 里**（arm64-v8a 22.2MB / x86_64 26.4MB），**但一次都没有被 `dlopen` 过**；`deliver()` / `deliverError()` 的方法名**已经在 `mapping.txt` 里被证明存活**，**但一次 JS 回调都没有被触发过**。
 
-```
-core/common/src/test/java/com/ake/core/common/OutcomeTest.kt
-core/common/src/test/java/com/ake/core/common/UlidTest.kt
-core/common/src/test/java/com/ake/core/common/RedactorTest.kt
-core/common/src/test/java/com/ake/core/common/UlidPerfTest.kt
-```
+### 📌 对主理人那个判断的裁定：**「测试全绿 + release 构建通过」不足以改变放行结论**
 
-`:llm` `:browser` `:agent` `:mcp` `:data` `:ui` `:app` **七个模块零测试**。若以"有多少业务逻辑被自动化验证"衡量，覆盖率接近 0；若以行数衡量，因为 L1/L2 被覆盖而其余未覆盖，也远低于任何通常意义上的发布门槛。**这一项本身就是 P0 阻塞项（F3-2）。**
+**我同意，并且这不是过度保守。** 三条理由，逐条可核验：
+
+1. **两者验证的是「输入」和「制品」，没有一个验证「过程」。**
+   386 个单测跑在 JVM 上、Dalvik/ART 之外；`assembleRelease` 产出的是一个静态字节流。二者都不需要加载 `.so`、不需要 GPU、不需要 WebView、不需要 2.6GB 内存 —— **它们绕过的，恰恰是本项目标注为 P0 的四个域**（§5.5 Q1 给了逐域估计）。
+
+2. **本工程的 386 个测试在结构上就不可能覆盖这四个域。**
+   它们全部是 JVM 单测，**没有任何 `androidTest` 目录**（🔬 实跑：`find . -type d -name androidTest` 零结果，全仓无 Robolectric / 无 instrumentation runner）。JVM 单测进程里连一个 `WebView` 实例都构造不出来 —— 不是团队不愿意写，是**测试类型选错了就没有这条路**。
+
+3. **release 包在未签名的状态下，连「存在性」这一层都交不了差。**
+   🔬 实跑：release APK 无 v1 签名（无 `META-INF/CERT.*`）、无 v2/v3 签名块（全文检索 `APK Sig Block 42` 零命中）⇒ `adb install` 必然失败。**它甚至进不了 M3 的门槛。**
+
+**但我要明确写下一件对团队有利的话**：本轮成果极大地改变了「如果上机发现问题时，问题会有多难查」。
+
+| 维度 | 上轮 | 本轮 |
+|---|---|---|
+| 若为 R8 符号逃逸导致 JS 回调不来 | 需要从头怀疑全局（混不混、规则对不对、IL 在哪） | **已可静态排除**：JS 桥符号已逐个核对通过（§2.9 N-3） |
+| 若 tasks 永久 RUNNING | 连 Reset 都不确定 | 已有 `TaskReconciler` + 188 个 data 测试守卫 |
+| 若发现架构分厢退化 | 无止境 | 有可执行的架构守卫（但要修位置，见 §2.9 N-6） |
+
+> **一句话**：GPU/内存/JNI/WebView 这四类问题，**本轮成果让它们出现时从「无法归因」变成「可归因」**；但没有动摇「它们很可能就是会出现」这个概率本身。
+
+### 已验证 vs 未验证的真实边界（复审更新）
+
+| 层 | 上轮 | **本轮** | 证据（🔬 实跑取数） |
+|---|---|---|---|
+| Kotlin 源码语法与类型 | ✅ | ✅ | 11 模块 `test` 全绿 |
+| Room 注解处理 | ✅ | ✅ | `*_Impl` 仍在 release 包；10 个类名未被混淆 🔬 |
+| Hilt 依赖图（**编译期**） | ✅ | ✅ | KSP 生成成功；⚠ 但 release 包里大量 `*_Factory` 被 R8 标为 `R8$$REMOVED$$CLASS`（见 §2.9 N-5） |
+| 内核层单元逻辑 | ✅ | ✅ **大幅提升** | **386 通过 / 0 失败 / 0 跳过** 🔬（上轮 4 个） |
+| 版本栈自洽性 | ✅ | ✅ | `docs/03` §2 |
+| 仓库无密钥泄露 | ✅ | ✅ | git 未追踪任何密钥文件 |
+| **产出可安装 APK（debug）** | ⚠️ | ✅ **已解除** | `app-debug.apk` **98,253,032 B（93.70 MiB）**，且**带 v2 签名块** ⇒ **可直接 `adb install`** 🔬 |
+| **AGP 资源合并 / manifest 合并** | ⚠️ | ✅ **已解除** | merge 报告 86,895 B 已产出；资源 conflict 清零 🔬 |
+| **R8 真实执行** | ⚠️ | ✅ **已解除** | `mapping.txt` **76,226,539 B**、`usage.txt` 移除 59,335 项、`seeds.txt` 6.4MB 全部在场 🔬 |
+| **R8 后高危符号存活（静态）** | ⚠️ | ✅ **已部分解除** | JS 桥 `deliver`/`deliverError`、10 个 Room `_Impl`、`com.google.ai.edge.**` 全部**原名保留** 🔬（见 §2.9 N-3） |
+| **构建可复现** | ⚠️ | ✅ **新增** | 删产物后重跑，APK 与 mapping.txt 的 **md5 与备份逐字节一致** 🔬 |
+| 模型红线（权重不随包） | ⚠️ | ✅ **已解除** | `src/main/assets` 仅 `dom-extract.js`，无 `.litertlm`/`.task`/`.bin` 等 🔬 |
+| **LiteRT-LM JNI 加载** | ⚠️ | ⚠️ **未动** | `.so` 已在包内，**但从未 `dlopen`** |
+| **WebView DOM 抽取链路** | ⚠️ | ⚠️ **基本未动** | `:browser` 1,255 行**零测试**；符号存活已验，回调未验 |
+| **端侧内存 / 延迟 / 热节流** | ⚠️ | ⚠️ **未动** | 无设备 |
+| **提示注入防护实效** | ⚠️ | ⚠️ **未动（单项提升）** | `BLOCKED` 换正文的修复被单测抓住，但**端到端未跑** |
+| **release 包可安装** | ⚠️ | 🔴 **新增未通过** | **未签名** ⇒ 连 `adb install` 都失败（§5.5 Q2） |
+| **CI 是否真的执行过** | ⚠️ | 🔴 **仍未通过，且原因查明** | 新 CI 文件位于 `HarnessAgent/.github/`，**GitHub 从不读取该路径**（§2.9 N-6） |
+
+### ⚠️ 关于「测试覆盖率」的诚实陈述（复审更新）
+
+**先说一个必须先纠正的事实：本工程没有配置任何覆盖率工具（无 jacoco、无 kover）🔬。**
+所以本文出现的一切覆盖率数字，**全部是我按代码结构 + 测试落点做的工程估计，不是测出来的**。任何人在任何场合引用时，都必须带上这句话。
+
+**上轮状态**：七个模块零测试。
+**本轮状态**：**386 通过 / 0 失败 / 0 跳过** 🔬（直接汇总自 6 个模块的 JUnit XML 报告，非引用自述）：
+
+| 模块 | 主源码行数 | 用例数 | 备注 |
+|---|---:|---:|---|
+| `:data` | 8,391 | **188** | 本轮主战场：双泳道、模型分发、归档保留 |
+| `:agent` | 5,399 | **78** | 含 `InjectionIsolator` 安全缺口的回归 Fix test |
+| `:mcp` | 644 | **69** | |
+| `:core:common` | 656 | **25** | |
+| `:llm` | 1,736 | **14** | ⚠ 全部走 Fake，**无一触碰 native/GPU** 🔬 |
+| `:core:ports` | 1,114 | **12** | UI 面向 Port 的充分性测试 |
+| **`:ui`** | **4,975** | **0** | ❌ |
+| **`:app`** | **1,438** | **0** | ❌ 下载服务、Hilt 根图、前台服务全在此 |
+| **`:browser`** | **1,255** | **0** | ❌ **WebView 与 DOM 注入全在此 —— 这是四个不可见域之中枢** |
+| `:core:contract` | 914 | **0** | ❌ |
+| `:core:model-api` | 173 | **0** | ❌ |
+| **合计** | **26,695** | **386** | **8,855 行（33.2%）仍为零测试** |
+
+同时：**全仓 `androidTest` 目录数为 0，Robolectric 未引入，插桩测试为零** 🔬。
+
+> **因此，386 这个数字的准确含义是**：`data/agent/mcp/core/llm` 这六个模块里那些**能被抽成纯 JVM 逻辑**的部分，现在有了可信回归网。
+> **它不等于**这个 App 被运行过；**它也不覆盖**：`:browser`（WebView）、`:ui`、`:app`，以及一切需要 ART / GPU / mmap 的行为。
+>
+> **对四大不可见领域的逐域估计 → 见 §5.5 Q1（结论：行为覆盖 0%）。**
 
 ---
 
@@ -63,8 +126,13 @@ core/common/src/test/java/com/ake/core/common/UlidPerfTest.kt
 | 标记 | 含义 |
 |---|---|
 | ✅ | **已通过**（有实跑或可核验的证据） |
+| 🟡 | **部分通过**（有真实证据，但不足以支撑放行 —— 通常是「纯逻辑已验，运行时未验」） |
 | ⚠️ | **未验证**（无证据，不可作为放行依据） |
 | ⬜ | 不适用 |
+
+> **🟡 的判断标准（复审新增）**：凡是「某一层已验但下游层未验」的条目，一律记为 🟡，**不得标 ✅**。
+> 典型形态：**JVM 单测过了 ⇒ 逻辑对；但 ART / GPU / WebView / 内存这四个域未验 ⇒ 行为未知。**
+> 🟡 计入**未解除的 P0**。这条规则是防止「386 全绿」被读成「功能可用」的关键闸门。
 
 ### 阻塞级别
 
@@ -80,56 +148,61 @@ core/common/src/test/java/com/ake/core/common/UlidPerfTest.kt
 
 | # | 检查项 | 状态 | 级别 | 说明 |
 |---|---|---|---|---|
-| A1 | 5 个 MVP 用例（电商搜索排序取数 / 表单填写不提交 / 翻页汇总 / 多条件筛选 / MCP 导出）端到端跑通 | ⚠️ | **P0** | 从未在真机执行过任何一次 |
-| A2 | 十二终态状态机全部可达且语义正确 | ⚠️ | **P0** | 仅编译通过 |
-| A3 | 循环检测（`repeatsIdenticalAction` → `LOOP_DETECTED`）生效 | ⚠️ | **P0** | 代码存在，`Verifier.kt:102`；未实测 |
-| A4 | 卡死熔断（`isStalled(NO_PROGRESS_LIMIT)`）生效 | ⚠️ | **P0** | 代码存在；未实测 |
-| A5 | 预算耗尽（`BudgetExhausted`）终止生效 | ⚠️ | **P0** | 含 `maxSteps` / `maxWallClockMs` / token 三路 |
-| A6 | 敏感操作确认闸门（`HumanGate` → `UiHumanGate`）挂起与恢复 | ⚠️ | **P0** | 超时后按拒绝处理，方向正确；未实测 |
-| A7 | 支付类操作硬禁止（FORBIDDEN） | ⚠️ | **P0** | `payment.submit` / `cart.checkout` / `credential.autofill` 已声明 |
-| A8 | 提示注入隔离（`InjectionIsolator` nonce 围栏） | ⚠️ | **P0** | 设计正确；无端到端验证 |
-| A9 | 断点续跑（checkpoint 保存 / 恢复 / 清理） | ⚠️ | **P1** | `CheckpointStorePort` 契约完备 |
-| A10 | 一键清除全部痕迹（含 `app_webview/`） | ⚠️ | **P1** | 隐私承诺的兑现凭据 |
-| A11 | 模型下载、校验、断点续传、存储预检 | ⚠️ | **P0** | 2.6GB，失败概率最高的路径 |
+| A1 | 5 个 MVP 用例（…）端到端跑通 | ⚠️ | **P0** | 从未在真机执行过任何一次。**未动** |
+| A2 | 十二终态状态机全部可达且语义正确 | 🟡 | **P0** | **↑ 本轮修复**：`Op` 拆 `TraceOp`/`StateOp` 双泳道，状态写入不再可丢弃；`TaskReconciler` 启动对账消除永久 RUNNING；`data` 188 项测试覆盖双泳道互斥。→ **仍缺端到端** |
+| A3 | 循环检测（`repeatsIdenticalAction` → `LOOP_DETECTED`）生效 | 🟡 | **P0** | **↑** `AgentLoopTest`（`:agent` 78 项）在**纯逻辑层**覆盖；但未在真机上跑过一次 8 步任务 |
+| A4 | 卡死熔断（`isStalled(NO_PROGRESS_LIMIT)`）生效 | 🟡 | **P0** | **↑** 同上 |
+| A5 | 预算耗尽（`BudgetExhausted`）终止生效 | 🟡 | **P0** | **↑** 同上；含 `maxSteps` / `maxWallClockMs` / token 三路 |
+| A6 | 敏感操作确认闸门（`HumanGate` → `UiHumanGate`）挂起与恢复 | ⚠️ | **P0** | 需在 UI 协程/生命周期/后台被杀的真实环境验证；`:ui` **零测试** |
+| A7 | 支付类操作硬禁止（FORBIDDEN） | ⚠️ | **P0** | ❗ **复审发现：全仓测试中 `payment` / `FORBIDDEN` 零命中 🔬** —— 这是本轮 386 项里的一处结构性空白，而 M12（安全体系的最后一道）完全依赖它。**建议列入下一批必补** |
+| A8 | 提示注入隔离（`InjectionIsolator` nonce 围栏） | 🟡 | **P0** | **↑ 本轮抓出并修复真 bug**：`Escalation.BLOCKED` 原只置位不换正文，`TOOL_RETURN` / MCP 返回路径未兜住 —— 安全缺口，已修并有回归测试。**端到端仍未跑** |
+| A9 | 断点续跑（checkpoint 保存 / 恢复 / 清理） | ⚠️ | **P1** | `CheckpointStorePort` 契约完备；`StateOp.Checkpoint` 已在可靠泳道；未实测 |
+| A10 | 一键清除全部痕迹（含 `app_webview/`） | ⚠️ | **P1** | ⚠ 技术债 **D2 仍未修**：`WipeEverythingUseCase` 失败不外抛 ⇒ 可能 UI 报成功而痕迹仍在（见 §5.4） |
+| A11 | 模型下载、校验、断点续传、存储预检 | 🟡 | **P0** | **↑ 客户端全链路已打通并有测试**：拉取 / 验签 / 三级兜底 / 回滚 / 账本 / 归档保留（13 个 `modeldist` 测试文件）。**但运维侧 manifest 未产出，默认 `UNCONFIGURED` fail-closed ⇒ 真实新用户仍无处可下** |
 
 ### B. 构建与产物
 
 | # | 检查项 | 状态 | 级别 | 说明 |
 |---|---|---|---|---|
-| B1 | 全模块 Kotlin 编译通过 | ✅ | P1 | `:ui:compileDebugKotlin` 已过 |
-| B2 | Room KSP 产物生成 | ✅ | P1 | 8 DAO_Impl + AkeDatabase_Impl |
-| B3 | **产出过可安装 APK** | ⚠️ | **P0** | **从未产出过** |
-| B4 | **AGP 资源合并 / manifest 合并实跑** | ⚠️ | **P0** | 无 SDK |
-| B5 | **R8 混淆后 release 包可运行** | ⚠️ | **P0** | **从未执行过 R8** |
-| B6 | CI 五个作业全绿 | ⚠️ | **P0** | 工作流已写好，从未运行 |
-| B7 | 模型红线两道断言通过 | ⚠️ | **P0** | 断言已写，无产物可验 |
-| B8 | 版本栈自洽（KGP/KSP/AGP/Gradle） | ✅ | P1 | `docs/03` §2 已核实 |
-| B9 | `mapping.txt` 归档 | ⚠️ | P1 | 依赖 B5 |
-| B10 | `apksigner verify` 且非 debug key | ⚠️ | P1 | 依赖 B3；Secret 未配置 |
+| B1 | 全模块 Kotlin 编译通过 | ✅ | P1 | 11 模块 `test` 全绿 ⇒ 编译必然通过 🔬 |
+| B2 | Room KSP 产物生成 | ✅ | P1 | release 包内 10 个 `*_Impl` 类名未被混淆（含 `AkeDatabase_Impl`）🔬 |
+| B3 | **产出过可安装 APK（debug）** | ✅ | ~~P0~~ **已解除** | `app-debug.apk` **98,253,032 B / 93.70 MiB**，**含 v2 签名块** ⇒ **可 `adb install`** 🔬 |
+| B4 | **AGP 资源合并 / manifest 合并实跑** | ✅ | ~~P0~~ **已解除** | `manifest-merger-release-report.txt` 86,895 B 已产出，无合并冲突 🔬 |
+| B5 | **R8 执行 + 高危符号存活** | 🟡 | ~~P0~~ **降为 P1** | **R8 确实执行**（`mapping.txt` 76,226,539 B）且**六个高危反射点静态核对全部存活** 🔬；**「保留」≠「被调用」/「行为正确」** ⇒ 仍需 M4–M11 在 release 包上跑一遍（详见 §2.7 与 §5.5 Q2） |
+| B6 | CI 五个作业全绿 | ⚠️ | **P0** | ⚠ **复审发现结构性问题**：团队本轮新写的 4 个 CI 作业（`arch-guard` / `test` / `release-r8` / `model-redline`）位于 **`HarnessAgent/.github/workflows/ci.yml`** —— **GitHub Actions 只读取仓库根的 `.github/workflows/`，该文件路径不会被触发**。仓库根现存的是 Phase 3 的另一份 `ci.yml`（jvm-tests / compile / ksp-verify / lint / assembleDebug）。**⇒ 所谓「CI 守卫」目前等于没有守卫**（详见 §2.9 N-6） |
+| B7 | 模型红线两道断言通过 | ✅ | ~~P0~~ **已解除** | 🔬 实跑同款 find 断言：资产/jniLibs 内无任何 `.litertlm` / `.task` / `.bin` / `.tflite` / `.gguf` / `.safetensors`；`assets` 仅有 `dom-extract.js`。**且这项在本机可被复验** |
+| B8 | 版本栈自洽（KGP/KSP/AGP/Gradle） | ✅ | P1 | `docs/03` §2；本轮又实跑过 release ⇒ 自洽性有运行证据 |
+| B9 | `mapping.txt` 产出并可复现 | ✅ | P1 | 🔬 删除产物后重跑，**APK 与 mapping.txt 的 md5 与备份逐字节一致**（`packageRelease` 真实重执行） |
+| B10 | `apksigner verify` 且非 debug key | 🔴 | **P0（新增，比上轮更具体）** | **release 包当前未签名**：无 v1（无 `META-INF/CERT.*`）、无 v2/v3（无 `APK Sig Block 42`）🔬 ⇒ **`adb install` 必然失败**。✅ 此处设计是对的（缺 Secret 时不挂签名、由 CI 的签名步骤拦下），**但结果是：release 产物目前连"存在性"验证都做不了** |
+| B11 | ~~ ABI 分包与体积红线 ~~ | ✅ | P1（新增） | 未开分包时产出 universal 包 **63,004,478 B / 60.07 MiB**，远低于 150MB 红线 🔬；`arm64-v8a` + `x86_64` 双 ABI 均含 `liblitertlm_jni.so`（22.2MB / 26.4MB）|
 
 ### C. 安全与隐私
 
 | # | 检查项 | 状态 | 级别 | 说明 |
 |---|---|---|---|---|
-| C1 | 未使用 AccessibilityService（规避 Play 禁令） | ✅ | **P1** | 已 grep 全仓，**零命中** — 关键架构决策正确（见 §4.3） |
-| C2 | 提示注入五道闸生效 | ⚠️ | **P0** | 本项目最真实攻击面 |
-| C3 | 敏感字段采集即脱敏 + Keystore AES-GCM | ⚠️ | **P0** | 设计正确；未端到端验证 |
-| C4 | 以登录态访问网页的 Cookie / 表单数据处理 | ⚠️ | **P0** | 见 §2.6 |
+| C1 | 未使用 AccessibilityService（规避 Play 禁令） | ✅ | **P1** | 关键架构决策正确（见 §4.3） |
+| C2 | 提示注入五道闸生效 | 🟡 | **P0** | **↑ 本轮修了一个真安全缺口**：`Escalation.BLOCKED` 只置位不换正文（313 行注释已记录成因），`InjectionIsolatorTest` 现为此带回归。**端到端未验**，且 `:browser`（注入面所在模块）**零测试** |
+| C3 | 敏感字段采集即脱敏 + Keystore AES-GCM | 🟡 | **P0** | **↑** `RedactorTest` 覆盖纯字符串脱敏逻辑；**Keystore / AES-GCM 部分零覆盖**（需 Android Keystore，`androidTest` 不存在） |
+| C4 | 以登录态访问网页的 Cookie / 表单数据处理 | ⚠️ | **P0** | 见 §2.6；需真机 + 真实站点 |
 | C5 | `allowBackup="false"`（防 2.6GB 进云备份） | ✅ | P1 | manifest 已确认 |
-| C6 | 仓库无密钥 / 无权重文件 | ✅ | P1 | 已确认 git 未追踪 |
+| C6 | 仓库无密钥 / 无权重文件 | ✅ | P1 | git 未追踪；模型红线实跑通过 🔬 |
 | C7 | 无遥测 / 无第三方分析 SDK | ✅ | P2 | 未引入 |
-| C8 | 外部 MCP 服务器连接的鉴权与隔离 | ⚠️ | **P1** | 本地 MCP 是新增攻击面 |
+| C8 | 外部 MCP 服务器连接的鉴权与隔离 | ⚠️ | **P1** | 本地 MCP 是新增攻击面；本次 C2 抓到的缺口正位于 MCP 返回路径 —— 说明这条链路**确实在出真 bug**，不应降级 |
 
 ### D. 性能与稳定性
 
 | # | 检查项 | 状态 | 级别 | 说明 |
 |---|---|---|---|---|
-| D1 | 中端机（6–8GB）上无 OOM | ⚠️ | **P0** | 见 §2.2，架构 R1 自称「头号杀手」 |
-| D2 | 单步延迟 ≤ 4.5s（GPU）实测 | ⚠️ | **P0** | 文档中该数字为**旗舰机实测**，非中端机 |
+> **整节状态：D1–D7 一条都没变。** 这不是团队没做，而是**这七项在结构上无法被 JVM 单测关闭** —— 它们的本体就是「真实 ART 上的资源行为」。任何在本节标记 ✅ 的企图都必须拒绝。
+
+| # | 检查项 | 状态 | 级别 | 说明 |
+|---|---|---|---|---|
+| D1 | 中端机（6–8GB）上无 OOM | ⚠️ | **P0** | 见 §2.2。386 项测试中，**没有任何一项触碰过 native heap / PSS / mmap** 🔬 |
+| D2 | 单步延迟 ≤ 4.5s（GPU）实测 | ⚠️ | **P0** | 该数字为旗舰机实测值；`BackendPolicy` 的 6.8 倍差距只被注释记录，未被测量 |
 | D3 | 长任务（≥8 步）热节流行为 | ⚠️ | **P1** | 降级到 CPU 会慢 2.4 倍 |
-| D4 | GPU delegate 预热探针与 CPU 回退 | ⚠️ | **P0** | 架构 R2：静默失败风险 |
+| D4 | GPU delegate 预热探针与 CPU 回退 | ⚠️ | **P0** | 架构 R2：静默失败风险。`BackendPolicy` 的**阶梯选择**是纯函数（可被单测），**"GPU 真的行还是 initialize 成功但首推理失败"完全测不了** |
 | D5 | 不同 SoC（Tensor / 骁龙 / 天玑）backend 兼容 | ⚠️ | **P0** | 见 §2.4 |
-| D6 | 进程被杀后的恢复（WebView 先于 App 被杀） | ⚠️ | **P1** | 架构 R1 明确提到 |
+| D6 | 进程被杀后的恢复（WebView 先于 App 被杀） | ⚠️ | **P1** | `TaskReconciler` 已能消除永久 RUNNING（逻辑层），但**进程被杀后 WebView 实例重建**这条仍零验证 |
 | D7 | 前后台切换与模型卸载策略 | ⚠️ | **P1** | 退后台 60s / 空闲 5min |
 
 ### E. 合规与上架
@@ -148,12 +221,12 @@ core/common/src/test/java/com/ake/core/common/UlidPerfTest.kt
 
 | # | 检查项 | 状态 | 级别 | 说明 |
 |---|---|---|---|---|
-| F1 | `policy_decision` 表审计落盘 | ⚠️ | **P0** | 安全事件的唯一取证依据 |
-| F2 | trace 落盘与 `TRACE_DROPPED` 记账 | ⚠️ | **P1** | 写入队列可丢弃，须可观测丢弃量 |
-| F3 | 崩溃捕获与符号化（`mapping.txt`） | ⚠️ | **P1** | 依赖 B5 |
-| F4 | 模型回滚：只改 manifest，不发版 | ⚠️ | **P1** | 设计完备；**服务端 manifest 尚未存在** |
+| F1 | `policy_decision` 表审计落盘 | 🟡 | **P0** | **↑** `StateOp.PolicyDecision` 现已走**不可丢弃泳道**，`WriteLaneIsolationTest` 逐类断言（含 `TaskUpsert` / `BudgetAdvance` / `TaskFinish` / `PolicyDecision`）。**真实 SQLite 上的落盘未验** |
+| F2 | trace 落盘与 `TRACE_DROPPED` 记账 | 🟡 | **P1** | **↑** `TraceOp` 泳道现已明确饰演可丢弃角色，丢弃与否有类型而非靠约定；**丢弃量是否真的被记账到可观测量仍未实测** |
+| F3 | 崩溃捕获与符号化（`mapping.txt`） | 🟡 | **P1** | **↑** `mapping.txt` 已产出且可复现（🔬 md5 一致）；**但无句柄亦无崩溃收集 SDK ⇒ 现阶段收集不到栈，符号化无用武之地** |
+| F4 | 模型回滚：只改 manifest，不发版 | ⚠️ | **P1** | 客户端三级兜底 + 回滚 + 账本已完备并有测试；**服务端签名 manifest 仍不存在** ⇒ 客户端写得再好也处于 fail-closed 空转 |
 | F5 | App 回滚：Play 轨道回退 + versionCode 递增 | ✅ | P1 | 流程已文档化（`docs/03` §4.5） |
-| F6 | 关键指标埋点（下载成功率、首 token、OOM 率） | ⚠️ | **P1** | 灰度指标已定义，未实现埋点 |
+| F6 | 关键指标埋点（下载成功率、首 token、OOM 率） | ⚠️ | **P1** | 灰度指标已定义，未实现埋点。**这也是 §6「静默失效」唯一的解药，优先级建议上调** |
 
 ---
 
@@ -169,26 +242,34 @@ core/common/src/test/java/com/ake/core/common/UlidPerfTest.kt
 |---|---|
 | **影响面** | **100%**。所有端侧行为：模型加载、JNI、GPU delegate、WebView 注入、DOM 抽取、Room 建库、Hilt 运行时图、前台服务、权限弹窗 |
 | **发生概率** | **100%（已发生）**——这不是「风险」，是**既定事实** |
+| **本轮变化** | ⚠ **本体未动**：`adb devices` 仍为空（本机 `adb` 未安装 🔬）。**但本轮把这条风险的「可归因性」从 0 提到了 ~70%**（打包/R8/双泳道/注入 Ensemble 的四层都已垫好） |
+
+**🔬 复审时在环境内实测**：`which adb` ⇒ not found。**即本环境天然无法完成 M3–M21 的任何一项。** 这条风险的解除不取决于工程侧，取决于「谁把真机接上」。
 
 **为什么编译通过完全不等于能跑**（按失败概率排序）：
 
 | 层 | 失败模式 | 编译期能否发现 |
 |---|---|---|
 | LiteRT-LM JNI | `UnsatisfiedLinkError`、`.so` ABI 缺失、OpenCL 库未声明 | ❌ 运行时 |
-| R8 混淆 | `@JavascriptInterface` 方法名被改 ⇒ JS 回调永不触发，症状「Agent 一直看不见页面」 | ❌ 运行时 |
-| Room | `Class.forName("..._Impl")` 失败；Entity 字段名混淆导致 SQL 列名错乱 | ❌ 运行时 |
-| Hilt | 运行时依赖图断裂（尤其 `@Singleton` 作用域与 `@Binds` 缺失） | ❌ 运行时 |
-| WebView | `addJavascriptInterface` 按名字覆盖；多 bridge 互相顶掉 | ❌ 运行时 |
-| 资源 / manifest | 合并冲突、`uses-native-library` 未生效 | ❌ 打包期 |
+| ~~R8 混淆~~ | ~~`@JavascriptInterface` 方法名被改 ⇒ JS 回调永不触发~~ | **🟡 符号层已静态排除**（§2.7 / §2.9 N-3） |
+| Room | `Class.forName("..._Impl")` 失败；Entity 字段名混淆导致 SQL 列名错乱 | ❌ 运行时（**类名**已静态验 ✅，**字段名/SQL** 未验） |
+| Hilt | 运行时依赖图断裂；**release 包中大量 `*_Factory` 已被 R8 树摇**（§2.9 N-5） | ❌ 运行时 |
+| WebView | `addJavascriptInterface` 按名字覆盖；多 bridge 互相顶掉；`evaluateJavascript` 的线程与时序 | ❌ 运行时 |
+| 资源 / manifest | 合并冲突、`uses-native-library` 未生效 | ✅ **打包期已实证无冲突** 🔬 |
 
-**特别提示**：`@JavascriptInterface` 这条最阴险。它不会崩溃，**只是静默地永远收不到 DOM**。用户看到的是「App 卡住了，什么也没发生」，日志里没有任何异常。这是最难归因的一类故障。
+**特别提示**：`@JavascriptInterface` 这条**仍是最阴险的一条，但「阴险的位置」本轮下移了**。
 
-**缓解措施**
-1. **必须先出包**：在有 Android SDK 的环境执行 `./gradlew :app:assembleDebug`（预计 10–20 分钟首建）。
-2. **必须在真机上跑通 A1 用例一次**。
-3. **必须构建一次 release 包并真机运行**（R8 只对 release 生效）。
+- 上轮的担心是「**方法名被混淆掉**」⇒ 🔬 **本轮已在 `mapping.txt` 中逐个核对，可以排除**：`com.ake.browser.DomExtractBridge` 类名与 `deliver(long,String)` / `deliverError(long,String)` 方法名**全部原名保留**，与 JS 侧 `AkeBridge.deliver(...)` 的字面量一致（§2.9 N-3）。
+- 本轮起，担心点下移到更下游：**名字还在，但回调到底会不会来** —— 注入时机是否落在页面 ready 之后、`StabilityDetector` 是否误判收敛、多 bridge 是否互相顶替（源码注释已自认存在「deliver 落到被顶替对象上」的风险）、WebView 进程被杀后 `pending` map 的残留状态。**这些只在运行时说话。**
 
-**残余风险**：即使 debug 包跑通，release 包仍可能因 R8 失败。**两类包都要验证**。
+> **一句话：本轮把这条从「怀疑清单」移到了「观测清单」。它没有被解除，只是不再需要从头猜。**
+
+**缓解措施（复审后重排顺序）**
+1. **今天就能做，且不需要等任何东西**：拿**已带 v2 签名的 debug APK** 在任意一台真机上跑 **M3–M6**（安装 / 冷启 / 建库 / 遍历页面）—— 不需要 CDN、不需要 manifest、不需要 release 签名。
+2. 再跑 **M7–M11**（需 CDN/manifest + 真实模型；release 口径还需要签名）。
+3. release 包必须**单独**再跑一遍同一套用例（R8 只对 release 生效）。
+
+**残余风险（复审补充）**：即使 debug 包跑通，release 包仍可能因 R8 失败。**两类包都要验证。** 本轮已提前把「符号层」这一半静态做掉（§2.9 N-3），**剩下那一半只能靠真机跑**。
 
 ---
 
@@ -355,38 +436,46 @@ MVP 基线（未计 KV）       ≈ 3.0–3.1 GB   ← 已在 8GB 机上逼近 L
 
 ---
 
-### 2.7 🔴 R-G · R8 混淆后行为未验证
+### 2.7 🟠 R-G · R8 混淆后行为未验证 —— **🔬 本轮已部分关闭，由 P0 降为 P1**
 
 | 项 | 内容 |
 |---|---|
 | **影响面** | 所有 release 包用户（**即所有正式用户**） |
-| **发生概率** | **高**（首次构建 release 即暴露） |
+| **发生概率** | **中**（上轮为「高：首次构建 release 即暴露」；现已实跑一次，**「首次构建即失败」这类已发生并被修掉**，剩余为运行时行为类） |
+| **本轮结论** | **R8 已真实执行；六个高危反射点的「符号存活」已静态核实通过；「运行时行为正确」仍未知 ⇒ 降级但不解除** |
 
-`proguard-rules.pro` 的规则写得相当到位（逐条注明「为什么必须留」），关键项均已覆盖：
+#### ① R8 确实执行了（🔬 本机实跑）
 
-| 保留对象 | 状态 |
-|---|---|
-| `@JavascriptInterface` 方法名 | ✅ `-keepclassmembers class * { @android.webkit.JavascriptInterface <methods>; }` |
-| `com.ake.browser.DomExtractBridge` 整体 | ✅ |
-| Room `_Impl` / Entity / DAO | ✅ |
-| LiteRT-LM `com.google.ai.edge.**` 整体 | ✅（刻意整体保留，正确） |
-| 全局 native 方法 JNI 保护 | ✅ |
-| kotlinx.serialization `$serializer` | ✅ |
-| Hilt / ViewModel 反射创建 | ✅ |
-| Compose `@Composable` | ✅ |
+```
+app/build/outputs/mapping/release/mapping.txt        76,226,539 B   ← 上轮假设它会存在，本轮它真的存在
+app/build/outputs/mapping/release/usage.txt          （移除 59,335 项）
+app/build/outputs/mapping/release/seeds.txt          6,365,977 B
+app/build/outputs/apk/release/app-release-unsigned.apk  63,004,478 B / 60.07 MiB
+```
 
-**但规则写对 ≠ 规则生效**。R8 从未执行过一次，以下问题均无答案：
+**可复现性也复核了** 🔬：删除 `mapping/release` 与 `apk/release` 后重跑 `:app:assembleRelease`，`packageRelease` 真实重执行，**APK 与 mapping.txt 的 md5 与备份逐字节一致**（`bbcc99e8…` / `5994cdd3…`）。
 
-1. 规则是否过度保留，导致体积超 150MB 红线？
-2. 规则是否仍有遗漏，导致运行时崩溃或静默失效？
-3. `-keep class io.ktor.** { *; }` 这类**整体保留**是否让体积失控？
+#### ② 六个高危反射点：符号层静态核对结果（🔬 逐个查 mapping.txt）
+
+| 高危点 | 混淆后是否存活 | 结论 |
+|---|---|---|
+| `@JavascriptInterface` 方法名 | ✅ `com.ake.browser.DomExtractBridge` **类名未变**；`deliver(long,String)`、`deliverError(long,String)` **方法名未变**，与 JS 侧 `AkeBridge.deliver(...)` 字面量一致 | **本项目最阴险的一条，符号层已排除** |
+| Room `Class.forName("..._Impl")` | ✅ 10 个 `*_Impl` 类名全部原名保留（含 `AkeDatabase_Impl`） | 上一层已排除；**字段名 / SQL 列名待运行时** |
+| LiteRT-LM `com.google.ai.edge.**` | ✅ 933 条目保留 | ✅ |
+| 全局 native 方法 | ✅（`.so` 一并打进两个 ABI） | ✅ 符号层 |
+| kotlinx.serialization `$serializer` | ⬜ **本仓 `com.ake.*` 内无 `@Serializable` 类 ⇒ 不适用**（🔬 全仓 grep 零命中） | ⬜ |
+| Hilt / ViewModel 反射创建 | ⚠ **见 §2.9 N-5**：release 包中大量 `*_Factory` 被标为 `R8$$REMOVED$$CLASS` | ❌ **留待 M6 裁决** |
+
+> **⚠ 一句话提醒（防止这条被误读成「验证通过」）**：上面这张表证明的是「**名字还在**」，**不是「代码还被调用」、更不是「行为还对」**。
+> `-keep` 保住的是壳，**可达性**要靠调用链，**正确性**只能靠跑。团队本轮把 R8 裁剪问题从「加 keep 规则留壳」改成「让调用链真实可达」，方向完全正确 —— 但**是否真的可达，只有 ART 说了算**。
 
 **缓解措施**
-1. 构建 release 包，检查体积红线。
-2. **真机跑通 A1 用例（release 包）**。
-3. 若失败，二分 `proguard-rules.pro` 定位。
+1. ✅ **已完成**：构建 release 包（60.07 MiB，远低于 150MB 红线）。
+2. ✅ **已完成**：静态核对六类符号。
+3. **待办（P1）**：**真机跑 A1 用例（release 包）** —— M11 必须用 release 包跑，debug 包跑通不能替代。
+4. **待办（P1）**：给 `:ui`（ViewModel 反射创建）与 `:app`（Hilt 根图）补上 release 包专项回归。
 
-**残余风险**：R8 行为与 AGP 版本强相关，**每次升级 AGP 都需重验**。
+**残余风险**：R8 行为与 AGP 版本强相关，**每次升级 AGP 都需重验**；`-keep` 只能保符号，保不住语义。
 
 ---
 
@@ -405,32 +494,211 @@ MVP 基线（未计 KV）       ≈ 3.0–3.1 GB   ← 已在 8GB 机上逼近 L
 5. 灰度：5% → 24h → 50% → 100%。
 6. manifest 驱动，只改配置即可回滚。
 
-**★ 但存在一个结构性空白**
+**客户端侧的堵漏已完成并有测试覆盖** 🔬：`data` 下 13 个 `modeldist` 测试文件覆盖了拉取 / manifest 解析 / 验签 / 三级兜底 / 兼容性 / 资产账本 / 归档保留策略（含「双闸门」的类型化约束），`llm` 侧的同步下发流程也有 14 项测试。
 
-整套分发设计依赖一个**服务端 manifest**（`GET https://<model-cdn>/ake/gemma4-e2b/manifest.json`）——
-**该 manifest 目前不存在，CDN 未搭建，Secret 未配置**。
+**★ 但结构性空白没有变 —— 而且现在的形态更清楚了**
 
-含义：**MVP 用户现在无法完成首次启动**，因为模型无处可下。
+整套分发依赖一个**服务端签名 manifest**。现状 🔬：
 
-**缓解措施**
-1. **P0**：搭建模型 CDN 与 manifest 服务（GitHub Release 可作首发渠道）。
-2. **P0**：配置四个签名 Secret。
-3. **P1**：实现「手动导入本地模型」作为无网兜底。
+- `PersistenceModule.kt:428` 默认注入 `ModelManifestConfig.UNCONFIGURED`（未配置 URL / 未钉公钥）；
+- 客户端对该配置是 **fail-closed**（`ModelManifestSourceTest` 明确断言了「未配置 ⇒ 原样抛出错误」）；
+- **运维侧从未产出过签名 manifest**，CDN 未搭建，四个签名 Secret 未配置。
+
+**含义（复审口径，比上轮更精确）**：
+
+| 场景 | 现状 |
+|---|---|
+| 真实新用户的首次启动 | ❌ **仍然拿不到模型**（fail-closed ⇒ 报错而非下载） |
+| 客户端在这条路上的行为是否正确 | ✅ 链路完整且 fail-closed，**这一设计是对的**（宁可报「未配置」，也不静默下载不受信权重） |
+| 内部验证（M7） | ⚠ 需要先搭 manifest 服务，或实现「手动导入本地模型」这条 P1 兜底 —— **后者目前仍未实现**（🔬 全仓 `importLocal` / `sideload` 零命中） |
+
+> **我要明确表扬这个 fail-closed 决策**：在一个会被提示注入攻击的 App 里，把「模型权重来源不可信」设计成硬失败，而不是退回不校验的路径，是正确的。
+> **但它同时意味着：在 manifest 产出之前，P0 阻塞会一直存在，而且不会有任何「部分可用」的中间态。**
+
+**缓解措施（按 ROI 排序）**
+1. **P0 · 最短路径**：搭最小 manifest 服务（GitHub Release + 一个静态 `manifest.json` 即可做首发），配 4 个 Secret。**只要这一步完成，M7 立刻可做。**
+2. **P0 · 并行**：给 Signed release 出包（否则 M7–M11 的 release 口径无从谈起）。
+3. **P1 · 解耦内部验证**：实现「手动导入本地模型」（`adb push` 到私有目录 + 设置页选择），**让 M8–M11 不必被 manifest 阻塞**。这是我建议的优先动作之一。
 
 ---
 
-### 2.9 风险总览
+### 2.9 🆕 本轮新增发现清单（Release-Only / Test-Only 坑 · N 系列）
 
-| 编号 | 风险 | 概率 | 级别 | 残余风险可否接受 |
-|---|---|---|---|---|
-| R-A | 从未真机运行 | 100% | **P0** | ❌ 必须先消除 |
-| R-B | 端侧 OOM | 高 | **P0** | 需实测校准后判定 |
-| R-C | 延迟 / 热节流 | 高 | **P0** | 需实测 |
-| R-D | backend 兼容 | 高 | **P0** | 需覆盖主流 SoC |
-| R-E | 提示注入 | 中高 | **P0** | ⚠️ 不可完全消除，压爆炸半径 |
-| R-F | 隐私合规 | 中 | **P0/P1** | 部分不可消除，须如实告知 |
-| R-G | R8 混淆 | 高 | **P0** | 需 release 包实测 |
-| R-H | 模型分发 | 高 | **P0** | 需 CDN 与 Secret |
+> **为什么单列这一节**：下面这些坑，**debug 构建永远不会报错，代码评审也看不出来，只有真的跑一次 release / 真的写一个测试才会撞上**。
+> 它们的共同特征是「构建日记只给一行 warning，线上行为悄悄变」。**每一条都值得在未来被自动化拦住。**
+> N-1 / N-2 / N-4 / N-5 / N-9 由本轮 release 实跑暴露；N-3 为本轮建立的静态验证手法；N-6 / N-7 为复审独立发现。
+
+---
+
+#### 🅝 N-1 · `android.nonFinalResIds=false` 让 R8 硬失败 —— **Release-Only**
+
+| 项 | 内容 |
+|---|---|
+| 症状 | `Optimized resource shrinking requires non-final IDs` —— 直接 BUILD FAILED |
+| 触发条件 | `isMinifyEnabled=true` **且** `isShrinkResources=true` **同时**打开时才出现 |
+| 为什么以前没暴露 | **debug 从不满足这个组合**（debug 两个都是 false）⇒ 在首次 `assembleRelease` 之前，这个配置错误**完全隐形** |
+| 现状 | 已改 `true`；`gradle.properties` 里留了成因注释（含「全仓检索无依赖 final id 写法」的安全性论证） |
+| **通用教训** | **任何只在 release 生效的开关，都必须有一条固定跑 release 的流水线。** 否则它对 CI 而言等于不存在 |
+
+---
+
+#### 🅝 N-2 · `-assumenosideeffects … { *; }` 会吞掉 `Object` 的方法 —— **Release-Only · 静默型**
+
+| 项 | 内容 |
+|---|---|
+| 症状 | R8 仅输出一行告警：`matches the following method(s) on java.lang.Object: clone/equals/finalize/...` |
+| 机理 | `{ *; }` 把**继承来的** `equals` / `hashCode` / `clone` / `finalize` 一并判为「无副作用」⇒ 会被静默删掉 |
+| 危害等级 | **比 N-1 高**：N-1 让你构建失败，这一条让你**构建成功但行为错误**。一旦 tooling 真进了 release classpath，对象相等性悄悄失效 |
+| 处置 | **直接删除该规则**（tooling 本就不在 release 依赖里）；注释中写明：若将来确需裁剪，**必须**写成显式 `-assumenosideeffects class … { <methods>; }` 并逐条列方法 |
+| **通用教训** | **R8 的「警告」比「错误」危险。错误只会让你今天加班，警告会让你上线后半夜被叫起来。** 建议把 R8 告警纳入 CI 门禁（非零 tolerance） |
+
+---
+
+#### 🅝 N-3 · 「R8 高危符号静态核对」手法 —— **本轮建立，强烈建议沉淀进 CI**
+
+既然六个高危反射点全是「混淆后名字不能被改」，那就**不用等设备，直接查 `mapping.txt`**。本轮实际执行方式与结论：
+
+```bash
+# ① 类名是否保留（类定义行 — 名字在 "->" 右侧）
+grep -n "^com.ake.browser.DomExtractBridge " app/build/outputs/mapping/release/mapping.txt
+# ⇒ com.ake.browser.DomExtractBridge -> com.ake.browser.DomExtractBridge:   ✅ 未混淆
+
+# ② 方法名是否保留（成员行尾 -> 后的名字）
+# ⇒ 0:13:void deliver(long,java.lang.String):61:61 -> deliver        ✅
+# ⇒ 0:14:void deliverError(long,java.lang.String):74:74 -> deliverError  ✅
+
+# ③ Room / LiteRT 同理
+grep -cE "^com\.ake\.data\..*_Impl ->" mapping.txt     # 10 个，全部原名
+grep -c  "com.google.ai.edge"        mapping.txt        # 933 条保留
+```
+
+| 高危点 | 结果 |
+|---|---|
+| JS 桥 `deliver` / `deliverError` | ✅ 与 JS 侧字面量 `AkeBridge.deliver(...)` 一致 |
+| Room `*_Impl` | ✅ |
+| `com.google.ai.edge.**`（LiteRT-LM） | ✅ |
+| `@Serializable` `$serializer` | ⬜ 不适用（`com.ake.*` 内无 `@Serializable` 类 🔬） |
+| Hilt `*_Factory` | ❌ 树摇，见 N-5 |
+
+> **建议固化为 CI 步骤**（成本近乎为零，收益是把「最难归因的一类故障」提前到构建期）：
+> release 构建后跑一条断言：`mapping.txt` 必须包含 `-> deliver` 与 `-> deliverError`，否则 fail。
+> **这条断言比任何文档承诺都可靠 —— 它会让「有人不小心删了一条 keep 规则」立刻变成红 CI。**
+
+---
+
+#### 🅝 N-4 · 未签名 release 包「看起来像产物，其实不可安装」 —— **Release-Only · 🔬 本轮实测**
+
+```
+release APK: 无 META-INF/CERT.*        ⇒ v1 签名缺失
+             全文检索 "APK Sig Block 42" 零命中 ⇒ v2/v3 签名缺失
+             ⇒ adb install 必然返回 INSTALL_PARSE_FAILED_NO_CERTIFICATES
+debug   APK: 存在 "APK Sig Block 42"   ⇒ 已由 ~/.android/debug.keystore 签名，可直接安装
+```
+
+设计本身是对的（`canSignRelease == false` 时不挂签名，由 CI 的签名步骤拦下）。**但由此产生一个必须写进流程的结论**：
+
+> **未签名 release 包不是「可安装产物」，只能作为「构建可行性 + 符号正确性」的证据。**
+> 它的名字里那个 `-unsigned` 不是修饰语，是**结论**。详见 §5.5 Q2 的完整边界说明。
+
+---
+
+#### 🅝 N-5 · R8 把大量 Dagger/Hilt `*_Factory` 树摇掉了 —— **Release-Only · 待 M6 裁决**
+
+```
+com.ake.agent.di.AgentBindingsModule_ProvideActionRiskPortFactory      -> R8$$REMOVED$$CLASS
+com.ake.agent.di.AgentBindingsModule_ProvideAgentLoopFactory           -> R8$$REMOVED$$CLASS
+com.ake.agent.di.AgentBindingsModule_ProvideCompositeToolRegistryFactory-> R8$$REMOVED$$CLASS
+…（同类条目数量很大）
+```
+
+两种可能，**静态无法区分**：
+
+1. **正常**：这些 binding 确实没人注入 ⇒ 摇掉是对的，还省了体积；
+2. **异常**：某个注入点是**反射/字符串触发**的（例如 lazy 的 `Class.forName` 注入），R8 的可达性分析看不见 ⇒ **上线后才 `MissingBinding`**。
+
+> **这是我本轮在静态层唯一「看得到真伪、却判断不了」的一条。**
+> **登记：上机第一天（M6）优先验证 release 包的冷启动 DI 图是否完整**，特别要跑 debug 包跑不到的分支（设置页、历史列表、删除确认）。
+
+---
+
+#### 🅝 N-6 · 🔴 新写的 CI 位于 GitHub 从不读取的路径 —— **复审独立发现 · 意味着「CI 守卫」目前不存在**
+
+```
+仓库根/.github/workflows/ci.yml              ← GitHub Actions 唯一读取的位置
+                                               （现存：jvm-tests / compile / ksp-verify / lint / assembleDebug）
+HarnessAgent/.github/workflows/ci.yml        ← 本轮新增的 4 个 job 在这里
+                                               （arch-guard / test / release-r8 / model-redline）
+```
+
+**GitHub Actions 只扫描仓库根的 `.github/workflows/`。** 因此：
+
+- `arch-guard`（架构守卫）、`release-r8`（R8 冒烟）、`model-redline`、`test` 这四个 job **从未执行过，将来也不会触发**；
+- ⇒ 检查项 **B6「CI 全绿」既未通过，也尚未开始**；
+- ⇒ 「跨层依赖有 CI 守卫」这句话里，**CI 这一半目前不成立**（本地 `checkModuleDependencies` 那半成立且有效）；
+- 讽刺的是：**根部那份旧 `ci.yml` 里每个 step 都已经写了 `working-directory: HarnessAgent`** —— 说明团队知道正确的放法，**这次只是把新文件放到了惯性位置**。
+
+**修复**：把这 4 个 job 合并/搬移到仓库根 `ci.yml`（沿用 `working-directory: HarnessAgent`），并把 N-1/N-2/N-3 的断言接进 `release-r8` job。
+> 顺手修一处文档漂移：新 ci.yml 注释里写「11 模块 / 362 用例」，**实际是 386**（🔬 实测），维护提醒要跟上。
+
+---
+
+#### 🅝 N-7 · 架构守卫缺少「负向测试」 —— **复审独立发现 · P1**
+
+🔬 全仓检索 `checkModuleDependencies` 只命中两处：**根 `build.gradle.kts` 的任务定义**、和那份位置错误的 `ci.yml`。**没有找到任何「注入一条越层依赖 ⇒ 断言守卫确实报错」的自测。**
+
+风险很实在：**如果守卫自身是永真的**（白名单写太宽、正则没匹配上、方向写反），那么「守卫通过」将成为毫无意义的绿灯，而且没人会发现。
+
+**建议**（成本很低）：加一条负向用例 —— 用 Gradle TestKit 或一条 shell 脚本临时往某模块塞一条越层的 `project(...)` 依赖，断言 `checkModuleDependencies` **以非零码退出**，然后还原。
+
+---
+
+#### 🅝 N-8 · 写测试抓出的 3 个真 bug（其中 1 个是安全缺口）—— **Test-Only · 正向 ROI 证据**
+
+| # | 缺陷 | 性质 |
+|---|---|---|
+| 1 | **`InjectionIsolator` 的 `Escalation.BLOCKED` 只置位、不换正文** —— `TOOL_RETURN` / MCP 返回路径未兜住，注入文本一个字节都没少，却让下游以为「这段已安全」 | **🔴 安全缺口** |
+| 2 | 另有 2 个由 `:data` / `:agent` 测试抓出的逻辑缺陷（见 commit `0b22114`） | 可靠性 |
+
+> **这一条是本轮最有说服力的投资回报证明**：单测的价值不在于让覆盖率数字变好看，而在于**它把一个安全缺口在投产前挖了出来**。
+> 同时也说明：**`TOOL_RETURN` / MCP 这类「第三方内容」路径确实在出真 bug**，所以 §1 的 **C8（外部 MCP 鉴权与隔离）不应降级**。
+
+---
+
+#### 🅝 N-9 · R8 的内存假象：报的是「守护进程消失」，其实是 OOM —— **环境陷阱 · Release-Only**
+
+团队已记录在 ci.yml 注释里（👍 做得对），此处升格为 N 系列：
+
+| 现象 | 真相 |
+|---|---|
+| 报错 `Gradle build daemon disappeared unexpectedly` | **不是** Gradle daemon 的锅，是 R8 worker 抢不到内存 |
+| `-Xmx3g` / `-Xmx6g` 都崩在 `:app:minifyReleaseWithR8` | R8 会**另起约 800MB 的 worker 进程**；daemon 堆给越大，worker 越抢不到 |
+| 稳定组合 | `-Xmx2g --no-parallel`（约 3 分钟） |
+
+**加上我复审时踩到的一个坑**（顺手记下，省得下一个人再踩）：
+
+```bash
+./gradlew assembleRelease -Xmx2g            # ❌ Unknown command-line option '-X'
+./gradlew assembleRelease -Dorg.gradle.jvmargs="-Xmx2g -XX:MaxMetaspaceSize=768m"   # ✅
+```
+
+---
+
+### 2.10 风险总览
+
+| 编号 | 风险 | 概率 | 级别 | 本轮变化 | 残余风险可否接受 |
+|---|---|---|---|---|---|
+| R-A | 从未真机运行 | 100% | **P0** | ⚠ **未动** —— `adb` 未安装、`adb devices` 为空 🔬 | ❌ 必须先消除 |
+| R-B | 端侧 OOM | 高 | **P0** | **未动**（无一项测试触碰内存） | 需实测校准后判定 |
+| R-C | 延迟 / 热节流 | 高 | **P0** | **未动** | 需实测 |
+| R-D | backend 兼容 | 高 | **P0** | **未动**（`.so` 已入包，但未加载） | 需覆盖主流 SoC |
+| R-E | 提示注入 | 中高 | **P0** | 🟡 **下降**：BLOCKED 换正文缺口已修并有回归；但端到端未验 | ⚠️ 不可完全消除，压爆炸半径 |
+| R-F | 隐私合规 | 中 | **P0/P1** | **未动**（Keystore 部分零测试） | 部分不可消除，须如实告知 |
+| R-G | R8 混淆 | ~~高~~ **中** | ~~P0~~ **P1** | 🟡 **降级**：R8 已实跑 + 高危符号静态核对通过；剩运行时行为 | 需 release 包在真机跑一遍 |
+| R-H | 模型分发 | 高 | **P0** | 🟡 **部分**：客户端全链路有测试；**manifest / Secret 仍缺失** ⇒ 真实用户仍拿不到模型 | ❌ 必须产出 manifest |
+| **R-I** | **release 包未签名 ⇒ 不可安装** | **100%** | **P0（新增）** | 🔴 新增（N-4） | ❌ 出签名包 |
+| **R-J** | **CI 实际未生效（文件位置错）** | **100%** | **P1（新增）** | 🔴 新增（N-6） | ❌ 把 CI 文件搬到仓库根 |
+
+> **读者注意**：级别从 P0 降到 P1 ≠ 风险消失。**它只表示「该风险的某一层已被证明」，未被证明的那一层继续 P0 计数。**
 
 ---
 
@@ -969,182 +1237,316 @@ grep -rniE "accessibilityservice|BIND_ACCESSIBILITY|isAccessibilityTool"
 
 ---
 
-### 5.1 判定
+### 5.1 判定（第 2 轮复审）
 
-# 🔴 NO-GO
+# 🔴 NO-GO（维持）
 
-**不可对外发布，不可上架 Google Play 公开轨道。**
+**判定未变，但依据已经换了。**
 
-| 项 | 结论 |
-|---|---|
-| 对外发布 / Play 公开轨道 | ❌ **禁止** |
-| Play 内部 / 封闭测试轨道 | ⚠️ 需先完成 §5.2 全部 P0 项 |
-| 侧载给内部人员试用 | ✅ 可，须明确标注「未经验证的实验构建」 |
+| 项 | 结论 | 门槛变化 |
+|---|---|---|
+| 对外发布 / Play 公开轨道 | ❌ **禁止** | 未变 |
+| Play 内部 / 封闭测试轨道 | ❌ **仍然不可** | 未变 —— 拦路者具体是 **release 包不可安装（R-I）+ 从未上机（R-A）+ manifest 未产出（R-H）** 三条 |
+| **侧载 debug 包给内部人员做 M3–M6** | ✅ **可，且应立即开始** | **本轮新放开**：debug APK 已签名，**今天即可 `adb install`** |
+| 侧载给内部人员做功能试用（M7+） | ⚠️ 需完成 §5.2 阶段一 + CDN/manifest | 与上轮口径一致 |
 
-### 核心理由（三条，任一即充分）
+### 核心理由（复审：**三条减到一条，但这一条依然充分**）
 
-1. **从未产出过可安装 APK，从未在任何真机上运行过一次。**
-   这不是「测试不够充分」，是**验证维度的根本缺失** —— 我们不知道它能不能安装、能不能启动、会不会在第一条消息就崩。
+| # | 上轮理由 | 现状 |
+|---|---|---|
+| 1 | ~~从未产出过可安装 APK~~ | ✅ **已解除** —— debug 93.70 MiB（且已签名可装）；release 60.07 MiB（未签名，不可装）🔬 |
+| 2 | ~~R8 与 AGP 从未执行过一次~~ | ✅ **已降级** —— R8 真实执行、产物可复现、**六个高危反射点符号静态核对通过** 🔬；残余部分降为 P1（§2.9 N-3/N-5） |
+| 3 | ~~测试近乎为零~~ | ✅ **已解除** —— **386 通过 / 0 失败**；但 8,855 行（33%）仍零测试、且无一条 `androidTest` 🔬 |
+| **4** | **从未在任何真机上运行过一次** | 🔴 **仍然成立，且现在它是唯一剩下的拦路者** |
 
-2. **R8 与 AGP 从未执行过一次。**
-   而本项目有六个高危反射点（JNI 方法名、`@JavascriptInterface` 方法名、`Class.forName("..._Impl")`、serialization `$serializer`、Hilt 绑定、ViewModel 反射创建）。**这些全部只在运行时才解析，且失败模式包含「静默失效」** —— 例如 JS 回调永不触发，不会崩溃，只会「看起来卡住了」。
-
-3. **测试近乎为零。**
-   全工程仅 `:core:common` 有 4 个单测，**七个模块零测试**，**androidTest 完全不存在**。
+> **结论：上轮我写的是「三条理由，任一即充分」。现在是「一条理由，依然充分」。**
+> **本项目从未在任何设备上执行过任何一个指令周期。** 这不是「测试不充分」，而是**验证维度的缺失** —— 我们不知道它能不能安装、能不能启动、会不会在第一条消息就崩、模型加载会不会直接 OOM。
+>
+> 本轮的三项成果把「一旦上机发现问题，能不能查」从近乎不可能提到了基本可行。**它们改变了修 bug 的成本，没有改变「会不会有 bug」的概率。**
 
 ---
 
 ### 5.2 放行所需的最小真机验证集（P0）
 
 > 完成以下全部 = 可进入内部测试轨道。完成内部轨道 ≥1 周且无 P0 = 可考虑对外。
+>
+> **🔬 复审实测的整体完成度：M1–M21 共 21 项 —— 已完成 4 项（M1、M2、M19 不适用剔除后见下）、0 项可由本机继续推进、17 项被「无设备」硬阻塞。**
+> 准确地说：**阶段一的前半段已被静态手段部分替掉（占总量的 ~19%），从 M3 起全部归零。**
 
 #### 阶段一：打通产物的存在性（先证明「有东西可装」）
 
-| # | 项 | 命令 / 方法 | 通过标准 |
-|---|---|---|---|
-| **M1** | 解析 AGP 9.4 实际 KGP 版本 | `./gradlew buildEnvironment \| grep -Ei 'kotlin-gradle-plugin\|symbol-processing'` | 与 catalog 一致；若被抬升按 `docs/03` §2.3 钉版本 |
-| **M2** | 产出 debug APK | `./gradlew :app:assembleDebug` | 有 APK 产物 |
-| **M3** | **APK 可安装** | `adb install` | 安装成功 |
-| **M4** | **App 可启动到首页** | 真机冷启 | 无崩溃、无 ANR |
-| **M5** | Room 建库成功 | 触发一次持久化 | 无 `Cannot find implementation` |
-| **M6** | Hilt 运行时图完整 | 冷启遍历各页面 | 无 `MissingBinding` |
+| # | 项 | 命令 / 方法 | 完成度 | 通过标准 / 证据 |
+|---|---|---|---|---|
+| **M1** | 解析 AGP 实际 KGP 版本 | `./gradlew buildEnvironment \| grep -Ei 'kotlin-gradle-plugin\|symbol-processing'` | ✅ **已完成（间接）** | 上轮担心的「版本被抬升」未发生：11 模块编译 + release 打包全绿 ⇒ 版本栈自洽有运行证据 🔬 |
+| **M2** | 产出 debug APK | `./gradlew :app:assembleDebug` | ✅ **已完成** | **98,253,032 B / 93.70 MiB**，产物在场 🔬 |
+| **M2b** | **debug APK 已可安装（签名检查）** | 检查 v2 签名块 | ✅ **已完成** | 含 `APK Sig Block 42` ⇒ **无需任何额外步骤，今天就能 `adb install`** 🔬 |
+| **M3** | **APK 可安装** | `adb install` | ⚠️ **0%** | 🔴 **本机 `adb` 未安装、`adb devices` 为空** 🔬。**注意：release 包即使有设备也装不上（未签名，见 §5.5 Q2）**；**debug 包可以直接试** |
+| **M4** | **App 可启动到首页** | 真机冷启 | ⚠️ **0%** | 无崩溃、无 ANR |
+| **M5** | Room 建库成功 | 触发一次持久化 | 🟡 **符号层已半验** | release 包内 10 个 `*_Impl` 类名未混淆 🔬；真机 SQL 执行〇次 |
+| **M6** | Hilt 运行时图完整 | 冷启遍历各页面 | 🟡 **已定位风险** | ⚠ **release 包中大量 `*_Factory` 被 R8 树摇**（§2.9 N-5）⇒ **本项是上机第一天最该先跑的一项** |
 
-> ⚠️ **不要小看 M1–M6**。对一个从未出过包的工程，M4 就失败是完全正常的。
+> ⚠️ **M3–M6 是本份文档里性价比最高的一段。** 它不需要 CDN、不需要模型、不需要 release 签名，**只需要一台能 `adb` 连上的 Android 手机和 15 分钟**。
+> 对一个从未出过包的工程，M4 就失败是完全正常的 —— **而正因为正常，才更该早失败一次。**
 
 #### 阶段二：核心链路（证明「能干活」）
 
-| # | 项 | 通过标准 |
-|---|---|---|
-| **M7** | **模型下载 2.6GB 成功** | 下载 + 分块校验 + 整体校验通过（需先搭 CDN/manifest） |
-| **M8** | **LiteRT-LM 加载 + 首条推理成功** | 不出现 `UnsatisfiedLinkError` / `Can not find OpenCL library` |
-| **M9** | **backend 降级路径可用** | 强制 GPU 失败 ⇒ 自动降级 CPU 且能继续跑 |
-| **M10** | **WebView DOM 抽取成功** | `@JavascriptInterface` 回调触发，Agent 能"看见"页面 |
-| **M11** | **C1 用例端到端跑通**（release 包） | 三条记录与页面逐字一致 |
+| # | 项 | 完成度 | 通过标准 |
+|---|---|---|---|
+| **M7** | **模型下载 2.6GB 成功** | ⚠️ **0%** | 需先搭 CDN/manifest（**或先实现「手动导入本地模型」解耦**）。客户端链路已就绪并测试覆盖 🟡 |
+| **M8** | **LiteRT-LM 加载 + 首条推理成功** | ⚠️ **0%** | `.so` 已在包内（arm64 22.2MB / x86_64 26.4MB）🔬，**但从未被 `dlopen`**；不出现 `UnsatisfiedLinkError` / `Can not find OpenCL library` |
+| **M9** | **backend 降级路径可用** | ⚠️ **0%** | `BackendPolicy` 阶梯是纯函数（可单测已过），**真 GPU / NPU 未参与** |
+| **M10** | **WebView DOM 抽取成功** | ⚠️ **0%**（符号层 ✅） | `@JavascriptInterface` 回调触发。**方法名存活已静态证明，回调本身一次都没验过**；`:browser` 零测试 |
+| **M11** | **C1 用例端到端跑通（release 包）** | ⚠️ **0%** | 三条记录与页面逐字一致。**必须用 release 包跑** |
 
-> ★ **M10 是本项目的咽喉**。它一旦失效，症状是「不崩溃、没日志、就是不动」—— 必须专门验证，不能"顺便看看"。
+> ★ **M10 仍是本项目的咽喉** —— 只是位置变了：不是「名字会不会被改」（已证明不会），而是**「回调到底来不来」**。症状仍然是「不崩溃、没日志、就是不动」。**必须专门验证，不能"顺便看看"。**
 
 #### 阶段三：安全与终止（证明「不会闯祸」）
 
-| # | 项 | 通过标准 |
-|---|---|---|
-| **M12** | **S3 支付类硬禁止** | 全部拒绝，且**不提供确认入口** |
-| **M13** | **S1 提示注入拦截**（尤 S1-2 伪造 nonce 闭合） | 全部拦截，`policy_decision` 有记录 |
-| **M14** | **T3 预算耗尽如实告知** | 不静默截断后报 `COMPLETED` |
-| **M15** | **确认弹窗期间旋转屏幕 / 杀后台** | 无协程泄漏、无永久挂起 |
-| **M16** | **一键清除后核验** | `app_webview/` 与库文件确认不存在 |
+| # | 项 | 完成度 | 通过标准 |
+|---|---|---|---|
+| **M12** | **S3 支付类硬禁止** | ⚠️ **0%**（🟡 逻辑 🟡 测试 ⚠） | 全部拒绝且不提供确认入口。❗ **全仓测试中 `payment`/`FORBIDDEN` 零命中 🔬** —— 先把这条测试补上，再上机 |
+| **M13** | **S1 提示注入拦截**（尤 S1-2 伪造 nonce 闭合） | 🟡 **具备下层证据** | 全部拦截且 `policy_decision` 有记录；`BLOCKED` 换正文缺口已修 + 回归测试 ✅ |
+| **M14** | **T3 预算耗尽如实告知** | 🟡 **逻辑层已测** | 不静默截断后报 `COMPLETED` |
+| **M15** | **确认弹窗期间旋转屏幕 / 杀后台** | ⚠️ **0%** | 无协程泄漏、无永久挂起。`:ui` 零测试 |
+| **M16** | **一键清除后核验** | ⚠️ **0%** | `app_webview/` 与库文件确认不存在。⚠ 先修技术债 **D2**（失败不外抛 ⇒ 可能报成功而痕迹仍在） |
 
 #### 阶段四：性能与合规（证明「能用」且「可上架」）
 
-| # | 项 | 通过标准 |
-|---|---|---|
-| **M17** | 中端机（6–8GB）连续 3 次 C1 无 OOM | OOM 率 = 0 |
-| **M18** | 单步延迟实测（中端机） | 记录真实数字，校准文档中的 4.5s |
-| **M19** | 连续 20 分钟任务热节流行为 | 记录降频曲线与恢复行为 |
-| **M20** | Play Console 前台服务声明 + **两段演示视频** | 提交并通过审核 |
-| **M21** | 隐私政策 URL + Data Safety 表单 | 如实申报登录态访问 |
+| # | 项 | 完成度 | 通过标准 |
+|---|---|---|---|
+| **M17** | 中端机（6–8GB）连续 3 次 C1 无 OOM | ⚠️ **0%** | OOM 率 = 0。**386 项测试无一触碰内存** 🔬 |
+| **M18** | 单步延迟实测（中端机） | ⚠️ **0%** | 记录真实数字，校准文档中的 4.5s |
+| **M19** | 连续 20 分钟任务热节流行为 | ⚠️ **0%** | 记录降频曲线与恢复行为 |
+| **M20** | Play Console 前台服务声明 + **两段演示视频** | ⚠️ **0%** | 提交并通过审核。**演示视频必须在 M11 跑通后才拍得出来 ⇒ 依赖链最末端** |
+| **M21** | 隐私政策 URL + Data Safety 表单 | ⚠️ **0%** | 如实申报登录态访问。**这一项不依赖设备，随时可做，无需排期等待** |
 
 #### SoC 覆盖矩阵（M7–M11 需在每台上都跑）
 
-| 平台 | 代表机型 | 优先级 |
-|---|---|---|
-| 骁龙 8 系 | 小米/一加旗舰 | 必须 |
-| 天玑 9 系 | vivo/OPPO | 必须 |
-| Google Tensor | Pixel 7/8/9 | 必须 |
-| 骁龙 6/7 系中端 | 红米 Note 系列 | 必须（OOM 高发） |
-| 6GB 内存低端机 | 任意 | 必须（R1 校准） |
+| 平台 | 代表机型 | 优先级 | 状态 |
+|---|---|---|---|
+| 骁龙 8 系 | 小米/一加旗舰 | 必须 | ⚠️ 0% |
+| 天玑 9 系 | vivo/OPPO | 必须 | ⚠️ 0% |
+| Google Tensor | Pixel 7/8/9 | 必须 | ⚠️ 0% |
+| 骁龙 6/7 系中端 | 红米 Note 系列 | 必须（OOM 高发） | ⚠️ 0% |
+| 6GB 内存低端机 | 任意 | 必须（R1 校准） | ⚠️ 0% |
+
+> **矩阵的价值在于排查顺序的性价比**：任一机型上的一次失败就可能推翻 M7–M11 中的多项结论，因此建议用**最便宜的顺序**推进 —— **先中端骁龙/天玑（OOM 高发、成本低），后旗舰**。
 
 ---
 
-### 5.3 后续最小路径
+### 5.3 后续最小路径（**复审重排：把「今天就能做」提到最前**）
+
+> **上轮的路径是按流水线顺序写的；本轮改成按「前置依赖最少」排序。**
+> 差别在于：原 Step 1 需要设备等，原 Step 2 需要 CDN。**现在第一步不需要任何新东西。**
 
 ```
-Step 0 · 准备环境（阻塞一切）
-  ├── 安装 Android SDK Platform 36 + Build Tools 36.0.0
-  ├── export ANDROID_HOME=...
-  └── 预期首建 10–20 分钟
+Step 0 · ✅ 已完成（本轮成果）
+  ├── Android SDK Platform 36 + Build Tools 36.0.0 ✔
+  ├── debug APK 出包 ✔（93.70 MiB，已签名）
+  ├── release APK 出包 ✔（60.07 MiB，未签名）
+  ├── R8 执行 + mapping 产出 + 可复现 ✔
+  ├── 386 单测全绿 ✔
+  └── 高危反射点符号静态核对 ✔
 
-Step 1 · 证明产物存在性（M1–M6）
-  └── 出 debug APK → 安装 → 冷启 → 建库 → 遍历页面
-      ⚠️ 这一步就失败是完全正常的，不要跳步
+Step 1 ·【今天就能开始·15 分钟·只需一台手机】  ← ★ 最高优先级
+  └── 拿现有 debug APK 跑 M3–M6
+      adb install app-debug.apk → 冷启 → 触发持久化 → 遍历所有页面
+      ├── 不需要 CDN、不需要模型、不需要 release 签名
+      ├── ⚠️ M4 就失败也完全正常 —— 正因为正常，才该今天就失败一次
+      └── ★ 特别验证 M6（release 的 *_Factory 被树摇，见 §2.9 N-5）
 
-Step 2 · 补依赖缺口（阻塞 M7）
-  ├── 搭建模型 CDN + manifest.json（当前不存在）
-  └── 配置四个签名 GitHub Secret
+Step 2 ·【并行·不阻塞 Step 1】工具类补强（半天～1 天）
+  ├── ★ 修 CI 位置：把 4 个 job 搬到仓库根 .github/workflows/（否则守卫=不存在，§2.9 N-6）
+  ├── ★ 给架构守卫加负向测试（§2.9 N-7）
+  ├── ★ 把 mapping.txt 的 deliver/deliverError 断言接进 release job（§2.9 N-3）
+  ├── 补 M12 的支付禁止测试（当前零命中 🔬）
+  └── M21 隐私政策 URL + Data Safety（不依赖设备，随时可做）
 
-Step 3 · 核心链路（M7–M11）
+Step 3 · 依赖缺口（阻塞 M7–M11）
+  ├── 搭最小 manifest 服务 + 配 4 个 Secret
+  ├── 实现「手动导入本地模型」⇒ 让 M8–M11 不被 manifest 阻塞
+  └── 出已签名 release 包（否则 M11 无从谈起）
+
+Step 4 · 核心链路（M7–M11）
   └── 下载 → 加载 → 推理 → DOM 抽取 → C1 端到端（release 包）
 
-Step 4 · 安全与终止（M12–M16）
-  └── 支付禁止 / 注入拦截 / 预算告知 / 协程泄漏 / 清除核验
+Step 5 · 安全与终止（M12–M16）
+  └── 支付禁止 / 注入拦截 / 预算告知 / 协程泄漏 / 清除核验（先修 D2）
 
-Step 5 · 性能与合规（M17–M21）
+Step 6 · 性能与合规（M17–M21）
   └── SoC 矩阵 + OOM + 延迟 + 热节流 + Play 申报
 
-Step 6 · 内部轨道 ≥1 周
+Step 7 · 内部轨道 ≥1 周
   └── 无 P0 ⇒ 重新提交本门禁复审
 ```
+
+> **⚠ 关于 Step 0 的 SDK 环境说明（复审实测）**：本机已有 `/opt/android-sdk`（android-36），四条命令均可跑通。
+> 但 **本机没有 `adb`（`which adb` ⇒ not found）、`adb devices` 为空** 🔬 —— **Step 1 无法在本环境执行**，必须在有设备的机器上做。
+> 另外记录一个命令行坑：`./gradlew ... -Xmx2g` 会报 `Unknown command-line option '-X'`，正确写法是 `-Dorg.gradle.jvmargs="-Xmx2g -XX:MaxMetaspaceSize=768m"`（§2.9 N-9）。
 
 ---
 
 ### 5.4 技术债登记（可带病上线，须有 owner 与期限）
 
-| # | 项 | 级别 | Owner | 期限 |
-|---|---|---|---|---|
-| D1 | `:ui` → `:agent`/`:mcp`/`:data` 跨层依赖（问题 A） | P2 | 苏映棠 + 顾图南 | v0.2 前 |
-| D2 | `WipeEverythingUseCase` 失败不外抛 ⇒ 「一键清除」可能静默失败 | P1 | 霍承钧 | v0.2 前 |
-| D3 | 任务生命周期 Op 走可丢弃队列（问题 B 衍生） | P1 | 霍承钧 | v0.1 前 |
-| D4 | 七个模块零测试 | P1 | 全员 | v0.2 前，优先 `:agent` `:data` |
-| D5 | `gradle.properties` 的 `kotlin.jsr305=strict` 是否生效待验 | P2 | 韩渡川 | 上机首日 |
-| D6 | `data/build.gradle.kts` 的 datastore/protobuf 死依赖 | P2 | 霍承钧 | v0.2 前 |
-| D7 | `:mcp` 未 apply serialization 插件（加 `@Serializable` 即编译失败） | P2 | 霍承钧 | v0.2 前 |
+| # | 项 | 级别 | Owner | 期限 | 本轮变化 |
+|---|---|---|---|---|---|
+| ~~D1~~ | ~~`:ui` → `:agent`/`:mcp`/`:data` 跨层依赖~~ | ~~P2~~ | 苏映棠 + 顾图南 | — | ✅ **已清偿**（2026-10）。三条 Gradle 边摘除 + 守卫任务 `checkModuleDependencies`。⚠ 但守卫的 CI 侧尚未生效、**负向测试缺失**（§2.9 N-6 / N-7）⇒ **维持观察，不撤出租金** |
+| D2 | `WipeEverythingUseCase` 失败不外抛 ⇒ 「一键清除」可能静默失败 | P1 | 霍承钧 | v0.1 前 | ⚠ **未修**。这是 §6 里「UI 报成功、痕迹仍在」那一条的直接来源。**建议提到 M16 之前修** |
+| ~~D3~~ | ~~任务生命周期 Op 走可丢弃队列~~ | ~~P1~~ | 霍承钧 | — | ✅ **已清偿**。`TraceOp`/`StateOp` 双泳道 + `TaskReconciler` 启动对账 + 逐类隔离测试 |
+| 🟡 D4 | 七个模块零测试 | P1 | 全员 | v0.2 前 | **部分清偿**：4 → **386** 通过。❗ **残余 8,855 行（33.2%）仍零测试**：`:ui`(4,975) `:browser`(1,255) `:app`(1,438) `:core:contract`(914) `:core:model-api`(173)。**其中 `:browser` 是 WebView 与 DOM 注入的中枢，优先级最高** |
+| D5 | `gradle.properties` 的 `kotlin.jsr305=strict` 是否生效待验 | P2 | 韩渡川 | 上机首日 | 未变 |
+| D6 | `data/build.gradle.kts` 的 datastore/protobuf 死依赖 | P2 | 霍承钧 | v0.2 前 | 未变 |
+| D7 | `:mcp` 未 apply serialization 插件（加 `@Serializable` 即编译失败） | P2 | 霍承钧 | v0.2 前 | ⬜ **已不适用**：全仓 `com.ake.*` 内无 `@Serializable` 类 🔬 ⇒ 该风险自然消失，可注销 |
+| **D8** | **无插桩测试（`androidTest` 为零）** | **P1** | 全员 | v0.2 前 | 🔴 **新增**：这是 D4 的深层版本。**没有插桩/ Robolectric，`:browser` 与 Keystore 相关行为在结构上永远测不到** |
+| **D9** | **无覆盖率度量工具（无 jacoco / kover）** | **P2** | 韩渡川 | v0.2 前 | 🔴 **新增**：导致「覆盖率」在本工程只能是估计值，**任何覆盖率承诺都不可核验** |
+| **D10** | **release 产物未签名 ⇒ 不可安装** | **P1** | 韩渡川 | Step 3 之前 | 🔴 **新增**（R-I / §2.9 N-4） |
+| **D11** | **新 CI 位于 GitHub 不读取的路径** | **P1** | 韩渡川 | **今天** | 🔴 **新增**（R-J / §2.9 N-6）—— **半天工作量，收益是「守卫从不存在变成存在」** |
+
+---
+
+### 5.5 主理人两问的正式答复（第 2 轮复审）
+
+#### Q1 · 386 个 JVM 单测，对四大不可见领域的覆盖率是多少？
+
+**先给结论：就「运行时行为」而言，四个域合计 ≈ 0%。**
+
+> **前置声明（必须随这个数字一起被引用）**：本工程**未配置任何覆盖率工具**（无 jacoco / kover）🔬，所以以下全部是**按代码结构与测试落点做的工程估计**，不是实测值。任何人拿它对外承诺都应当连同这句话一起说。
+
+| # | 不可见领域 | 行为覆盖（估计） | 宽口径上限 | 判据（🔬 均为实测） |
+|---|---|---:|---:|---|
+| 1 | **JNI / LiteRT-LM `.so` 加载与跨 ABI** | **0%** | ≤5% | `:llm` 的 14 个测试全部走 `FakeModelLedgerGateway` 等替身，**全仓 `llm/src/test` 中 `System.loadLibrary` / GPU / backend 相关条目零命中** 🔬。`.so` 已打进包（arm64 22.2MB / x86_64 26.4MB），**但 JVM 单测进程从不 `dlopen` 它**。宽口径里那 ≤5% 只是文件名/枚举/路径的纯字符串逻辑（`ModelFileOpsExecutor` 在 temp 目录上确实跑了真实 rename/discard） |
+| 2 | **GPU delegate / NNAPI / SoC backend 选择** | **0%** | ≤10% | `BackendPolicy` 的降级阶梯是可被单测的纯函数 —— **但那验的是「选择序列」，不是「真能跑」**。是否会发生「`initialize()` 成功返回、首条推理才失败」这种架构文档 R2 明确预警的静默失败，**零 coverage** |
+| 3 | **WebView 渲染 / DOM 注入 / JS↔Native 桥** | **0%**（符号层静态 100%） | ≤5% | `:browser` 1,255 行 **零测试** 🔬。**好消息**：R8 符号层已用 `mapping.txt` 静态证明 `deliver`/`deliverError` 存活（§2.9 N-3）。**坏消息**：这只是「名字还在」，回调来不来、注入时机、`evaluateJavascript` 时序、多 bridge 顶替 —— **全是 0%** |
+| 4 | **2.6GB 常驻内存（mmap / native heap / PSS）** | **0%** | ~0% | 所有涉及文件的测试都用 `writeText("old-bytes")` 这种字节级 fake 🔬，**没有任何一项触碰过 MB 级分配**。而这是架构文档 R1 自评的「头号杀手」 |
+| | **四域合计（行为口径）** | **≈ 0%** | **≤5%** | |
+
+**但如果把口径放宽到「相邻的纯逻辑」** —— 也就是模型分发的**决策状态机**（拉取/验签/三级兜底/账本/归档双闸门保留/任期对账），这部分确实被 188 个 `:data` 测试覆盖得相当扎实，我估计 **30–45%**。
+
+> **⚠ 但必须说清楚：那 30–45% 覆盖的恰恰不是这四个域的风险本体。**
+> 它覆盖的是「下载编排会不会算错账」，不是「2.6GB 装不装得下、`.so` 加不加载得上、GPU 认不认、JS 回调来不来」。
+> **用 386 全绿去证明这四个域，等于用「账目全对」去证明「货真的运到了」。**
+
+#### Q2 · unsigned release 包，静态验证的边界在哪？
+
+**一句话：它是一个「很好的构建证据」，是一个「零分的运行证据」，而且它当前连「存在性证据」都不算（装不上）。**
+
+**✅ 它能证明什么（都是真的，可以写进任何人看的材料）**
+
+1. 整条 **编译 → KSP（Room/Hilt）→ 资源合并 → manifest 合并 → dex → 打包** 链路在 release 配置下贯通；
+2. **R8 真的执行了**，不是加了规则没跑；
+3. **六个高危反射点的符号在混淆后存活**（大部分），这是静态能拿到的最强证据；
+4. `.so` 正确打进两个 ABI，未被资源裁剪误删；
+5. **模型红线通过**（包内无权重文件）—— 这条现在是**可复验的硬断言**；
+6. 体积合规（60.07 MiB，远低于 150MB 红线）；
+7. **构建可复现**：删产物重跑，md5 逐字节一致 🔬。
+
+**❌ 它不能证明什么（这些最容易被误当成「已验证」，必须在文档里写死）**
+
+| # | 不能证明的事 | 说明 |
+|---|---|---|
+| 1 | **它不能安装** | 🔬 无 v1（无 `META-INF/CERT.*`）、无 v2/v3（无 `APK Sig Block 42`）⇒ `adb install` 必然 `INSTALL_PARSE_FAILED_NO_CERTIFICATES`。**连「存在性」验证都进不去** |
+| 2 | **它没有执行过任何一行代码** | 静态字节流 vs 运行着的进程 —— 这是本份文档从头到尾的分界线 |
+| 3 | **`-keep` 保住的是符号，不是可达性，更不是正确性** | 团队本轮把「留壳」改成「让调用链真实可达」，方向正确。但**是否真的可达，静态看不见**（反例就在眼前：release 包里大量 `*_Factory` 被树摇，见 §2.9 N-5） |
+| 4 | **它不能证明 release 与 debug 行为一致** | 这需要两者各跑一遍相同用例（M11 要求 release 包跑 C1，就是这个道理） |
+| 5 | **它不能证明 mapping.txt 能被用于线上符号化** | mapping 在场 ≠ 有人收 crash ≠ 能对应到版本号（当前 `versionCode=1` 且未随发布变更） |
+| 6 | **它不能代表任何「分数线」** | **60.07 MiB 与 93.70 MiB 都是没接过网的包；量的大小与能否运行无关** |
+
+> **防止误用的标准措辞（建议团队原样引用）**：
+>
+> > 本 unsigned release 包用于证明：**该工程在 release 配置下可成功构建，且混淆后高危符号存活。**
+> > 它**不用于**证明：本 App 已安装、已运行、性能达标或行为正确。
+> > 上述后四项只能通过「**已签名** release 包在真机上执行 M1–M21」获得。
+> > **任何人不得将 `assembleRelease` 成功表述为「release 验证通过」。**
 
 ---
 
 ## 6. 我认为整个项目最需要警惕的一点
 
-> ## 「编译通过」正在被当成「验证通过」的替代品。
+> ## 「构建通过」正在被当成「验证通过」的替代品 —— **本轮我又抓到一个新变体。**
 >
-> 这个工程有 18 个 commit、2.3 万行、三份高质量设计文档、五个 CI 作业、一份逐条注释的 R8 规则。
-> **所有这些都在证明同一件事：代码被认真写了。**
+> 这个工程现在是：11 个模块、2.67 万行、三份高质量设计文档、一份逐条注释的 R8 规则、**386 个绿着的单测**、**两个真实产出的 APK**、**一份 76MB 的 mapping.txt**。
+> **这些依然全部在证明同一件事：代码被认认真真地写了，而且能被打成包。**
 > 但没有一件在证明：**这个 App 能运行。**
 
 具体的危险在于，本项目的高危点**全部位于编译期视野之外**，而且**多数不会崩溃**：
 
-| 高危点 | 失败时的表现 |
-|---|---|
-| `@JavascriptInterface` 方法名被 R8 改掉 | **不崩溃、无异常、无日志** —— 只是「Agent 一直看不见页面」 |
-| GPU delegate 缺 OpenCL 声明 | `initialize()` **成功返回**，第一条消息才失败 |
-| KV cache 是否跨 `sendMessage` 复用 | 不报错，只是**每步悄悄变慢 6.8 倍** |
-| 一键清除静默失败 | UI **报成功**，痕迹仍在 |
-| 任务生命周期 Op 被队列丢弃 | 任务**凭空消失**或永久 RUNNING |
+| 高危点 | 失败时的表现 | 本轮进展 |
+|---|---|---|
+| `@JavascriptInterface` 方法名被 R8 改掉 | **不崩溃、无异常、无日志** —— 只是「Agent 一直看不见页面」 | ✅ **符号层已排除**（N-3）；下游「回调来不来」未验 |
+| GPU delegate 缺 OpenCL 声明 | `initialize()` **成功返回**，第一条消息才失败 | ⚠️ 未动 |
+| KV cache 是否跨 `sendMessage` 复用 | 不报错，只是**每步悄悄变慢 6.8 倍** | ⚠️ 未动 |
+| 一键清除静默失败 | UI **报成功**，痕迹仍在 | ⚠️ 未动（技术债 D2 未修） |
+| 任务生命周期 Op 被队列丢弃 | 任务**凭空消失**或永久 RUNNING | ✅ **已修**（双泳道 + 启动对账） |
+| **🆕 混淆后某个 binding 被树摇掉了** | **冷启即崩 `MissingBinding`，或某个次要页面点进去才崩** | ⚠️ **新登记**（N-5） |
+| **🆕 unsigned 包被当成「release 验证通过」** | **团队在没上机的情况下，误以为风险评估已经做过了** | 🆕 **本条目本身即是警示对象** |
 
 **共性：静默。**
 
 它们不会让 CI 变红，不会产生崩溃栈，不会触发告警。它们只会让用户体验到「这个 App 有点怪 / 有点慢 / 好像不太对」—— 而这类问题在端侧 AI 项目里，**平均归因周期以周计**。
 
-**所以我的核心建议只有一条**：
+**🆕 复审补一句：本轮最大的进步，恰恰是让「静默」变得不那么可怕了。**
 
-> **把「第一次真机运行」当作本项目事实上的起点，而不是把它当作第 18 个 commit 之后的收尾工作。**
+> 本轮之前，如果上线后出现「Agent 看不见页面」，我们面对的是一个**全开放假设空间**：
+> 是混淆？是 keep 规则漏了？是注入时机？是 WebView 被杀？被别的 bridge 顶替？
 >
-> 在 M1–M6（出包 → 安装 → 冷启 → 建库 → DI 图）跑通之前，任何关于功能、性能、安全的讨论都建立在未被验证的假设之上。
+> 本轮之后，第一条假设已经被**静态证据掐死**：符号没被改。剩下的空间小了七成。
 >
-> 而在那之后，请优先给「静默失效」这一类故障补上可观测性 —— **它们不会崩溃，但会慢慢吃掉用户对产品的信任。**
+> **这是本轮成果真正的价值所在 —— 它买的是「归因速度」，不是「放行资格」。**
+
+**所以我的核心建议仍然只有一条，而且它现在有了明确的、今天就能执行的动作**：
+
+> **第一步不是再写测试、不是再补文档、不是再优化 R8 —— 是把那台手机插上。**
+>
+> 而且这件事**今天就可以开始，不需要等任何前置条件**：`app-debug.apk` 已经躺在 `app/build/outputs/apk/debug/`，**并且已经带有可安装的签名** 🔬。
+>
+> 在 M3–M6（安装 → 冷启 → 建库 → 遍历页面）跑通之前，任何关于功能、性能、安全的讨论都建立在未被验证的假设之上。
+>
+> 而**M4 今天就失败也完全正常** —— 正因为正常，才更该今天就失败一次，而不是拖到它变成一个昂贵的问题。
 
 ---
 
-## 7. 验收人声明
+## 7. 验收人声明（第 2 轮复审）
 
-本报告中的所有状态标注均基于**实际核对源码与构建配置**，不基于文档的自述，也不基于记忆。
+**本轮复审的所有标注基于我在 `/workspace/HarnessAgent` 上实际执行的命令与产物核对，不基于团队自述，也不基于上一轮的记忆。**
 
-凡标注 ⚠️ 未验证 的条目，**我没有找到任何证据支持它已通过**，因此**不可作为放行依据**。
+本轮实际执行并取证的项 🔬：
 
-对于三个争议问题，我给出了明确裁定与可执行方案，并在问题 B 上额外指出了一个比原议题更严重的衍生缺陷（任务生命周期写入可丢弃）。
+| 动作 | 结果 |
+|---|---|
+| `./gradlew test` | 6 个模块 386 通过 / 0 失败 / 0 跳过（直接汇总 JUnit XML，非引用自述） |
+| `./gradlew :app:assembleRelease` | BUILD SUCCESSFUL；删产物后重跑，**APK 与 mapping.txt md5 与备份逐字节一致** |
+| 产物度量 | debug 98,253,032 B / release 63,004,478 B / mapping.txt 76,226,539 B |
+| 签名状态检测 | release **无** v1/v2/v3 签名；debug **有** v2 签名块 |
+| `mapping.txt` 符号核对 | JS 桥 `deliver`/`deliverError`、10 个 Room `_Impl`、`com.google.ai.edge.**` 全部原名保留 |
+| `adb devices` | **空**（`adb` 未安装）⇒ 证实 R-A 未解除 |
+| 源码/配置检索 | 测试用例分布、支付禁止零测试、CI 文件位置、正负向测试缺失、`UNCONFIGURED` 默认等 |
 
-**诚实地说：这个项目的设计水准高于我审阅过的大多数同类项目。但它还没有被证明能运行。**
+**我没有修改任何一行业务源码**，本轮改动仅限本文档。
 
-**判定维持：NO-GO。**
+**关于两处需要主动交代边界的地方：**
+
+1. **我的 release 复跑是增量 + 缓存命中**（`minifyReleaseWithR8 FROM-CACHE`），但因为**输入未变且输出 md5 与既有备份逐字节一致**，这恰好构成可复现性的正向证据。**我没有做 clean 全量重建** —— 那需要更长时间，且对本轮裁定不产生影响。
+2. **§5.5 Q1 的覆盖率是估计值，不是实测值。** 本工程无 jacoco/kover 🔬。**我不认为任何人可以给出这四个域的实测覆盖率。**
+
+对于三个历史争议问题：**A（分层违规）已清偿并有守卫；B（契约增补）已清偿，且我上轮附加指出的「任务生命周期写入可丢弃」也已清偿。**
+
+**诚实地说**：这个项目本轮的进步幅度，超过了我审阅过的大多数复审场景 —— 而且**其中最有价值的一项（安全缺口的发现）恰恰来自补测试**，这说明技术判断是对的。
+
+**但它的运行时依然一次都没有被验证过。**
+
+**判定维持：NO-GO。剩余拦路者仅一条——从未在任何真机上运行过——但这一条依然充分。**
+
+---
+
+## 8. 复审记录表
+
+| 轮次 | 日期 | 判定 | 核心依据 | 主要变化 |
+|---|---|---|---|---|
+| 第 1 轮 | Phase 4 | 🔴 NO-GO | ①从未出包 ②R8/AGP 从未执行 ③零测试 | — |
+| **第 2 轮** | 2026-10 复审 | 🔴 **NO-GO（维持）** | **①从未在任何真机运行**（唯一剩余）+ R-I(未签名) + R-H(无 manifest) + R-J(CI 未生效) | ①②③ 全部解除；R-G 降 P1；新增 §2.9 N 系列 9 项；新增 R-I / R-J 两条风险；新增 D8–D11 四条技术债 |
+| 第 3 轮（待触发） | — | 待定 | 需在 M3–M6 跑通后重新提交 | — |
 
 ---
 
 *关千锤（Gideon Anvil）· 阿客实验室研发部 · 上线交付验收专家*
-*Phase 4 · 上线验收门禁*
+*Phase 4 · 上线验收门禁 · **第 2 轮复审***
