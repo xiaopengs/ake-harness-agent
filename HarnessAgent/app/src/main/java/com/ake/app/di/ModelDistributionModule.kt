@@ -1,10 +1,7 @@
 package com.ake.app.di
 
 import com.ake.core.common.AppError
-import com.ake.core.common.Clock
 import com.ake.core.contract.ModelAssetRecord
-import com.ake.data.persist.db.AkeDatabase
-import com.ake.data.persist.db.dao.ModelAssetDao
 import com.ake.data.persist.modeldist.ModelAssetLedger
 import com.ake.data.persist.modeldist.ModelLedgerHandle
 import com.ake.data.persist.modeldist.ModelManifestEntry
@@ -30,20 +27,26 @@ import javax.inject.Singleton
  * 组合根是唯一能同时看见两侧的地方（`:app` 无 import 黑名单），所以适配器放这里，
  * 与 `CoreBindingsModule.bindStepTraceCodec` 是同一个理由。
  *
- * ## 注意：本文件是 `:llm → :data` 依赖边上**唯一**允许碰 `persist.db` 的地方
+ * ## ⚠ 本文件**现在一行 `persist.db` 都不碰**（见下）
+ *
+ * ### ★ 账本装配已搬回 `:data`（`PersistenceModule.provideModelAssetLedger`）
+ *
+ * 本模块此前临时提供 `ModelAssetDao`（`db.modelAssetDao()`），为此 `:app` 还多引了一行
+ * `room-runtime`。账本本来就是 `:data` 的类、Room 本来就在 `:data`，那条 `@Provides`
+ * 与那行依赖都已删除 —— **`:app` 现在一行 Room 都不碰**，本文件只做「接口 ↔ 账本」的转发。
  */
 @Module
 @InstallIn(SingletonComponent::class)
 public object ModelDistributionModule {
 
+    /**
+     * 只做绑定：**不碰 DAO**。`ModelAssetLedger` 由 `:data` 的 `PersistenceModule` 装配，
+     * 它自己知道去 `AkeDatabase` 取 DAO —— 这里再取一次就是同一份 Room 依赖的第二次泄漏。
+     */
     @Provides
     @Singleton
-    public fun provideModelAssetDao(db: AkeDatabase): ModelAssetDao = db.modelAssetDao()
-
-    @Provides
-    @Singleton
-    public fun provideModelLedgerGateway(dao: ModelAssetDao, clock: Clock): ModelLedgerGateway =
-        RoomModelLedgerGateway(ModelAssetLedger(dao, clock))
+    public fun provideModelLedgerGateway(ledger: ModelAssetLedger): ModelLedgerGateway =
+        RoomModelLedgerGateway(ledger)
 }
 
 /**
@@ -72,4 +75,6 @@ internal class RoomModelLedgerGateway(
     override suspend fun fail(assetId: String, error: AppError): Unit = ledger.fail(assetId, error)
 
     override suspend fun installed(): List<ModelAssetRecord> = ledger.installed()
+
+    override suspend fun ownedFileNames(modelId: String): List<String> = ledger.ownedFileNames(modelId)
 }

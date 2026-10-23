@@ -8,6 +8,7 @@ import com.ake.core.modelapi.ModelErrorCodes
 import com.ake.data.persist.modeldist.ModelAssetLedger
 import com.ake.data.persist.modeldist.ModelManifest
 import com.ake.data.persist.modeldist.ModelManifestEntry
+import com.ake.data.persist.modeldist.ModelManifestSource
 import com.ake.data.persist.modeldist.ModelResolution
 import com.ake.data.persist.modeldist.ModelResolver
 import com.ake.data.persist.modeldist.VerifyAction
@@ -62,11 +63,24 @@ import javax.inject.Singleton
  * 所以这里**拷贝**：归档件原样保留，槽位得到自己的一份。
  * 代价是回滚一次多占 2.6 GB —— 与「归档只增不减」是同一个问题（见回传卡点①），
  * 需要产品侧给清理策略后才能收窄。
+ *
+ * ## ★ 本类必须**被真正调用**，否则 R8 会把整条链 shrink 掉
+ *
+ * 2026-10 上轮 `assembleRelease` 实测：`ModelDirInventory` 与本类一起进了 `usage.txt`
+ * （被裁）。加 keep 规则是**错的修法** —— 那只是让类留在包里而没人调用，等于假装通电。
+ * 真正的断点是「没有任何可达调用方」：`:app` 的 `ModelDownloadService` 当时直连
+ * `ModelDownloader.download`。所以下面 [ensureCurrent] 是**生产侧唯一该用的入口**：
+ * 它自己取 manifest ⇒ 决议 ⇒ 下载，`ModelDownloadService` 只负责调它。
  */
 @Singleton
 public class ModelDistributionSync @Inject constructor(
     private val ledger: ModelLedgerGateway,
     private val downloader: ModelDownloader,
+    /**
+     * manifest 的唯一来源。**它才是整条链的电源**：有了它，`ModelManifest` 才有生产者，
+     * `ModelResolver.resolve()` 才有入参（上轮整条链被当死代码裁掉的根因就是缺它）。
+     */
+    private val manifestSource: ModelManifestSource,
 ) {
 
     /**
@@ -95,6 +109,28 @@ public class ModelDistributionSync @Inject constructor(
             appVersionCode = appVersionCode,
             inventory = inventory(),
         )
+
+    /**
+     * ★★ **生产侧的唯一入口**：自己取 manifest，再走决议 → 下载 → 账本裁决。
+     *
+     * 调用方（`:app` 的 `ModelDownloadService`）不该自己拼 `ModelManifest`，
+     * 也不该直连 `ModelDownloader.download` —— 后者会绕掉「归档旧模型」与「进度落库」。
+     *
+     * ## manifest 拿不到时：原样报错，**不静默放行**
+     *
+     * 默认值是 `ModelManifestConfig.UNCONFIGURED`（运维还没产出签名 manifest），
+     * 此时 [ModelManifestSource.load] 恒返回 `MANIFEST_NOT_CONFIGURED`。
+     * 这里把它**原样抛出**，由调用方决定「退回到烧录目录项」还是提示用户 ——
+     * **降级策略属于调用方，fail-closed 属于本类**。反过来（这里偷偷回退）
+     * 会让「分发链路到底通了没有」在运行时永远看不出来。
+     */
+    public suspend fun ensureCurrent(
+        appVersionCode: Int,
+        onProgress: (ModelDownloader.Progress) -> Unit = {},
+    ): Outcome<File> = when (val loaded = manifestSource.load()) {
+        is Outcome.Ok -> ensureResolved(loaded.value, appVersionCode, onProgress)
+        is Outcome.Err -> Outcome.Err(loaded.error)
+    }
 
     /** 按决议把目标版本准备好。返回值是**已经可以交给引擎加载**的文件。 */
     public suspend fun ensureResolved(

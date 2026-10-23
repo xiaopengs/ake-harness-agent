@@ -217,9 +217,19 @@ public class ModelDownloader(
 
     public fun localFileOf(id: String): File = File(modelsDir, "$id.litertlm")
 
-    public suspend fun delete(id: String): Outcome<Unit> = withContext(Dispatchers.IO) {
-        File(modelsDir, "$id.litertlm").delete()
-        File(modelsDir, "$id.litertlm.part").delete()
+    public suspend fun delete(id: String): Outcome<Unit> = deleteFiles(
+        listOf("$id.litertlm", "$id.litertlm.part"),
+    )
+
+    /**
+     * 按**文件名**批量删（名字由 `ModelLedgerGateway.ownedFileNames` 出）。
+     *
+     * 只接受 basename（内部再取一次 `File(name).name`）：账本里 `local_path`/`temp_file`
+     * 历史上有写成绝对路径的记录，直接拼会造成 `modelsDir//sdcard/...` 这种幽灵路径 ——
+     * 不报错，只是永远删不掉，属于最难查的那类失败。
+     */
+    public suspend fun deleteFiles(names: List<String>): Outcome<Unit> = withContext(Dispatchers.IO) {
+        names.forEach { name -> File(modelsDir, File(name).name).delete() }
         Outcome.Ok(Unit)
     }
 

@@ -51,6 +51,8 @@ public class LiteRtModelLifecycle @Inject constructor(
      * 自己不管的事：归档旧模型（硬规则 1）、把进度落库（跨重启续传）、按账本裁决重试/放弃。
      */
     private val sync: ModelDistributionSync,
+    /** 账本（经 `:app` 适配器）。删除路径要问它「这个 modelId 在盘上到底有哪些文件」。 */
+    private val ledger: ModelLedgerGateway,
 ) : ModelLifecyclePort {
 
     private val _assetState = MutableStateFlow<ModelAssetRecord>(DEFAULT_RECORD)
@@ -101,9 +103,20 @@ public class LiteRtModelLifecycle @Inject constructor(
         if (cur.state == "READY") _assetState.value = cur.copy(state = "PAUSED")
     }
 
+    /**
+     * ★ 删的是**账本认为这个 modelId 拥有的全部文件**，不是 `<modelId>.litertlm` 一个。
+     *
+     * 槽位件的正名是 `<assetId>.litertlm`（`assetId` = 账本主键），归档件另有
+     * `<modelId>_<variant>_<sha16>.litertlm`。只按 modelId 删 ⇒ 归档件与 `.part`
+     * 半成品会永久留在盘上，而账本里还挂着指向它们的行 —— 用户以为删了 2.6 GB，
+     * 实际只删掉一部分。名单由 `ModelLedgerGateway.ownedFileNames` 出（账本是唯一
+     * 知道全貌的地方），真实路径在这里按 `modelsDir` 拼。
+     */
     override suspend fun deleteModelFile(modelId: String): Outcome<Unit> {
         modelPort.unload()
-        return downloader.delete(modelId).also {
+        val names = ledger.ownedFileNames(modelId)
+        com.ake.core.common.AkeLog.i(TAG, "删除 $modelId 的全部文件：$names")
+        return downloader.deleteFiles(names).also {
             _assetState.value = DEFAULT_RECORD
         }
     }

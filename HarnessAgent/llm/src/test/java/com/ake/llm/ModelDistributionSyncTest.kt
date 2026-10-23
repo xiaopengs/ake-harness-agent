@@ -2,9 +2,16 @@ package com.ake.llm
 
 import com.ake.core.common.AppError
 import com.ake.core.common.Outcome
+import com.ake.core.common.Severity
+import com.ake.data.persist.modeldist.ManifestSchema
+import com.ake.data.persist.modeldist.ModelDistErrorCodes
 import com.ake.data.persist.modeldist.ModelEntryState
 import com.ake.data.persist.modeldist.ModelFileLayout
+import com.ake.data.persist.modeldist.ModelManifest
+import com.ake.data.persist.modeldist.ModelManifestConfig
 import com.ake.data.persist.modeldist.ModelManifestEntry
+import com.ake.data.persist.modeldist.ModelManifestParser
+import com.ake.data.persist.modeldist.ModelManifestSource
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.runBlocking
@@ -50,9 +57,28 @@ class ModelDistributionSyncTest {
         dir = tmp.newFolder("models")
         downloader = ModelDownloader(dir)
         ledger = FakeModelLedgerGateway()
-        sync = ModelDistributionSync(ledger, downloader)
+        sync = ModelDistributionSync(ledger, downloader, unconfiguredManifestSource())
         sync.trace = { ledger.log += "trace:$it" }
     }
+
+    /**
+     * 默认就是 `UNCONFIGURED`（运维还没产出签名 manifest）—— 这是**当前的真实状态**。
+     * 用它构造，是为了让「manifest 侧」在其余用例里保持 fail-closed，不偷偷联网。
+     */
+    private fun unconfiguredManifestSource(): ModelManifestSource = ModelManifestSource(
+        config = ModelManifestConfig.UNCONFIGURED,
+        transport = {
+            Outcome.Err(
+                AppError(
+                    ModelDistErrorCodes.MANIFEST_NOT_CONFIGURED,
+                    "err_manifest_not_configured",
+                    null,
+                    Severity.MEDIUM,
+                ),
+            )
+        },
+        parser = ModelManifestParser(),
+    )
 
     private fun finishes(): List<String> = ledger.log.filter { it.startsWith("finish(") }
 
@@ -143,6 +169,60 @@ class ModelDistributionSyncTest {
         assertThat(outcome).isInstanceOf(Outcome.Err::class.java)
         assertThat(ledger.log).contains("fail(TIMEOUT)")
         assertThat(ledger.log.filter { it.startsWith("finish(") }).isEmpty()
+    }
+
+    // ───────────────────────────────────────── ② ensureCurrent：manifest 侧必须 fail-closed
+
+    /**
+     * `ensureCurrent` 是生产侧（`:app` 的 `ModelDownloadService`）唯一该调的入口。
+     *
+     * 它必须**原样把 manifest 的错误抛回去**：默认配置是 `UNCONFIGURED`，此时
+     * 「静默换成烧录目录项」会让「分发链路通没通」在真机上永远看不出来 ——
+     * 那就等于把上轮的「死代码」伪装成「已通电」。降级归调用方，fail-closed 归本类。
+     */
+    @Test
+    fun `manifest 未配置时 ensureCurrent 报 MANIFEST_NOT_CONFIGURED 且不触发下载`() = step {
+        setup()
+        var httpOpened = false
+        sync.transfer = { _, _ -> httpOpened = true; Outcome.Ok(File(dir, "never")) }
+
+        val outcome = sync.ensureCurrent(appVersionCode = 1)
+
+        assertThat(outcome).isInstanceOf(Outcome.Err::class.java)
+        assertThat((outcome as Outcome.Err).error.code)
+            .isEqualTo(ModelDistErrorCodes.MANIFEST_NOT_CONFIGURED)
+        assertThat(httpOpened).isFalse()
+    }
+
+    /**
+     * `ensureResolved` 的 `Current` 分支：**决议这条链真正被走了一遍** ——
+     * 含 `ModelDirInventory` 盘点与账本 `installed()`。
+     *
+     * ★ 本用例存在的理由不是「断言一个显然的分支」，而是给 R8 那条隐性契约留个证人：
+     * 上轮 `ModelDirInventory` 被整块 shrink，就是因为 `resolve()` 没有任何可达调用方。
+     * 这里直接从 `ensureResolved` 进，等于把「决议链必须可达」钉在单测里。
+     */
+    @Test
+    fun `已装的是目标版本时 ensureResolved 直接返回槽位文件`() = step {
+        setup()
+        val v1 = srcFile("v1-bytes")
+        val entryV1 = entry(revision = 1, sha = shaOf(v1), size = v1.length())
+        val assetId = ledger.seedReady(entryV1)
+        File(dir, ModelFileLayout.finalNameOf(assetId)).writeBytes(v1.readBytes())
+
+        val outcome = sync.ensureResolved(
+            ModelManifest(
+                schemaVersion = ManifestSchema.CURRENT,
+                manifestVersion = 1L,
+                generatedAt = 0L,
+                models = listOf(entryV1),
+                signature = null,
+            ),
+            appVersionCode = 1,
+        )
+
+        assertThat(outcome).isInstanceOf(Outcome.Ok::class.java)
+        assertThat((outcome as Outcome.Ok).value.name).isEqualTo(ModelFileLayout.finalNameOf(assetId))
     }
 
     // ───────────────────────────────────────────── 辅助

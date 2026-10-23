@@ -11,6 +11,7 @@ import com.ake.data.persist.modeldist.ModelVerifyGate
 import com.ake.data.persist.modeldist.VerifyAction
 import com.ake.data.persist.modeldist.VerifyOutcome
 import com.ake.data.persist.modeldist.VerifyVerdict
+import java.io.File
 
 /**
  * `ModelLedgerGateway` 的假实现 —— **只在单测里替代 `ModelAssetLedger`**。
@@ -144,8 +145,7 @@ internal class FakeModelLedgerGateway(
 
     override suspend fun installed(): List<ModelAssetRecord> =
         rows.values
-            .filter { it.state == ModelAssetState.READY && !it.localPath.isNullOrBlank() }
-            .map {
+            .filter { it.state == ModelAssetState.READY && !it.localPath.isNullOrBlank() }            .map {
                 ModelAssetRecord(
                     id = it.id,
                     variant = it.variant,
@@ -160,6 +160,24 @@ internal class FakeModelLedgerGateway(
                     updatedAt = 0L,
                 )
             }
+
+    /**
+     * 与 `ModelAssetLedger.ownedFileNames` 同构：`<modelId>` 与每个账本行的
+     * `<assetId>` 的正名 + `.part` + 行里实记的 `localPath` / `tempFile`。
+     * 真账本改了这里没跟着改 ⇒ 删除路径的单测会先红。
+     */
+    override suspend fun ownedFileNames(modelId: String): List<String> {
+        val names = LinkedHashSet<String>()
+        names += ModelFileLayout.finalNameOf(modelId)
+        names += ModelFileLayout.partNameOf(modelId)
+        rows.values.filter { it.modelId == modelId }.forEach { row ->
+            names += ModelFileLayout.finalNameOf(row.id)
+            names += ModelFileLayout.partNameOf(row.id)
+            row.localPath?.let { names += File(it).name }
+            row.tempFile?.let { names += File(it).name }
+        }
+        return names.toList()
+    }
 
     // ── 测试用辅助 ──────────────────────────────────────────────────────────
 

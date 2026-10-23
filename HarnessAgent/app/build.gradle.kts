@@ -220,16 +220,10 @@ dependencies {
     // McpHiltModule 显式用 OkHttp engine（Android 上默认 engine 有连接复用问题）。
     implementation(libs.ktor.client.okhttp)
 
-    // ── 仅 `ModelDistributionModule` 需要：它要 `AkeDatabase.modelAssetDao()`，
-    //    而 `AkeDatabase` 的超类型是 `androidx.room.RoomDatabase`，`:data` 对 Room 用的是
-    //    `implementation` ⇒ 不在我们的编译类路径上，拿 DAO 就得自己声明一次 runtime。
-    //
-    //    ⚠ 这是一处**已知的临时妥协**：正解是把 `provideModelLedgerGateway` 挪进
-    //    `:data` 的 `PersistenceModule`（那里 Room 本就在 classpath 上），
-    //    但它位于 `data/` 的 Kotlin 源码，不在本人的边界内 ⇒ 留给霍承钧搬，
-    //    届时本行与 `ModelDistributionModule` 一起删除。
-    //    只引 runtime（不引 room-compiler / ktx）：`:app` 不写任何 Room 代码。
-    implementation(libs.androidx.room.runtime)
+    // ★ `room-runtime` 已于本轮删除：它原本只为 `ModelDistributionModule` 里那行临时的
+    //   `provideModelAssetDao(db)` 服务。账本装配已搬进 `:data` 的 `PersistenceModule`
+    //   （`provideModelAssetLedger`），`:app` 现在只注入 `ModelAssetLedger` 本身，
+    //   一行 Room 都不碰。
 
     testImplementation(libs.bundles.testUnit)
 }

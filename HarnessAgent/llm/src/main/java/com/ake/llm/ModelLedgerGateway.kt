@@ -45,4 +45,16 @@ public interface ModelLedgerGateway {
 
     /** 回滚候选集：所有 READY 行（含归档行）。 */
     public suspend fun installed(): List<ModelAssetRecord>
+
+    /**
+     * 某个 modelId 在盘上**可能拥有的全部文件名**（去重，只返回名字不带目录）。
+     *
+     * 转发的就是 `ModelAssetLedger.ownedFileNames`（`:data`）。对齐它的理由：
+     * 槽位行的正名是 `<assetId>.litertlm`，而 `assetId` 是账本主键、**不等于** modelId。
+     * 调用方（`ModelLifecyclePort.deleteModelFile`）手里只有 modelId，
+     * 只按 `<modelId>.litertlm` 删会漏掉槽位件、归档件与 `.part` 半成品 ——
+     * 于是 2.6 GB 的残片被永久留在用户盘上，且账本里还挂着一行指向它的记录。
+     * 唯一知道「这个 modelId 到底留了几个文件」的是账本，所以名单由这里出。
+     */
+    public suspend fun ownedFileNames(modelId: String): List<String>
 }
