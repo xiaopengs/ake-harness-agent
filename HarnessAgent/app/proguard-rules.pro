@@ -186,8 +186,14 @@
 # ───────────────────────────────────────────────────────────────────────────
 # 9. 显式不需要保留（体积优化）
 # ───────────────────────────────────────────────────────────────────────────
-# Compose tooling 只在 debug 预览里用，release 里删掉
--assumenosideeffects class androidx.compose.ui.tooling.** { *; }
+# Compose tooling 只在 debug 预览里用，release 里删掉。
+# ⚠ 2026-10 实测（邝随行）：原写法 `-assumenosideeffects class androidx.compose.ui.tooling.** { *; }`
+#   会让 R8 告警「matches the following method(s) on java.lang.Object: clone/equals/
+#   finalize/... 」—— `{ *; }` 把继承来的 Object 方法也一并判为无副作用，
+#   一旦 tooling 真进了 release classpath，equals/hashCode 会被静默删掉，
+#   属于「构建只有一行 warning、线上行为悄悄变」的那类雷。
+#   ⇒ 直接不写这条：tooling 本就不在 release 依赖里，R8 自然不会打进去。
+#   （若将来确需裁剪，务必写成显式的 -assumenosideeffects class ... { <methods>; } 并逐条列方法）
 # 遥测/分析类库本项目一个都没有引入，这里只是防止将来误引
 -dontwarn com.google.firebase.**
 -dontwarn com.google.android.gms.**
