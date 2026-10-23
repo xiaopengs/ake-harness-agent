@@ -1,13 +1,31 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Ake Harness Agent · CI
 #
+# ★ 位置铁律：GitHub Actions **只读仓库根的 .github/workflows/**。
+#   2026-10 验收复审（关千锤）实跑发现：本轮新增的 4 个作业曾放在
+#   `HarnessAgent/.github/workflows/ci.yml` —— 那个路径 GitHub 根本不读，
+#   4 个 job 从未触发过，「CI 守卫」等于不存在。现已合并到本文件，
+#   无效目录已删除。**新增作业一律写在这里，不要再写到子目录。**
+#
 # 触发：push 到 main / PR 到 main / 手动
-# 五个作业，职责见 docs/03-build-and-deploy.md §4：
-#   1. jvm-tests     —— 内核层单测（纯 JVM，最快的闸门）
-#   2. compile       —— 11 个模块的 Kotlin 编译校验
-#   3. ksp-verify    —— Room / Hilt 注解处理器产物校验
-#   4. lint          —— Android Lint 门禁
-#   5. assemble-debug—— 出包 + 体积红线校验
+#
+# 六个作业（两份 ci.yml 合并后的最终形态）：
+#   1. arch-guard      —— 架构守卫依赖边 + **负向测试**（韩渡川版没有）
+#   2. jvm-tests       —— 模型红线 + :core:common 单测 + 全量单测
+#   3. compile-ksp     —— 11 模块编译 **串接** KSP 产物断言（原 compile + ksp-verify 合并）
+#   4. lint            —— Android Lint 门禁
+#   5. assemble-debug  —— 出包 + 体积红线 + APK 内权重红线
+#   6. release-r8      —— R8 冒烟 + 断言 mapping.txt 非空（内存参数见该 job 头部注释）
+#
+# 合并说明（便于后来人对账）：
+#   · 韩渡川原版的 5 个作业（jvm-tests / compile / ksp-verify / lint / assemble-debug）
+#     全部保留，只把 compile 与 ksp-verify 串成一个 job（两者都要编译 :data/:app，
+#     分开跑是同一份编译花钱买两次）；
+#   · 邝随行版的 arch-guard / release-r8 / model-redline 并入：
+#       - arch-guard   —— 原样保留并补负向测试；
+#       - release-r8   —— 原样保留（含 -Xmx2g --no-parallel 的实测结论）；
+#       - model-redline—— 折进 jvm-tests 的第一个 step（纯文件系统断言，秒级出结果，
+#                         没必要单独占一个 runner）。
 #
 # ★ 本项目硬约束：端侧模型（Gemma 4 E2B，约 2.6GB）不随包分发。
 #   CI 环境也没有模型文件。因此流水线里：
@@ -38,15 +56,20 @@ env:
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════════════
-  # 1. JVM 层快速校验
-  #    :core:common 是 L1 内核层，零 Android 依赖、零第三方依赖，
-  #    可以在 JVM 上毫秒级跑完 —— 它应该永远是流水线里最先红的那个。
-  #    顺带编译 :mcp（同样纯 Kotlin/JVM，ktor 是 KMP，无 Android 绑定）。
+  # 1. 架构守卫（含负向测试）
+  #    跨层依赖边是**人工**摘除的（:ui → :agent/:mcp/:data），没有机器校验就会被
+  #    「编译不过就加回去」悄悄还原。
+  #    规则本体在 HarnessAgent/build.gradle.kts 的 checkModuleDependencies
+  #    （Gradle 边白名单 + 源码 import 黑名单）。
+  #
+  #    ★ 负向测试为什么要写进 CI（关千锤 N-7）：一条「永远通过」的守卫和没有守卫
+  #      是一样的 —— 白名单改错、正则写飞、任务被误删，正向跑都会绿。
+  #      所以这里注入一条越层依赖，**断言它必须红**，再还原并复核。
   # ═══════════════════════════════════════════════════════════════════════════
-  jvm-tests:
-    name: "1️⃣ JVM 层快速校验"
+  arch-guard:
+    name: "1️⃣ 架构守卫 · 依赖边（含负向测试）"
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -57,14 +80,105 @@ jobs:
           compile-sdk: ${{ env.COMPILE_SDK }}
           build-tools: ${{ env.BUILD_TOOLS }}
 
-      - name: 🚫 模型红线：仓库内不得出现端侧权重
+      # ── 正向：干净工作区上守卫必须通过 ──
+      # 根 build.gradle.kts 定义任务，但 Gradle 仍要配置 Android 模块 ⇒ 必须有 SDK
+      - name: 🛡️ checkModuleDependencies（正向）
+        working-directory: HarnessAgent
+        run: |
+          chmod +x ./gradlew
+          ./gradlew checkModuleDependencies --console=plain
+
+      # ── 负向：注入 :ui → :agent，守卫**必须失败** ──
+      - name: 🧪 负向测试：注入越层依赖后守卫必须红
+        working-directory: HarnessAgent
+        run: |
+          set -uo pipefail
+          BF=ui/build.gradle.kts
+          BAK="$(mktemp)"
+          cp "$BF" "$BAK"
+          # 无论下面任何一步翻车，都把文件还原 —— 绝不能把探针留在工作区
+          trap 'cp -f "$BAK" "$BF"' EXIT
+
+          # 必须插进 dependencies{} 块**内部**，不能 append 到文件末尾：
+          # 末尾的裸 implementation(...) 会让 KTS 在配置阶段就解析失败，
+          # gradlew 同样返回非 0，但红的是「脚本写错了」而不是守卫在拦
+          # ⇒ 负向测试会假绿。锚点取 :core:model-api 那一行（:ui 里唯一命中）。
+          awk '{print} /implementation\(project\(":core:model-api"\)\)/ && !d {
+                 print "    implementation(project(\":agent\"))  // ARCH-GUARD NEGATIVE PROBE"
+                 d=1 }' "$BF" > "$BF.probe"
+          mv "$BF.probe" "$BF"
+
+          if ! grep -q 'ARCH-GUARD NEGATIVE PROBE' "$BF"; then
+            echo "::error::探针未注入成功 —— 负向测试无效（锚点行可能已改名，请同步改本步骤）"
+            exit 1
+          fi
+
+          set +e
+          ./gradlew checkModuleDependencies --console=plain 2>&1 | tee /tmp/arch-guard-neg.log
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::注入 :ui → :agent 之后 checkModuleDependencies 仍然通过 ⇒ 守卫失效，本 CI 作业失去意义"
+            exit 1
+          fi
+          # 光「非 0」还不够：必须是因为注入的这条边而红，否则失败原因可能是别的东西
+          if ! grep -F ':ui → :agent' /tmp/arch-guard-neg.log; then
+            echo "::error::守卫确实失败了，但日志里找不到 ':ui → :agent' —— 失败原因与注入边无关，需人工确认"
+            exit 1
+          fi
+          echo "✅ 守卫按预期拦截注入的越层边（exit=$rc），已还原 $BF"
+
+      - name: 🧹 还原复核：工作区干净 + 守卫复跑仍绿
+        working-directory: HarnessAgent
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- ui/build.gradle.kts; then
+            echo "::error::ui/build.gradle.kts 仍带负向探针残留，还原失败"
+            git diff -- ui/build.gradle.kts
+            exit 1
+          fi
+          ./gradlew checkModuleDependencies --console=plain
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 2. JVM 层快速校验 + 全量单测
+  #    :core:common 是内核层，零 Android 依赖、零第三方依赖，毫秒级跑完 ——
+  #    它应该永远是流水线里最先红的那个。
+  #    模型红线放在这里：纯文件系统断言，不跑 Gradle，秒级出结果。
+  # ═══════════════════════════════════════════════════════════════════════════
+  jvm-tests:
+    name: "2️⃣ JVM 层校验 + 全量单测"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备构建环境
+        uses: ./.github/actions/setup-build-env
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          compile-sdk: ${{ env.COMPILE_SDK }}
+          build-tools: ${{ env.BUILD_TOOLS }}
+
+      # 仓库红线（韩渡川版）+ assets/jniLibs 红线（邝随行版 model-redline）合并为一条
+      - name: 🚫 模型红线：仓库内 / 包内资源目录不得出现端侧权重
         working-directory: HarnessAgent
         run: |
           set -euo pipefail
           hits=$(find . -path './*/build' -prune -o -type f \
-            \( -name '*.litertlm' -o -name '*.task' -o -name '*.gguf' -o -name '*.bin' \) -print || true)
+            \( -name '*.litertlm' -o -name '*.task' -o -name '*.gguf' -o -name '*.bin' \
+               -o -name '*.tflite' -o -name '*.safetensors' \) -print || true)
           if [ -n "$hits" ]; then
             echo "::error::仓库内出现模型权重文件，构建不得依赖它：$hits"
+            exit 1
+          fi
+          # 真正会被打进 APK 的只有这两个目录，单独再卡一道（assets/jniLibs）
+          packed=$(find . \( -path '*/src/main/assets/*' -o -path '*/src/main/jniLibs/*' \) -type f \
+            \( -name '*.task' -o -name '*.litertlm' -o -name '*.bin' \
+               -o -name '*.tflite' -o -name '*.gguf' -o -name '*.safetensors' \) -print || true)
+          if [ -n "$packed" ]; then
+            echo "::error::assets/jniLibs 内发现端侧权重，会随包分发（见 app/build.gradle.kts 头部）:"
+            echo "$packed"
             exit 1
           fi
           echo "✅ 无模型权重文件（模型由 App 内下载服务首次启动时拉取）"
@@ -75,23 +189,35 @@ jobs:
           chmod +x ./gradlew
           ./gradlew :core:common:test :mcp:compileKotlin --console=plain
 
+      - name: 🧪 全量单测（test）
+        working-directory: HarnessAgent
+        run: |
+          chmod +x ./gradlew
+          ./gradlew test --console=plain
+
       - name: 📄 上传单测报告
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: jvm-test-reports
-          path: HarnessAgent/core/common/build/reports/tests/test/
+          path: |
+            HarnessAgent/core/common/build/reports/tests/test/
+            HarnessAgent/*/build/reports/tests/test*/
           if-no-files-found: ignore
 
   # ═══════════════════════════════════════════════════════════════════════════
-  # 2. 编译校验
-  #    逐个模块 compileDebugKotlin。刻意不用 assemble（那会把编译错误推迟到
-  #    打包阶段，出错了还得先跑完资源合并）。debug 变体编译最快且能覆盖全部源码。
+  # 3. 编译校验 + KSP 产物断言（原 compile + ksp-verify 合并）
+  #    逐个模块 compileDebugKotlin / compileKotlin，刻意不用 assemble
+  #    （那会把编译错误推迟到打包阶段）。
+  #    KSP 出问题的方式和编译不一样：编译报错是「源码写错了」，KSP 出问题往往是
+  #    「注解处理器静默不产出」—— DAO_Impl 没生成，编译照样过，跑起来才在
+  #    Room 建库时炸 ⇒ 所以这里**断言产物文件存在**。两者都要编 :data/:app，
+  #    串在一个 job 里省一次编译。
   # ═══════════════════════════════════════════════════════════════════════════
-  compile:
-    name: "2️⃣ 编译校验（11 模块）"
+  compile-ksp:
+    name: "3️⃣ 编译 + KSP 校验（11 模块）"
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -118,32 +244,6 @@ jobs:
             :data:compileDebugKotlin \
             :ui:compileDebugKotlin \
             :app:compileDebugKotlin
-
-  # ═══════════════════════════════════════════════════════════════════════════
-  # 3. KSP 校验
-  #    KSP 出问题的方式和编译不一样：编译报错是「源码写错了」，
-  #    KSP 出问题往往是「注解处理器静默不产出」—— DAO_Impl 没生成，
-  #    编译照样过，跑起来才在 Room 建库时炸。所以这里**断言产物文件存在**。
-  # ═══════════════════════════════════════════════════════════════════════════
-  ksp-verify:
-    name: "3️⃣ KSP 校验（Room / Hilt）"
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 准备构建环境
-        uses: ./.github/actions/setup-build-env
-        with:
-          java-version: ${{ env.JAVA_VERSION }}
-          compile-sdk: ${{ env.COMPILE_SDK }}
-          build-tools: ${{ env.BUILD_TOOLS }}
-
-      - name: ⚙️ 触发 Room KSP（:data）与 Hilt KSP（:app）
-        working-directory: HarnessAgent
-        run: |
-          chmod +x ./gradlew
-          ./gradlew :data:compileDebugKotlin :app:compileDebugKotlin --console=plain
 
       - name: 🔍 断言 Room 生成产物存在
         working-directory: HarnessAgent
@@ -214,15 +314,15 @@ jobs:
 
   # ═══════════════════════════════════════════════════════════════════════════
   # 5. 构建 debug APK + 体积红线
-  #    这个作业是本项目最有价值的一道闸门：端侧 App 最容易被「顺手把模型打进包」
+  #    本项目最有价值的一道闸门：端侧 App 最容易被「顺手把模型打进包」
   #    搞成 2.6GB 的怪物。这里直接卡体积 + 卡后缀，比人工检查可靠。
-  #    传 -Pake.abiSplit=false 是为了固定产出单个 universal APK，好让后续路径确定。
+  #    传 -Pake.abiSplit=false 固定产出单个 universal APK，好让路径确定。
   # ═══════════════════════════════════════════════════════════════════════════
   assemble-debug:
     name: "5️⃣ 构建 debug APK"
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: [compile, ksp-verify]
+    needs: [compile-ksp]
     steps:
       - uses: actions/checkout@v4
 
@@ -264,4 +364,93 @@ jobs:
           name: app-debug-apk
           path: HarnessAgent/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 14
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 6. R8 冒烟（release 变体）
+  #    2026-10 首次跑 release 才发现 R8 从来没被执行过，且一跑就挂
+  #    （android.nonFinalResIds=false 与 optimized resource shrinking 冲突）。
+  #    debug 全绿完全掩盖它 ⇒ 这里固定跑一次，并断言 mapping.txt 真的产出了。
+  #    签名不在此处要求：无 Secret 时出 unsigned 包，签名校验由 release.yml 兜底。
+  #
+  # ⚠ 内存（2026-10 实测，邝随行）：R8 是全工程最吃内存的任务，而且症状是
+  #   「Gradle build daemon disappeared unexpectedly」—— 报的是守护进程消失，
+  #   不是 OOM，极易误判成代码问题。
+  #   实测：8 GB 上限的容器里 `-Xmx3g` 与 `-Xmx6g` 都崩在 `:app:minifyReleaseWithR8`，
+  #   `-Xmx2g --no-parallel` 稳定通过（约 3 分钟）。原因是 R8 会另起一个约 800 MB 的
+  #   worker 进程，daemon 堆给得越大，worker 越抢不到；并行又叠加多个 Kotlin/KSP worker。
+  #   ⇒ 本 job **刻意不跟其余 job 一样用 -Xmx4g**。若将来 CI 报守护进程消失，先看这里。
+  #
+  #    实现手法：setup-build-env 往 ~/.gradle/gradle.properties 写了 4g + parallel，
+  #    而 -D 命令行参数改不动已启动的 daemon 的 jvmargs ⇒ 这里**再追加一份**
+  #    用户级 gradle.properties（properties 文件后写的键覆盖先写的），
+  #    并同时传 -D 与 --no-parallel，三重保险。改这条前先读上面那段实测。
+  # ═══════════════════════════════════════════════════════════════════════════
+  release-r8:
+    name: "6️⃣ R8 冒烟 · release 变体"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备构建环境
+        uses: ./.github/actions/setup-build-env
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          compile-sdk: ${{ env.COMPILE_SDK }}
+          build-tools: ${{ env.BUILD_TOOLS }}
+
+      - name: 🧠 覆盖 Gradle 堆为 2g 并关闭并行（理由见本 job 头部）
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.gradle"
+          cat >> "$HOME/.gradle/gradle.properties" <<'EOF'
+          org.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8
+          org.gradle.parallel=false
+          EOF
+          echo "---- 生效中的用户级 gradle.properties ----"
+          cat "$HOME/.gradle/gradle.properties"
+
+      - name: 📱 assembleRelease（R8 + 资源裁剪）
+        working-directory: HarnessAgent
+        # 堆只给 2g 且关并行 —— 别照其余 job 抄 4g
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:assembleRelease --no-daemon --no-parallel --console=plain \
+            -Dorg.gradle.jvmargs="-Xmx2g -XX:MaxMetaspaceSize=768m"
+
+      - name: 🔍 断言 R8 真的执行了（mapping.txt 存在且非空）
+        working-directory: HarnessAgent
+        run: |
+          set -euo pipefail
+          M=app/build/outputs/mapping/release/mapping.txt
+          if [ ! -s "$M" ]; then
+            echo "::error::$M 缺失或为空 —— R8 可能未执行"
+            ls -R app/build/outputs/mapping 2>/dev/null || true
+            exit 1
+          fi
+          echo "✅ R8 已执行：mapping.txt $(wc -l < "$M") 行"
+
+      - name: 🚨 release 体积红线
+        working-directory: HarnessAgent
+        run: |
+          set -euo pipefail
+          for f in app/build/outputs/apk/release/*.apk; do
+            [ -f "$f" ] || continue
+            size=$(stat -c%s "$f")
+            echo "$(basename "$f")：$(( size / 1024 / 1024 )) MB"
+            if [ "$size" -gt 157286400 ]; then
+              echo "::error::$f 超过 150MB，疑似模型被打进包"
+              exit 1
+            fi
+          done
+          echo "✅ release 体积红线通过"
+
+      - name: 📤 上传 mapping.txt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-mapping
+          path: HarnessAgent/app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: ignore
           retention-days: 14
