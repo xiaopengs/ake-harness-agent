@@ -175,20 +175,22 @@ cd HarnessAgent
 **已完成并通过真机级编译验证**
 
 - **全部 11 个模块 `compileDebugKotlin` / `compileKotlin` 均 BUILD SUCCESSFUL**（含 Hilt KSP 与 Room KSP）
-- `:data` —— Room KSP 校验通过，8 个 `DAO_Impl` 与 `AkeDatabase_Impl` 已生成
-- `:ui` —— Hilt 已为 5 个 ViewModel 与 3 个绑定生成 Factory
-- `:core` —— 含单元测试（`UiFacingPortSufficiencyTest` 的 import 清单不含 agent/mcp/data，反证契约充分）
+- **`./gradlew test`：386 通过 / 0 失败**（立项时全工程仅 4 个单测）
 - `:app` —— Dagger 依赖图贯通，MissingBinding 清零
 - 依赖红线已排除：`ktor-client-plugins-sse` 该坐标在任何版本都不存在（SSE 已收进 `ktor-client-core`），已从 catalog 移除
 
 ### ✅ 首次产出可安装产物
 
-```
-app/build/outputs/apk/debug/app-debug.apk
-93 MB / ABI: arm64-v8a + x86_64 / v2 签名，apksigner verify 通过
-```
+| 产物 | 体积 | 说明 |
+|---|---|---|
+| `app/build/outputs/apk/debug/app-debug.apk` | 93.70 MB | arm64-v8a + x86_64，**v2 签名，`apksigner verify` 通过** |
+| `app/build/outputs/apk/release/app-release-unsigned.apk` | 60.04 MB | **R8 已执行**（mapping.txt 73MB）；未签名 |
 
-> 构建注意：Gradle daemon 在打包阶段会崩溃（`Gradle build daemon disappeared unexpectedly`），需以 `--no-daemon` 运行。
+debug → release 缩减 **33.66MB（-35.9%）**：dex 43.6 → 11.1MB（占缩减 92%），`.so` 48.6MB 不变（native 不受 R8 管）。
+
+> **构建注意（两个都会崩在打包阶段，且报错极具误导性）**：
+> 1. Gradle daemon 会崩 → 需 `--no-daemon`
+> 2. **R8 还需 `-Xmx2g --no-parallel`** —— `-Xmx3g`/`-Xmx6g` 在 8GB 容器同样会崩，报的是 `daemon disappeared` 而非 OOM，**极易误判成代码问题**
 
 ### 已修复的阻塞（原清单已清空）
 
@@ -206,30 +208,54 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ### ⚠️ 验收结论：仍为 NO-GO，不可对外发布
 
-上线验收（[`docs/04-release-gate.md`](docs/04-release-gate.md)）判定 **NO-GO**。其中两条理由已解除，但核心那条仍然成立：
+上线验收（[`docs/04-release-gate.md`](docs/04-release-gate.md)）经**第 2 轮复审**后维持 **NO-GO**。原三条理由已解除两条，现在只剩一条，但那一条依然充分：
 
 | 原 P0 理由 | 当前状态 |
 |---|---|
-| 从未产出过 APK | ✅ **已解除** —— 已产出 93MB debug APK |
-| AGP 与 R8 从未执行 | ⚠️ 部分解除 —— AGP 已真实执行；R8 仅在 release 构建时生效，尚未跑过 |
-| **从未在任何真机上运行过一次** | ❌ **仍然成立** —— 这是当前唯一的核心理由 |
+| 从未产出过 APK | ✅ **已解除** —— debug 93.70MB + release 60.04MB |
+| AGP 与 R8 从未执行 | ✅ **已解除** —— `assembleRelease` 跑通，R8 真实执行 |
+| 七个模块零测试 | ✅ **已解除** —— 4 → **386 通过** |
+| **从未在任何真机上运行过一次** | ❌ **仍然成立 —— 这是现在唯一充分的一条** |
 
-`adb devices` 为空，APK 只经过静态验证（签名、清单、Hilt 图）。**"可安装"经静态验证，"可运行 / 可出结果"必须等一台 arm64 真机**。
+复审新识别的 P0：
 
-本项目的四个核心依赖——JNI、GPU delegate、WebView 渲染、2.6GB 常驻内存——正是"意图正确"与"实际能跑"之间鸿沟最深、且**编译期不可见**的领域。APK 产出只证明它能被打包，不证明它能跑。
+- **R-I** release 包未签名（无 v1/v2/v3）⇒ `adb install` 必失败
+- **R-H** 运维侧签名 manifest 未产出，链路默认 `UNCONFIGURED` fail-closed ⇒ 真实用户仍拿不到模型
+- **R-J** ✅ **已修复** —— CI 曾放在 `HarnessAgent/.github/`，而 GitHub 只读仓库根 ⇒ 4 个 job 从未也不会触发，"CI 守卫"曾经根本不存在
+
+`adb` 未安装、`adb devices` 为空。
+
+**四大不可见领域的行为覆盖率（复审估计，无 jacoco/kover，均为估测）**：
+
+| 域 | 行为覆盖 |
+|---|---|
+| JNI / `.so` 加载 | **0%**（`.so` 在包内，从未 dlopen） |
+| GPU / NNAPI / SoC 兼容 | **0%**（降级阶梯是纯函数，验的不是"能跑"） |
+| WebView / DOM 注入 | **0%**（符号层已 100% 静态验过，**回调零覆盖**） |
+| 2.6GB 常驻内存 | **0%** |
+
+合计约 **0%，宽口径 ≤5%**。放宽到相邻纯逻辑（如模型分发状态机）有 30–45%，但那不是风险本体。
+
+**386 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
+
+> **禁令**（验收文档已写死）：不得把 `assembleRelease` 成功表述为"release 验证通过"。
+> 它能证明：编译/KSP/资源与 manifest 合并跑通、R8 真执行、高危符号存活、`.so` 入双 ABI、可复现。
+> 它不能证明：装得上（它装不上）、任何一行被执行、`-keep` 保的是符号而非可达性。
 
 **最需要警惕的一点**：不要把「编译通过」当成「验证通过」。本项目高危点的共性是**静默失效**——JS 回调改名不崩溃、GPU 缺声明时 `initialize()` 照常成功、KV cache 不复用只是悄悄慢 6.8 倍、一键清除失败而 UI 报成功。它们不会让 CI 变红、不会产崩溃栈，只让用户觉得"这 App 有点怪"。
 
 ### 已知待办
 
-- **P1**：`adb devices` 为空，真机验证 M7–M21 全部待跑（M10 WebView DOM 抽取向为咽喉项）
-- **P1**：模型分发的 CDN 与 manifest 尚不存在（应用内下载策略已设计，服务端未落地）
+- **P0**：`adb` 不可用，真机验证 M1–M21 全部待跑（M10 WebView DOM 抽取为咽喉项）
+- **P0**：release 包未签名（需四个签名 Secret 或 apksigner）
+- **P0**：运维侧签名 manifest 与 CDN 未产出（客户端已就绪，默认 fail-closed）
 - **P1**：安全护栏未实测（支付硬禁止 / 提示注入拦截 / 预算告知）
-- **P1**：七个模块零测试，`androidTest` 完全不存在
-- **P2**：`:ui → :data` 最后一条 Gradle 边待摘（需 `WipePort` 的 Store 层真实现接入）
-- **P2**：`UiRuntimeModule` 自绑的 `McpServerStorePort` / `SettingsStorePort` 是 UI 侧过渡实现，`:data` 真实现落地后必须删除，否则 duplicate binding
+- **P1**：端侧 OOM / 延迟 / SoC 矩阵 / GPU 降级 —— 全部需真机
+- **P1**：`androidTest` 完全不存在
+- **P2**：归档清理（`retentionPlan`）已实现但无调用方，等产品策略
 - **P2**：隐私政策与 Data Safety 未备（需如实申报以登录态访问第三方网站）；两个 `specialUse` 前台服务各需演示视频
-- **P3**：`TaskStateWriter` 端到端与两条新 SQL 未经真机 SQLite 验证
+- **P3**：`TaskStateWriter` 端到端、两条新 SQL 与 rename 顺序未经真机 SQLite 验证
+- **P3**：`:browser`/`:ui`/`:app` 仍零测试（`testImplementation` 已配好）
 
 ### 下一步：最小真机验证集
 
