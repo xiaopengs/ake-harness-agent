@@ -22,6 +22,14 @@ import com.ake.data.persist.db.AkeDatabase
 import com.ake.data.persist.db.AkeMigrations
 import com.ake.data.persist.db.AkePragmaConfig
 import com.ake.data.persist.db.AkePragmaDriver
+import com.ake.data.persist.modeldist.ManifestCache
+import com.ake.data.persist.modeldist.ManifestTransport
+import com.ake.data.persist.modeldist.ManifestTransports
+import com.ake.data.persist.modeldist.ManifestTrustStore
+import com.ake.data.persist.modeldist.ModelAssetLedger
+import com.ake.data.persist.modeldist.ModelManifestConfig
+import com.ake.data.persist.modeldist.ModelManifestParser
+import com.ake.data.persist.modeldist.ModelManifestSource
 import com.ake.data.persist.payload.PayloadStore
 import com.ake.data.persist.recovery.TaskReconciler
 import com.ake.data.persist.redact.PersistenceRedactionGate
@@ -385,6 +393,88 @@ public abstract class PersistenceBindingsModule {
             db: AkeDatabase,
             gate: PersistenceRedactionGate,
         ): MemoryStoreImpl = MemoryStoreImpl(db, gate)
+
+        // ──────────────────────────────────────────────────────────────────────
+        // 模型分发（manifest 驱动）
+        //
+        // ★★ **账本装配搬回 `:data`**（交接项 B1）：它此前临时落在 `:app` 的
+        //    `ModelDistributionModule`，因为 `AkeDatabase.modelAssetDao()` 需要 Room，
+        //    `:app` 为此还多引了一行 `room-runtime`。
+        //    账本本来就是 `:data` 的类、Room 本来就在 `:data`，装配它不需要任何
+        //    `:app` 才知道的信息 ⇒ 搬回来之后 `:app` 那行 `room-runtime` 可删。
+        //
+        //    ⚠ 仍然留在 `:app` 的是 `ModelLedgerGateway` 的适配器本身：
+        //    那个接口属于 `:llm`，`:data` 不能反向依赖，组合根是唯一能同时看见两侧的地方。
+        //    但适配器现在只需要注入本类产出的 `ModelAssetLedger`，不再碰 DAO。
+        // ──────────────────────────────────────────────────────────────────────
+
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideModelAssetLedger(db: AkeDatabase, clock: Clock): ModelAssetLedger =
+            ModelAssetLedger(dao = db.modelAssetDao(), clock = clock)
+
+        /**
+         * manifest 配置。
+         *
+         * ⚠ 默认 [ModelManifestConfig.UNCONFIGURED]（未配置 URL / 未钉公钥）—— 这是
+         * **当前的真实状态**，运维还没产出签名 manifest。此时 `ModelManifestSource`
+         * 一律返回 `MANIFEST_NOT_CONFIGURED`，调用方沿用 APK 内烧录的目录项。
+         * 上线前由运维给出 URL 与 `pinnedKeys`，改的是这一个对象。
+         */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideModelManifestConfig(): ModelManifestConfig = ModelManifestConfig.UNCONFIGURED
+
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideManifestTransport(config: ModelManifestConfig): ManifestTransport =
+            ManifestTransports.http(maxBytes = config.maxManifestBytes)
+
+        /** 公钥钉扎：配置里没钉钥匙 ⇒ `TRUST_NOTHING`（任何 manifest 都验不过）。 */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideManifestTrustStore(config: ModelManifestConfig): ManifestTrustStore =
+            config.trustStore()
+
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideModelManifestParser(trust: ManifestTrustStore): ModelManifestParser =
+            ModelManifestParser(trust)
+
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideManifestCache(@ApplicationContext context: Context): ManifestCache =
+            ManifestCache(File(context.filesDir, "modeldist"))
+
+        /**
+         * manifest 的唯一来源。**整条分发链路（含 `:llm` 的 `resolve()`）就挂在这个单例上**。
+         *
+         * ★ 它是「通电」那一格的实体：有了它，`ModelManifest` 才有了生产者，
+         *   `ModelResolver.resolve()` 才有了入参 —— 上一轮那条链路被 R8 当成死代码
+         *   shrink 掉，根因正是没有这个生产者。
+         */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideModelManifestSource(
+            config: ModelManifestConfig,
+            transport: ManifestTransport,
+            parser: ModelManifestParser,
+            cache: ManifestCache,
+            clock: Clock,
+        ): ModelManifestSource = ModelManifestSource(
+            config = config,
+            transport = transport,
+            parser = parser,
+            cache = cache,
+            clock = clock,
+        )
 
         /**
          * 「一键清除全部痕迹」。

@@ -108,6 +108,19 @@ public object ModelDistErrorCodes {
     public const val SIGNATURE_KEY_UNKNOWN: String = "MANIFEST_SIGNATURE_KEY_UNKNOWN"
     public const val SIGNATURE_ALG_UNSUPPORTED: String = "MANIFEST_SIGNATURE_ALG_UNSUPPORTED"
     public const val SIGNATURE_INVALID: String = "MANIFEST_SIGNATURE_INVALID"
+
+    // ── 拉取侧（`ModelManifestSource` / `ManifestTransport`）
+    public const val MANIFEST_NOT_CONFIGURED: String = "MANIFEST_NOT_CONFIGURED"
+    public const val MANIFEST_UNAVAILABLE: String = "MANIFEST_UNAVAILABLE"
+    public const val MANIFEST_FETCH_FAILED: String = "MANIFEST_FETCH_FAILED"
+    public const val MANIFEST_NOT_MODIFIED: String = "MANIFEST_NOT_MODIFIED"
+    public const val MANIFEST_TOO_LARGE: String = "MANIFEST_TOO_LARGE"
+    public const val MANIFEST_DOWNGRADE: String = "MANIFEST_DOWNGRADE"
+
+    // ── 归档清理（`ModelArchiveRetention`）
+    public const val CLEANUP_NEEDS_CONFIRM: String = "MODEL_CLEANUP_NEEDS_CONFIRM"
+    public const val CLEANUP_CURRENT_UNVERIFIED: String = "MODEL_CLEANUP_CURRENT_UNVERIFIED"
+
     public const val MODEL_INCOMPATIBLE: String = "MODEL_INCOMPATIBLE"
     public const val MODEL_UNAVAILABLE: String = "MODEL_UNAVAILABLE"
 }

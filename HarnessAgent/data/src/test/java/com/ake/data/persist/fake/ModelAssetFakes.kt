@@ -34,6 +34,9 @@ internal class FakeModelAssetDao : ModelAssetDao {
 
     override suspend fun allOnce(): List<ModelAssetEntity> = rows.values.toList()
 
+    override suspend fun byModelId(modelId: String): List<ModelAssetEntity> =
+        rows.values.filter { it.modelId == modelId }
+
     override suspend fun currentReady(): ModelAssetEntity? =
         rows.values.filter { it.state == "READY" }.maxByOrNull { it.lastUsedAt ?: 0L }
 

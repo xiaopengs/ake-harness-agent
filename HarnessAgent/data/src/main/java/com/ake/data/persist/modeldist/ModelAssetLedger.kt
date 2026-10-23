@@ -8,6 +8,7 @@ import com.ake.core.contract.ModelAssetState
 import com.ake.data.persist.db.dao.ModelAssetDao
 import com.ake.data.persist.db.entity.ModelAssetEntity
 import com.ake.data.persist.db.mapper.EntityMappers
+import java.io.File
 
 /** 需要 `:llm` 代执行的文件动作 —— `:data` 不持有 `File`，只描述意图。 */
 public sealed interface ModelFileOp {
@@ -216,6 +217,46 @@ public class ModelAssetLedger(
     /** 回滚候选集：所有 READY 行（含归档行）。 */
     public suspend fun installed(): List<ModelAssetRecord> =
         dao.allOnce().map(EntityMappers::modelAssetToDomain)
+
+    // ────────────────────────────────────────────────────────────────────────
+    // 删除路径：按 modelId 列出**这个模型拥有的全部文件名**（交接项 B2）
+    //
+    // `:llm` 的 `ModelLifecyclePort.deleteModelFile(modelId)` 只拿到一个 modelId，
+    // 而它自己的 `ModelDownloader.delete(id)` 删的是 `<id>.litertlm` —— 两者只在
+    // 「assetId 恰好等于 modelId」的旧数据上重合。账本才是唯一知道
+    // 「这个 modelId 在盘上到底留了几个文件」的地方，所以名单由这里出。
+    // ────────────────────────────────────────────────────────────────────────
+
+    /**
+     * 某个 modelId 在盘上可能拥有的**全部文件名**（去重，顺序稳定）。
+     *
+     * 覆盖三类名字：
+     *  1. `<modelId>.litertlm` / `<modelId>.litertlm.part` —— 旧数据（assetId 就是 modelId）；
+     *  2. `<assetId>.litertlm` / `<assetId>.litertlm.part` —— 槽位行的正名与半成品；
+     *  3. 各行 `local_path` / `temp_file` 实际记录的名字 —— 归档件的
+     *     `<modelId>_<variant>_<sha16>.litertlm` 就在这两列里。
+     *
+     * 只返回**名字**不带目录：`:data` 不持有 `File`，真实路径由 `:llm` 拼在 `modelsDir` 下
+     * （与 `ModelFileOp` 同样的分工）。
+     */
+    public suspend fun ownedFileNames(modelId: String): List<String> {
+        val names = LinkedHashSet<String>()
+        // ① 旧命名：`ModelDownloader.delete(modelId)` 认的就是这两个
+        names += ModelFileLayout.finalNameOf(modelId)
+        names += ModelFileLayout.partNameOf(modelId)
+        // ② ③ 账本知道的每一个名字
+        dao.byModelId(modelId).forEach { row ->
+            names += ModelFileLayout.finalNameOf(row.id)
+            names += ModelFileLayout.partNameOf(row.id)
+            row.localPath?.let { names += File(it).name }
+            row.tempFile?.let { names += File(it).name }
+        }
+        return names.toList()
+    }
+
+    /** 某个 modelId 的归档清理裁决（策略见 [ModelArchiveRetention]）。 */
+    public suspend fun retentionPlan(modelId: String): ModelRetentionPlan =
+        ModelArchiveRetention.plan(dao.byModelId(modelId).map(EntityMappers::modelAssetToDomain))
 
     private fun newEntity(
         id: String,

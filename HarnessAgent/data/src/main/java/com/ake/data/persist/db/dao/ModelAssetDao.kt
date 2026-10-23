@@ -92,4 +92,29 @@ interface ModelAssetDao {
     /** 全量快照（含归档行）。回滚候选集与「绝不删除」审计都靠它。 */
     @Query("SELECT * FROM model_asset ORDER BY download_finished_at DESC, id ASC")
     suspend fun allOnce(): List<ModelAssetEntity>
+
+    // ────────────────────────────────────────────────────────────────────────
+    // 按 modelId 列出**全部**行（霍承钧 · 交接项 B2）
+    //
+    // 起因：删除路径上的命名在两侧不一致 ——
+    //   `:llm` 的 `ModelDownloader.delete(id)` 删的是 `<id>.litertlm`，
+    //   而 `ModelLifecyclePort.deleteModelFile(modelId)` 传进去的是 **modelId**；
+    //   账本里真正在盘上的文件名是 `<assetId>.litertlm`（assetId = ULID 主键，
+    //   与 modelId 只在旧数据里碰巧相同）。
+    //   ⇒ 只按 modelId 删一个文件，会留下槽位文件、归档件与 .part 全部不动，
+    //     用户以为删掉了 2.6 GB，实际一个字节都没少。
+    //
+    // 所以这里补的是**查询**而不是「把命名改回去」：
+    //   `:llm` 拿到某个 modelId 下的每一行后即可逐个算出它拥有的全部文件名
+    //   （见 `ModelAssetLedger.ownedFileNames`）。
+    //   改命名规则的代价是现有盘上文件全部失联，那条路不能走。
+    // ────────────────────────────────────────────────────────────────────────
+
+    /**
+     * 某个 modelId 下的**全部**行：槽位行 + 归档行 + 残缺行。
+     * 归档行的 `variant` 是 `<variant>@<sha12>`，但 `model_id` 列原样保留，
+     * 所以这一条就能把「一个模型的全部版本」捞齐。
+     */
+    @Query("SELECT * FROM model_asset WHERE model_id = :modelId ORDER BY download_finished_at DESC, id ASC")
+    suspend fun byModelId(modelId: String): List<ModelAssetEntity>
 }
