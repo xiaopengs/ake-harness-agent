@@ -43,6 +43,7 @@ import com.ake.ui.components.Tag
 import com.ake.ui.components.riskColorOf
 import com.ake.ui.components.riskLabelOf
 import com.ake.ui.model.CapabilityPresence
+import com.ake.ui.model.ChatTerminalTone
 import com.ake.ui.model.chatTerminalCopyOf
 import com.ake.ui.theme.AkeColors
 import com.ake.ui.runtime.UiHumanGate
@@ -108,14 +109,41 @@ public fun ChatScreen(
         // ★ 例外：`stuck` 非空时这段话已经贴在气泡脚注里了（那里离"没说完的那条消息"
         //   更近，还带着重试按钮）。横幅再来一遍，屏幕上就出现两段一字不差的长文案 ——
         //   重复的告警会被读成"两个不同的问题"，用户反而不知道该看哪一处。
+        //
+        // ★ 颜色跟 `copy.tone` 走，不跟"是不是 COMPLETED"走：`IN_FLIGHT`
+        //   （上一轮还没收尾、这一轮没开始）没有任何东西失败，用红色去说"等一下"
+        //   等于先说"出事了"再补一句"其实没事" —— 用户只会记住前半句。
         ui.terminal?.let { reason ->
             val copy = chatTerminalCopyOf(reason)
             if (reason != ChatTerminalReason.COMPLETED && ui.stuck.isEmpty()) {
+                val text = stringResource(copy.titleRes) + " · " + stringResource(copy.nextRes)
                 BannerSlot {
-                    AlertBar(
-                        text = stringResource(copy.titleRes) + " · " + stringResource(copy.nextRes),
-                        color = AkeColors.RiskSensitive,
-                    )
+                    Column {
+                        when (copy.tone) {
+                            ChatTerminalTone.ALERT -> AlertBar(text, color = AkeColors.RiskSensitive)
+                            ChatTerminalTone.NOTICE -> NoticeBar(text)
+                        }
+                        // ★ `IN_FLIGHT` 的重试只能挂在这里。
+                        //
+                        //   它的宿主一定是「用户刚发出去的那句话」，而 USER 气泡不画脚注
+                        //   （见 `MessageBubble` 里 `isUser` 的早退）—— 也就是说 `FailureFoot`
+                        //   那条路对它是死的：文案里写了「点重试」，屏幕上却没有那个按钮，
+                        //   用户只能把整句话重打一遍。横幅是它唯一的出口，按钮就补在这里。
+                        //
+                        //   其它终态的宿主是助手气泡，脚注里已经有按钮；横幅再挂一个，
+                        //   屏幕上就会同时出现两个「重试」，反而不知道该按哪个。
+                        if (reason == ChatTerminalReason.IN_FLIGHT && copy.retryable) {
+                            TextButton(
+                                onClick = viewModel::retry,
+                                contentPadding = PaddingValues(horizontal = 4.dp),
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.chat_turn_retry),
+                                    style = MaterialTheme.typography.labelMedium,
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

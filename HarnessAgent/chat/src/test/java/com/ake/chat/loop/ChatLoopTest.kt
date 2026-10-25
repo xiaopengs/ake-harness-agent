@@ -20,9 +20,11 @@ import com.ake.chat.fixtures.FakeTraceStore
 import com.ake.chat.fixtures.RecordingPolicy
 import com.ake.chat.skill.BrowserTaskSkill
 import com.ake.chat.skill.ChatSkillRegistry
+import com.ake.core.common.AppError
 import com.ake.core.common.Clock
 import com.ake.core.common.Outcome
 import com.ake.core.common.RedactionGate
+import com.ake.core.common.Severity
 import com.ake.core.ports.CapabilityRef
 import com.ake.core.ports.ChatEvent
 import com.ake.core.ports.ChatTerminalReason
@@ -306,11 +308,53 @@ class ChatLoopTest {
 
         val second = loop.turn(request("turn-2")).toList()
         assertThat(second).hasSize(1)
-        assertThat((second.single() as ChatEvent.Terminal).reason).isEqualTo(ChatTerminalReason.POLICY_DENIED)
+        // ★ 报「上一轮还没收尾」，**不能**报 POLICY_DENIED：这里没有任何裁决发生，
+        //   说「安全策略拦下了这一步」会让用户去翻一个不存在的策略开关。
+        assertThat((second.single() as ChatEvent.Terminal).reason)
+            .isEqualTo(ChatTerminalReason.IN_FLIGHT)
+        // 反向断言：这条路径上不许出现策略归因（这是本次修正的全部理由）
+        assertThat((second.single() as ChatEvent.Terminal).reason)
+            .isNotEqualTo(ChatTerminalReason.POLICY_DENIED)
 
         gate.complete(Unit)
         val firstEvents = first.await()
         assertThat((firstEvents.last() as ChatEvent.Terminal).reason).isEqualTo(ChatTerminalReason.COMPLETED)
+    }
+
+    /**
+     * ★ 被拒的那一轮**在上一轮结束后必须能正常发出去** —— 只测"拒绝"是不够的。
+     *
+     * 拒绝对用户只有一个合法含义：「等一下，再发一次就行」。如果"再发一次"仍然被拒，
+     * 那句话就从"稍等"变成了假话（`ChatLoop` 是单例 ⇒ 会话会被永久卡住）。
+     * 所以这里断的是**恢复**：同一句 `userText`、同一 `turnId`（`retry()` 的真实形态，
+     * 见 `:ui` 的 `ChatViewModel.retry`），前一轮收尾后必须 COMPLETED 且有内容流出。
+     */
+    @Test
+    fun theRejectedTurnSucceedsOnceThePreviousTurnFinishes() = runBlocking {
+        val model = FakeModelPort()
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        model.gate = gate
+        val loop = buildLoopWith(model)
+
+        val pending = request("turn-1", "帮我看下今天有什么安排")
+        val first = async { loop.turn(pending).toList() }
+        withTimeout(5_000) {
+            while (model.lastSession?.requests?.isEmpty() != false) yield()
+        }
+
+        // 用户手快：同一句话又发了一次（`retry()` 复用同一个 turnId）
+        assertThat(loop.turn(pending).toList().terminalReason())
+            .isEqualTo(ChatTerminalReason.IN_FLIGHT)
+
+        // 前一轮收尾 ⇒ 闸被真正复位 ⇒ 同一句话这次必须发得出去
+        gate.complete(Unit)
+        assertThat(first.await().terminalReason()).isEqualTo(ChatTerminalReason.COMPLETED)
+
+        val retried = loop.turn(pending).toList()
+        assertThat(retried.terminalReason()).isEqualTo(ChatTerminalReason.COMPLETED)
+        assertThat(retried.filterIsInstance<ChatEvent.AssistantDelta>()).isNotEmpty()
+        // 幂等键没被这次"等一下再发"破坏：库里仍然只有一条用户消息
+        assertThat(store.stored.count { it.role.name == "USER" }).isEqualTo(1)
     }
 
     @Test
@@ -545,6 +589,50 @@ class ChatLoopTest {
         assertThat(store.requestKeys.toSet()).hasSize(2)
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // 焦点拿不到时的**归因**（同类原则的第三个案例）
+    //
+    // 上一版 `borrowFocus` 返回 null ⇒ 调用点只能笼统报 `MODEL_FAILED`。
+    // 而焦点拿不到时**模型根本没有被调用过**（`opened == 0`），说「模型出错了」
+    // 会让用户去换模型 / 清缓存。真实原因通常是「焦点被别的会话或任务占着」——
+    // 那是「等一下再发」，不是「坏了」。
+    //
+    // ★ 两条测试一起构成判据：`FOCUS_BUSY` 归 `IN_FLIGHT`，**其它**码不许跟着沾光。
+    //   没有第二条，这次修正很容易被"顺手"做成「凡是焦点失败都是 IN_FLIGHT」——
+    //   那是同一个错误的反方向（把真实的引擎故障说成"稍等就好"）。
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun focusBusyIsReportedAsInFlightInsteadOfModelFailed() = runBlocking {
+        val focus = ScriptedFocus(FocusOutcome.BUSY)
+        val model = FakeModelPort()
+        val loop = buildLoopWith(model, focus = focus)
+
+        assertThat(loop.turn(request("turn-1")).toList().terminalReason())
+            .isEqualTo(ChatTerminalReason.IN_FLIGHT)
+        // 「模型出错了」这句话的事实前提是"模型被调用过并失败" —— 这里它一次都没被调用
+        assertThat(model.opened).isEqualTo(0)
+
+        // ★ 恢复：占用者收尾之后，同一句话必须发得出去（否则"等一下"是假话）
+        focus.outcome = FocusOutcome.GRANTED
+        val retried = loop.turn(request("turn-1", "帮我看下今天有什么安排")).toList()
+        assertThat(retried.terminalReason()).isEqualTo(ChatTerminalReason.COMPLETED)
+        assertThat(retried.filterIsInstance<ChatEvent.AssistantDelta>()).isNotEmpty()
+    }
+
+    @Test
+    fun anUnknownFocusFailureMustNotPretendToBeTheInFlightWindow() = runBlocking {
+        val focus = ScriptedFocus(FocusOutcome.OTHER_FAILURE)
+        val model = FakeModelPort()
+        val loop = buildLoopWith(model, focus = focus)
+
+        val reason = loop.turn(request("turn-1")).toList().terminalReason()
+        // 不是"别的一轮在跑"，所以不许报 IN_FLIGHT —— 等多久都不会好
+        assertThat(reason).isNotEqualTo(ChatTerminalReason.IN_FLIGHT)
+        assertThat(reason).isEqualTo(ChatTerminalReason.MODEL_FAILED)
+        assertThat(model.opened).isEqualTo(0)
+    }
+
     // ── 便捷构造（保持与 buildLoop 同一套依赖，只是把 model 暴露出来断言 opened 次数）
 
     private fun buildLoopWith(
@@ -614,4 +702,50 @@ private class ToggleRouting(
             decidedAt = clock.nowMillis(),
         )
     }
+}
+
+/** [ScriptedFocus] 的三种裁决。 */
+private enum class FocusOutcome {
+    /** 焦点被别的会话 / 派生任务占着（生产里唯一真实会发生的拒绝）。 */
+    BUSY,
+
+    /** 仲裁器给出了本模块没有语义的失败（模拟"意外的实现/状态"）。 */
+    OTHER_FAILURE,
+
+    /** 正常签发。 */
+    GRANTED,
+}
+
+/**
+ * 可控的焦点仲裁器假件。
+ *
+ * 为什么需要它：生产实现 `InferenceFocusArbiter` 里 `FOREGROUND_USER` **恒可抢占**，
+ * 于是「聊天轮次拿不到焦点」这件事用真仲裁器**无法触发** —— 而这恰恰是
+ * `borrowFocus` 失败路径唯一的存在理由。没有这个假件，那条路径就是零覆盖。
+ */
+private class ScriptedFocus(var outcome: FocusOutcome = FocusOutcome.BUSY) : InferenceFocus {
+
+    override suspend fun acquire(holder: FocusHolder, priority: FocusPriority): Outcome<FocusLease> =
+        when (outcome) {
+            FocusOutcome.BUSY -> Outcome.Err(
+                AppError(
+                    code = InferenceFocusArbiter.CODE_FOCUS_BUSY,
+                    reasonKey = "err_focus_busy",
+                    severity = Severity.LOW,
+                ),
+            )
+
+            FocusOutcome.OTHER_FAILURE -> Outcome.Err(
+                AppError(code = "ENGINE_NOT_READY", reasonKey = "err_engine_not_ready"),
+            )
+
+            FocusOutcome.GRANTED -> Outcome.Ok(
+                object : FocusLease {
+                    override fun isValid(): Boolean = true
+                    override fun close() = Unit
+                },
+            )
+        }
+
+    override fun current(): FocusHolder? = null
 }

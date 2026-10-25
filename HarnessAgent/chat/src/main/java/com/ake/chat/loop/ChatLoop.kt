@@ -175,7 +175,13 @@ public class ChatLoop(
         val sid = req.sessionId
         if (!enterFlight(sid)) {
             AkeLog.w(TAG, "turn rejected: session=$sid 已有一轮在跑（同会话并发会让 native 串字）")
-            send(ChatEvent.Terminal(sid, null, ChatTerminalReason.POLICY_DENIED))
+            // ★ 这里报 `IN_FLIGHT`，**不是** `POLICY_DENIED`。
+            //   这条路径上没有任何裁决发生（无 `PolicyPort.authorize`、无出云裁决、
+            //   无授权表、无确认），说「安全策略拦下了这一步」是凭空归因 —— 用户会去
+            //   翻设置找那个不存在的开关。真实事实是「上一轮还没收尾，这一轮没开始」。
+            //   触发面很窄但真实：连点两次发送、`stop()` 之后几毫秒内再发
+            //   （UI 已同步释放自己的闸，而本类的 `exitFlight` 要等取消传播）。
+            send(ChatEvent.Terminal(sid, null, ChatTerminalReason.IN_FLIGHT))
             return@channelFlow
         }
         // ★★ P0-1：`try` 紧贴 `enterFlight` 成功之后，`finally` 覆盖本块内的**全部**退出路径：
@@ -280,7 +286,12 @@ public class ChatLoop(
         val mode = modeControllerFor(sid, scope.summary)
 
         // ── ③ 焦点 + 会话（复用 or 复水）
-        val lease = borrowFocus(sid, agentId) ?: return TurnResult(null, ChatTerminalReason.MODEL_FAILED)
+        val lease = when (val borrowed = borrowFocus(sid, agentId)) {
+            is Outcome.Ok -> borrowed.value
+            // ★ 不再一律报 `MODEL_FAILED`：焦点拿不到时模型根本没被调用过，
+            //   说「模型出错了」会把用户推去换模型。归因见 [focusDeniedReason]。
+            is Outcome.Err -> return TurnResult(null, focusDeniedReason(borrowed.error.code))
+        }
         val conversation = ensureConversation(sid, profile, enabledSkills, budget, lease, mode, out)
             ?: run {
                 // ★ P0-1 附注（关千锤点名要查的同款问题）：`ensureConversation` 失败时
@@ -390,11 +401,16 @@ public class ChatLoop(
      * **会话缓存与租约绑在一起**：槽里那条 Conversation 只有在「它的租约仍然有效」时才可信。
      * 租约失效意味着别人已经抢占并开了自己的会话 —— 此时复用一个死句柄，
      * native 会以最糟的方式告诉你（崩溃或静默错乱）。
+     *
+     * ★ 返回 `Outcome` 而不是 `FocusLease?`：**失败原因必须能传到终态归因上**。
+     *   上一版返回 null，于是调用点只能笼统报 `MODEL_FAILED`（「模型出错了」），
+     *   而真实原因通常是焦点被占着（`FOCUS_BUSY`）—— 用户按那句话去换模型 / 清缓存，
+     *   全是白费。判据见 [focusDeniedReason]。
      */
-    private suspend fun borrowFocus(sid: String, agentId: String): FocusLease? {
+    private suspend fun borrowFocus(sid: String, agentId: String): Outcome<FocusLease> {
         val held = synchronized(slotLock) { slot.lease }
         val cachedSessionId = synchronized(slotLock) { slot.sessionId }
-        if (held != null && held.isValid() && cachedSessionId == sid) return held
+        if (held != null && held.isValid() && cachedSessionId == sid) return Outcome.Ok(held)
 
         return when (val r = focus.acquire(FocusHolder.Chat(sid, agentId), FocusPriority.FOREGROUND_USER)) {
             is Outcome.Ok -> {
@@ -402,15 +418,37 @@ public class ChatLoop(
                     slot.lease?.close() // version 守卫会让这条对已被抢占的旧租约变成 no-op
                     slot = slot.copy(lease = r.value)
                 }
-                r.value
+                Outcome.Ok(r.value)
             }
 
+            // 原样往上抛：码是唯一能区分「等一下就好」与「真的坏了」的证据，不能在这里丢掉。
             is Outcome.Err -> {
                 AkeLog.w(TAG, "focus denied: ${r.error.code}")
-                null
+                r
             }
         }
     }
+
+    /**
+     * 焦点拿不到 ⇒ 这一轮没开始。但**为什么**没开始，决定用户下一步该做什么。
+     *
+     * | 仲裁器返回 | 事实 | 终态 |
+     * |---|---|---|
+     * | `FOCUS_BUSY` | 焦点被别的会话 / 派生任务占着，等它收尾就能发 | [ChatTerminalReason.IN_FLIGHT] |
+     * | 其它码 | 仲裁器给出了本模块没有语义的失败（生产实现只有 `FOCUS_BUSY`，走到这里意味着意外的实现/状态） | [ChatTerminalReason.MODEL_FAILED]（通用失败档，精确码在日志里） |
+     *
+     * 为什么 `FOCUS_BUSY` 归到 `IN_FLIGHT` 而不是单开一个值：对用户是同一句话
+     * （「有别的一轮在跑，你这一轮没开始，等它完再发」），可做的动作完全相同，
+     * 而 `ChatEvent.Terminal` 也不携带那个会话的 id（点不过去）。单开只会让 `:ui`
+     * 维护一句一模一样的话。**精确归因留在日志，文案分档只按用户下一步** ——
+     * 详见 `core/ports/Chat.kt` 里 `IN_FLIGHT` 的注释。
+     */
+    private fun focusDeniedReason(code: String): ChatTerminalReason =
+        if (code == InferenceFocusArbiter.CODE_FOCUS_BUSY) {
+            ChatTerminalReason.IN_FLIGHT
+        } else {
+            ChatTerminalReason.MODEL_FAILED
+        }
 
     /**
      * 拿到一条可用的 Conversation。

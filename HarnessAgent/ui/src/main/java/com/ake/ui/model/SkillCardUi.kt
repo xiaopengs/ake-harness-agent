@@ -68,6 +68,16 @@ public data class ChatTurnFailure(
          * ★ 这道检查已经赚回一次成本：`REQUEST_STORE_FAILED` 加进来时本文件立刻红，
          *   于是「这句话没存下来、本轮没开始答」被**显式**判定为失败（它当然要占一条气泡：
          *   用户得知道自己的话去哪了），而不是靠 `else` 蒙混过去。
+         *
+         * ★ 第二次：`IN_FLIGHT` 进来时同样红。判定为「占一条位置」，理由和
+         *   `USER_ABORT` 的区别一眼可见：`USER_ABORT` 是**用户自己**结束的（不需要解释），
+         *   `IN_FLIGHT` 是**用户以为发出去了、其实一个字都没生成**（必须解释，否则
+         *   他不知道该等还是该重打，只会再点一次发送）。
+         *
+         *   注意这条失败挂在「用户那句话」所属的 turn 上：`FOCUS_BUSY` 路径下
+         *   USER 行已经落库（`ChatLoop.admit` 的 ①②③ 顺序），所以 `turnId` 找得到宿主。
+         *   而 USER 气泡本身不画脚注（见 `MessageBubble` 里 `isUser` 的早退），
+         *   所以 `IN_FLIGHT` 真正露出水面的是页面顶部那一条 —— 见 `ChatScreen` 的 terminal 横幅。
          */
         public fun of(turnId: String?, reason: ChatTerminalReason): ChatTurnFailure? = when (reason) {
             ChatTerminalReason.COMPLETED,
@@ -81,6 +91,7 @@ public data class ChatTurnFailure(
             ChatTerminalReason.MODEL_NOT_LOADED,
             ChatTerminalReason.REQUEST_STORE_FAILED,
             ChatTerminalReason.STORE_FAILED,
+            ChatTerminalReason.IN_FLIGHT,
             -> ChatTurnFailure(turnId, reason, chatTerminalCopyOf(reason).retryable)
         }
     }

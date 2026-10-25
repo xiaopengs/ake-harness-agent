@@ -21,6 +21,28 @@ import com.ake.ui.R
  * **本文件编译失败**，而不是静默落到"未知原因"。聊天页最不能忍的就是
  * "出错了"三个字 —— 用户既不知道发生了什么，也不知道下一步做什么。
  */
+/**
+ * 这条结论该用**多大声**说。
+ *
+ * ## 为什么归因分对了还不够
+ *
+ * 文案决定用户"读完之后做什么"，颜色决定用户"读之前有多慌"。同一句话放在红条里，
+ * 用户的第一反应是「我搞坏了什么」，然后开始找那个能修好它的开关 —— 哪怕正文写着
+ * 「等一会儿」。`IN_FLIGHT` 正是这种情形：**没有任何东西失败，只是还没轮到**。
+ *
+ * ## 为什么不给 `else`
+ *
+ * 与 `when` 穷尽性同源：新增终态必须由人回答「它要不要喊」。默认值 `ALERT`
+ * 是刻意选的 —— 拿不准就喊出来，比把真失败静音便宜。
+ */
+public enum class ChatTerminalTone {
+    /** 有东西确实失败了：红条、半粗。 */
+    ALERT,
+
+    /** 没出事，只是现状：中性底、常规字重（见 `NoticeBar`）。 */
+    NOTICE,
+}
+
 public data class ChatTerminalCopy(
     /** 一句话结论。 */
     @param:StringRes val titleRes: Int,
@@ -28,6 +50,8 @@ public data class ChatTerminalCopy(
     @param:StringRes val nextRes: Int,
     /** 是否值得让用户点「重试」。 */
     val retryable: Boolean,
+    /** 这条结论该用多大声说；默认按"有问题"处理，只有真的没出事才降成 [ChatTerminalTone.NOTICE]。 */
+    val tone: ChatTerminalTone = ChatTerminalTone.ALERT,
 )
 
 public fun chatTerminalCopyOf(reason: ChatTerminalReason): ChatTerminalCopy = when (reason) {
@@ -132,6 +156,42 @@ public fun chatTerminalCopyOf(reason: ChatTerminalReason): ChatTerminalCopy = wh
         titleRes = R.string.chat_term_request_store_failed_title,
         nextRes = R.string.chat_term_request_store_failed_next,
         retryable = true,
+    )
+
+    /**
+     * ★ **上一轮还没收尾，所以这一轮根本没开始**（`enterFlight` 拒绝 / `FOCUS_BUSY`）。
+     *
+     * ## 与 `POLICY_DENIED` 的分界线（这两档曾经是同一句话）
+     *
+     * 拆分前，这一路上报的是 `POLICY_DENIED`，界面于是显示「安全策略拦下了这一步 ·
+     * 去工具页逐条授权」。而这条路径上**没有 `PolicyPort.authorize`、没有出云裁决、
+     * 没有授权表查询** —— 一次裁决都没发生。「策略」二字是凭空长出来的归因，
+     * 用户照着它去翻设置，找一个不存在的开关，找不到就只能认为 App 坏了。
+     *
+     * | 事实 | 用户该做什么 | 归哪档 |
+     * |---|---|---|
+     * | 上一次裁决真的拒了（出云 / 未授权 / `FORBIDDEN`） | 换个说法，或去逐条授权 | `POLICY_DENIED` |
+     * | 上一轮还在跑，这一轮排队都没排上 | **等它结束，把这句话再发一次** | 本档 |
+     *
+     * 所以这里的文案**一个"拦"字都不许有**：被拦下意味着有个东西在阻止你，
+     * 而事实是轮子只有一个、正在被占用。
+     *
+     * ## 为什么 `retryable = true`
+     *
+     * 与文案同一件事：这句话本身没问题，模型没读过它，也没有任何东西在替用户续跑。
+     * 「重试」重发的就是这句原话（`:ui` 的 `retry()` 复用 `lastUserText` 与 `turnId`），
+     * 而且**只在前一轮收尾之后才可能成功** —— 所以正文必须把"等"说在最前面，
+     * 否则用户会在同一秒连点，收不到任何反馈。
+     *
+     * ## 为什么 `tone = NOTICE`
+     *
+     * 见 [ChatTerminalTone]：红色会把"排队"读成"出事"。
+     */
+    ChatTerminalReason.IN_FLIGHT -> ChatTerminalCopy(
+        titleRes = R.string.chat_term_in_flight_title,
+        nextRes = R.string.chat_term_in_flight_next,
+        retryable = true,
+        tone = ChatTerminalTone.NOTICE,
     )
 }
 
