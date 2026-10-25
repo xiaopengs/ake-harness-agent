@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  聊天 / Agent 两个 feature 的全部可见文案。
+
+  ## 为什么 :ui 现在有了自己的 strings.xml
+
+  `:ui` 此前把中文直接写在 Composable 里（`HomeScreen` 等）。本轮新增的
+  会话页、创建 Agent 页文案量是既有页面的数倍，再散在 20 个文件里就没法校对
+  同一句话在中英文之间是否一致 —— 所以这批新代码一律走资源，`docs/05` §9-U
+  的「中文为主」由 `values/` 承载，将来加 `values-en/` 不需要改代码。
+
+  ## 占位符
+
+  统一用位置化参数（`%1$s` / `%1$d`），不写裸 `%s` —— 一旦某个语言里
+  参数顺序不同，裸占位符就会静默错位。
+-->
+<resources>
+
+    <!-- ── 导航 ────────────────────────────────────────────── -->
+    <string name="nav_tab_chat">对话</string>
+    <string name="nav_tab_agent">Agent</string>
+    <string name="nav_tab_task">任务</string>
+    <string name="nav_tab_model">模型</string>
+    <string name="nav_tab_tools">工具</string>
+    <string name="nav_tab_settings">设置</string>
+
+    <!-- ── 通用 ────────────────────────────────────────────── -->
+    <string name="common_back">返回</string>
+    <string name="common_retry">重试</string>
+    <string name="common_cancel">取消</string>
+    <string name="common_save">保存</string>
+    <string name="common_delete">删除</string>
+    <string name="common_edit">编辑</string>
+    <string name="common_loading">正在读取…</string>
+    <string name="common_dash">—</string>
+    <string name="common_expand">展开</string>
+    <string name="common_collapse">收起</string>
+    <string name="common_unknown_error">未知原因</string>
+
+    <!-- ── 时间 ────────────────────────────────────────────── -->
+    <string name="time_just_now">刚刚</string>
+    <string name="time_minutes_ago">%1$d 分钟前</string>
+    <string name="time_hours_ago">%1$d 小时前</string>
+    <string name="time_days_ago">%1$d 天前</string>
+
+    <!-- ── 对话列表 ────────────────────────────────────────── -->
+    <string name="chat_list_title">对话</string>
+    <string name="chat_list_subtitle">最近的在最上面，点开接着聊。</string>
+    <string name="chat_list_empty_title">还没有对话</string>
+    <string name="chat_list_empty_body">点右下角的「+」，挑一个 Agent 开始。</string>
+    <string name="chat_list_fab">新建对话</string>
+    <string name="chat_list_unread">%1$d 条未读</string>
+    <string name="chat_list_untitled_agent">未命名 Agent</string>
+    <string name="chat_list_no_message">（还没有消息）</string>
+    <string name="chat_list_error">会话列表读不出来：%1$s</string>
+    <string name="chat_list_pick_agent_title">和谁聊？</string>
+    <string name="chat_list_pick_agent_subtitle">选一个 Agent 开新对话。没有合适的就先建一个。</string>
+
+    <!-- ── 会话页 ──────────────────────────────────────────── -->
+    <string name="chat_input_placeholder">说点什么…</string>
+    <string name="chat_send">发送</string>
+    <string name="chat_stop">停止</string>
+    <string name="chat_streaming_hint">正在生成…</string>
+    <string name="chat_loading_history">正在读取历史消息…</string>
+    <string name="chat_empty_history">这是这段对话的开头。说句话开始吧。</string>
+    <string name="chat_runner_missing">对话主循环还没接线（ChatRunnerPort 在 Hilt 里没有绑定），这一页现在只能看历史消息。</string>
+    <string name="chat_input_offline">主循环未接线，发送已禁用</string>
+    <string name="chat_agent_unknown">Agent</string>
+    <string name="chat_note_compacted">更早的消息已被压缩（超出上下文窗口，细节已抽象化）</string>
+    <string name="chat_note_mode">本轮模式：%1$s</string>
+    <string name="chat_note_router">Agent 决定调用技能：%1$s</string>
+    <string name="chat_turn_failed_title">这一轮没说完</string>
+    <string name="chat_turn_retry">重试这一轮</string>
+    <string name="chat_message_aborted">已中止</string>
+    <string name="chat_message_failed">失败</string>
+    <string name="chat_message_streaming">生成中</string>
+    <string name="chat_confirm_title">等你确认</string>
+    <string name="chat_confirm_body">Agent 想执行一个需要你点头的动作（原因：%1$s）。不确认它不会往下走。</string>
+    <string name="chat_confirm_allow_once">只允许这一次</string>
+    <string name="chat_confirm_reject">不允许</string>
+    <string name="chat_confirm_waiting">等你在气泡里确认</string>
+    <string name="chat_skill_title">技能调用</string>
+    <string name="chat_skill_progress">正在操作「%1$s」第 %2$d 步</string>
+    <string name="chat_skill_steps_done">已完成 %1$d 步</string>
+    <string name="chat_skill_expand">展开详情</string>
+    <string name="chat_skill_collapse">收起</string>
+    <string name="chat_skill_detail">当前动作</string>
+    <string name="chat_skill_args">参数</string>
+    <string name="chat_skill_result_title">技能结果</string>
+    <string name="chat_skill_escalation">技能返回的内容被判定为可疑（%1$s）：它进了围栏，不会当作指令执行。</string>
+    <string name="chat_skill_running">进行中</string>
+    <string name="chat_skill_open_task">看完整步骤流</string>
+    <string name="chat_skill_done">已完成</string>
+    <string name="chat_skill_failed">已失败</string>
+
+    <!-- ── 终态叙词（ChatTerminalReason → 人话） ───────────── -->
+    <string name="chat_term_completed_title">说完了</string>
+    <string name="chat_term_completed_next">接着问就行；上下文会自己按预算压缩。</string>
+    <string name="chat_term_user_abort_title">你中止了这一轮</string>
+    <string name="chat_term_user_abort_next">想继续就再发一句，不用重开对话。</string>
+    <string name="chat_term_model_failed_title">模型推理失败</string>
+    <string name="chat_term_model_failed_next">多半是上下文超了或者模型被卸载。重试一次；反复失败就去模型页看一眼加载状态。</string>
+    <string name="chat_term_budget_exhausted_title">这一轮的预算用完了</string>
+    <string name="chat_term_budget_exhausted_next">把问题拆小一点，或者让它先总结再继续。</string>
+    <string name="chat_term_policy_denied_title">安全策略拦下了这一步</string>
+    <string name="chat_term_policy_denied_next">它想做的事被判定为不该自动执行。换个说法让它换条路，或去工具页逐条授权。</string>
+    <string name="chat_term_skill_failed_title">技能执行失败</string>
+    <string name="chat_term_skill_failed_next">展开那张技能卡片能看到卡在第几步；重试通常有效，连续失败多半是站点变了。</string>
+    <string name="chat_term_model_not_loaded_title">模型还没加载</string>
+    <string name="chat_term_model_not_loaded_next">先去模型页把模型准备好，再回来发消息。</string>
+
+    <!-- ── Agent 列表 ──────────────────────────────────────── -->
+    <string name="agent_list_title">Agent</string>
+    <string name="agent_list_subtitle">这些角色只活在这台手机上：人设、记忆、会话都可以一键删干净。</string>
+    <string name="agent_list_empty">还没有 Agent。从职业模板挑一个，或者从空白开始写。</string>
+    <string name="agent_list_create">创建 Agent</string>
+    <string name="agent_list_from_template">从职业模板创建</string>
+    <string name="agent_list_blank">空白创建</string>
+    <string name="agent_list_template_market">模板市场</string>
+    <string name="agent_list_error">Agent 列表读不出来：%1$s</string>
+    <string name="agent_trust_user">你自己写的</string>
+    <string name="agent_trust_builtin">出厂内置</string>
+    <string name="agent_trust_market">市场已验证</string>
+    <string name="agent_trust_quarantined">市场来源 · 需二次确认</string>
+    <string name="agent_scan_flagged">人设扫描命中规则</string>
+    <string name="agent_scan_refused">人设被拒绝写入</string>
+    <string name="agent_delete_title">删除「%1$s」？</string>
+    <string name="agent_delete_body">会连带删掉它的能力授权、全部会话与消息，以及它记住的东西。这一步不可撤销。</string>
+    <string name="agent_delete_done">已删除</string>
+    <string name="agent_delete_failed">删不掉：%1$s</string>
+    <string name="agent_archive">归档</string>
+
+    <!-- ── Agent 详情 ──────────────────────────────────────── -->
+    <string name="agent_detail_title">Agent 详情</string>
+    <string name="agent_detail_not_found">找不到这个 Agent（可能已被删除）。</string>
+    <string name="agent_detail_basic">基本信息</string>
+    <string name="agent_detail_persona">人格设定</string>
+    <string name="agent_detail_persona_hint">这段文本进 SYSTEM 的 persona 段。Charter Core 在它之上且不可编辑 —— 这是防人设越权的结构手段，不靠模型听话。</string>
+    <string name="agent_detail_capabilities">扩展能力</string>
+    <string name="agent_detail_capabilities_hint">能力只能做减法：只有在设置页全局开放过的，这里才勾得上。</string>
+    <string name="agent_detail_cap_limit">最多 %1$d 个。已经选满 —— 先取消一个才能再加。</string>
+    <string name="agent_detail_cap_missing">技能注册表还没接线（SkillRegistryPort 没有 Hilt 绑定），这里暂时只能看到已保存在人设里的能力引用。</string>
+    <string name="agent_detail_grant_missing">授权接口还没接线（CapabilityGrantPort 没有 Hilt 绑定），改动只写进这次编辑的草稿，不会落库。</string>
+    <string name="agent_detail_saved">已保存</string>
+    <string name="agent_detail_save_failed">保存失败：%1$s</string>
+    <string name="agent_detail_scan_warning">人设扫描命中 %1$s —— 这个 Agent 的每次技能调用都会被要求二次确认。</string>
+    <string name="agent_detail_meta">元信息</string>
+    <string name="agent_detail_field_agent_id">对外 ID</string>
+    <string name="agent_detail_field_model">模型</string>
+    <string name="agent_detail_field_origin">来源</string>
+    <string name="agent_detail_field_created">创建于</string>
+    <string name="agent_detail_field_last_used">上次使用</string>
+    <string name="agent_detail_field_never_used">还没用过</string>
+    <string name="create_capabilities_short">能力上限</string>
+    <string name="agent_detail_working_dir">工作目录</string>
+    <string name="agent_detail_danger">危险操作</string>
+    <string name="agent_detail_delete">删除这个 Agent</string>
+    <string name="agent_detail_clone">以它为模板新建</string>
+    <string name="agent_detail_readonly_note">这一页是只读的：人格存储只有「新增」没有「更新」，按编辑去保存会静默多出一个同名 Agent。想改就把内容复制到新建页去改。</string>
+
+    <!-- ── 创建 Agent ──────────────────────────────────────── -->
+    <string name="create_title">创建 Agent</string>
+    <string name="create_from_template_banner">已套用模板「%1$s」：人格与建议能力都填好了，可以继续改。</string>
+    <string name="create_name">名称</string>
+    <string name="create_name_placeholder">例：短视频导演</string>
+    <string name="create_desc">描述</string>
+    <string name="create_desc_placeholder">一句话说清它擅长什么</string>
+    <string name="create_avatar">头像</string>
+    <string name="create_avatar_hint">留空就用名称首字画一个圆形头像。本模块还没接图片加载，填了地址也只会显示首字。</string>
+    <string name="create_persona">人格设定</string>
+    <string name="create_persona_placeholder">你是一名…\n\n工作流：\n1. …\n\n硬纪律：\n- 没有把握就说没有把握。</string>
+    <string name="create_persona_hint">别写「忽略上面的规则」这类话 —— 安装期扫描会命中并拦下。</string>
+    <string name="create_capabilities">扩展能力（最多 %1$d 个）</string>
+    <string name="create_save">创建</string>
+    <string name="create_saving">正在写入…</string>
+    <string name="create_done">已创建</string>
+    <string name="create_failed">创建失败：%1$s</string>
+    <string name="create_need_name">先给它起个名字。</string>
+    <string name="create_need_persona">人格设定不能为空 —— 这个字段会被写进 SYSTEM 段，空着等于让它没有边界。</string>
+
+    <!-- ── 模板市场 ────────────────────────────────────────── -->
+    <string name="tpl_title">模板市场</string>
+    <string name="tpl_subtitle">出厂内置模板。套用之后人格与建议能力都会填好，想改随便改。</string>
+    <string name="tpl_use">用这个模板</string>
+    <string name="tpl_source_builtin">内置</string>
+    <string name="tpl_source_installed">已安装</string>
+    <string name="tpl_disclaimer_label">合规声明（不可编辑，随模板进 SYSTEM 尾部）</string>
+    <string name="tpl_suggested_caps">建议能力：%1$s</string>
+    <string name="tpl_empty">还没有可用模板。</string>
+    <string name="tpl_error">模板读不出来：%1$s</string>
+    <string name="tpl_charter">人格正文</string>
+    <string name="tpl_market_note">市场下发与云端下载本轮不做 —— 这里只有编译进包的 5 个模板。</string>
+
+    <!-- ── 能力选择器 ──────────────────────────────────────── -->
+    <string name="cap_kind_builtin">内置</string>
+    <string name="cap_kind_mcp">MCP 工具</string>
+    <string name="cap_kind_plugin">插件</string>
+    <string name="cap_cost_cheap">即时</string>
+    <string name="cap_cost_long">长任务</string>
+    <string name="cap_confirm_never">从不打扰</string>
+    <string name="cap_confirm_first">首次使用确认</string>
+    <string name="cap_confirm_always">每次都确认</string>
+    <string name="cap_empty">这个 Agent 现在没有可勾选的能力。</string>
+    <string name="cap_limit_reached">已经选满 %1$d 个 —— 先取消一个才能再加。</string>
+    <string name="cap_forbidden">被护栏硬禁止，不可勾选</string>
+    <string name="cap_missing_grants">授权状态读不到（CapabilityGrantPort 未接线）：勾选记录只在本次会话内有效。</string>
+
+</resources>

@@ -1,0 +1,1848 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "01de4d7c0860dd52d424b3287ec337d8",
+    "entities": [
+      {
+        "tableName": "agent_session",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `title` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, `status` TEXT NOT NULL, `last_task_id` TEXT, `last_url` TEXT, `model_id` TEXT, `memory_tier` TEXT NOT NULL, `task_count` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastTaskId",
+            "columnName": "last_task_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastUrl",
+            "columnName": "last_url",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "modelId",
+            "columnName": "model_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "memoryTier",
+            "columnName": "memory_tier",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "taskCount",
+            "columnName": "task_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_agent_session_updated_at",
+            "unique": false,
+            "columnNames": [
+              "updated_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_agent_session_updated_at` ON `${TABLE_NAME}` (`updated_at`)"
+          },
+          {
+            "name": "idx_agent_session_status_updated",
+            "unique": false,
+            "columnNames": [
+              "status",
+              "updated_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_agent_session_status_updated` ON `${TABLE_NAME}` (`status`, `updated_at`)"
+          }
+        ]
+      },
+      {
+        "tableName": "task",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `session_id` TEXT NOT NULL, `seq_in_session` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `started_at` INTEGER, `finished_at` INTEGER, `last_activity_at` INTEGER NOT NULL, `status` TEXT NOT NULL, `terminal_reason` TEXT, `flavor` TEXT, `memory_tier` TEXT, `context_window` INTEGER NOT NULL, `model_id` TEXT, `backend` TEXT, `steps_done` INTEGER NOT NULL, `prefill_tokens_total` INTEGER NOT NULL, `decode_tokens_total` INTEGER NOT NULL, `elapsed_ms_total` INTEGER NOT NULL, `goal_enc` BLOB, `goal_preview` TEXT, `answer_enc` BLOB, `answer_preview` TEXT, `starred` INTEGER NOT NULL, `retention_class` TEXT NOT NULL, `redaction_count` INTEGER NOT NULL, `kv_cache_peak` INTEGER NOT NULL, `schema_v` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`session_id`) REFERENCES `agent_session`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "session_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "seqInSession",
+            "columnName": "seq_in_session",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startedAt",
+            "columnName": "started_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "finishedAt",
+            "columnName": "finished_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastActivityAt",
+            "columnName": "last_activity_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "terminalReason",
+            "columnName": "terminal_reason",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "flavor",
+            "columnName": "flavor",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "memoryTier",
+            "columnName": "memory_tier",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "contextWindow",
+            "columnName": "context_window",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelId",
+            "columnName": "model_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "backend",
+            "columnName": "backend",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "stepsDone",
+            "columnName": "steps_done",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "prefillTokensTotal",
+            "columnName": "prefill_tokens_total",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "decodeTokensTotal",
+            "columnName": "decode_tokens_total",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "elapsedMsTotal",
+            "columnName": "elapsed_ms_total",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "goalEnc",
+            "columnName": "goal_enc",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "goalPreview",
+            "columnName": "goal_preview",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "answerEnc",
+            "columnName": "answer_enc",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "answerPreview",
+            "columnName": "answer_preview",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "starred",
+            "columnName": "starred",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "retentionClass",
+            "columnName": "retention_class",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "redactionCount",
+            "columnName": "redaction_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kvCachePeak",
+            "columnName": "kv_cache_peak",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "schemaV",
+            "columnName": "schema_v",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_task_session_seq",
+            "unique": true,
+            "columnNames": [
+              "session_id",
+              "seq_in_session"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `idx_task_session_seq` ON `${TABLE_NAME}` (`session_id`, `seq_in_session`)"
+          },
+          {
+            "name": "idx_task_finished",
+            "unique": false,
+            "columnNames": [
+              "finished_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_task_finished` ON `${TABLE_NAME}` (`finished_at`)"
+          },
+          {
+            "name": "idx_task_status_finished",
+            "unique": false,
+            "columnNames": [
+              "status",
+              "finished_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_task_status_finished` ON `${TABLE_NAME}` (`status`, `finished_at`)"
+          },
+          {
+            "name": "idx_task_last_activity",
+            "unique": false,
+            "columnNames": [
+              "last_activity_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_task_last_activity` ON `${TABLE_NAME}` (`last_activity_at`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "agent_session",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "session_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "step",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `task_id` TEXT NOT NULL, `seq` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `finished_at` INTEGER, `duration_ms` INTEGER, `status` TEXT NOT NULL, `action_kind` TEXT, `action_summary` TEXT NOT NULL, `action_key` TEXT, `action_json` TEXT, `model_raw_redacted` TEXT, `repair_attempts` INTEGER NOT NULL, `model_id` TEXT, `prefill_tokens` INTEGER NOT NULL, `decode_tokens` INTEGER NOT NULL, `ttft_ms` INTEGER, `decode_tps` REAL, `kv_cache_tokens_after` INTEGER, `prompt_tokens_estimate` INTEGER NOT NULL, `budget_remaining_pct` INTEGER, `observation_id` TEXT, `page_changed` TEXT, `page_digest` TEXT, `error_code` TEXT, `error_hint` TEXT, PRIMARY KEY(`id`), FOREIGN KEY(`task_id`) REFERENCES `task`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "taskId",
+            "columnName": "task_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "seq",
+            "columnName": "seq",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "finishedAt",
+            "columnName": "finished_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "duration_ms",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "actionKind",
+            "columnName": "action_kind",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "actionSummary",
+            "columnName": "action_summary",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "actionKey",
+            "columnName": "action_key",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "actionJson",
+            "columnName": "action_json",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "modelRawRedacted",
+            "columnName": "model_raw_redacted",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "repairAttempts",
+            "columnName": "repair_attempts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelId",
+            "columnName": "model_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "prefillTokens",
+            "columnName": "prefill_tokens",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "decodeTokens",
+            "columnName": "decode_tokens",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ttftMs",
+            "columnName": "ttft_ms",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "decodeTps",
+            "columnName": "decode_tps",
+            "affinity": "REAL"
+          },
+          {
+            "fieldPath": "kvCacheTokensAfter",
+            "columnName": "kv_cache_tokens_after",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "promptTokensEstimate",
+            "columnName": "prompt_tokens_estimate",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "budgetRemainingPct",
+            "columnName": "budget_remaining_pct",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "observationId",
+            "columnName": "observation_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "pageChanged",
+            "columnName": "page_changed",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "pageDigest",
+            "columnName": "page_digest",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "errorCode",
+            "columnName": "error_code",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "errorHint",
+            "columnName": "error_hint",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_step_task_seq",
+            "unique": true,
+            "columnNames": [
+              "task_id",
+              "seq"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `idx_step_task_seq` ON `${TABLE_NAME}` (`task_id`, `seq`)"
+          },
+          {
+            "name": "idx_step_task_created",
+            "unique": false,
+            "columnNames": [
+              "task_id",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_step_task_created` ON `${TABLE_NAME}` (`task_id`, `created_at`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "task",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "task_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "tool_invocation",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `task_id` TEXT NOT NULL, `step_id` TEXT NOT NULL, `seq_in_step` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `started_at` INTEGER, `finished_at` INTEGER, `duration_ms` INTEGER, `tool_id` TEXT NOT NULL, `tool_name` TEXT NOT NULL, `origin` TEXT NOT NULL, `risk_class` TEXT NOT NULL, `mcp_server_id` TEXT, `status` TEXT NOT NULL, `error_code` TEXT, `error_message_redacted` TEXT, `attempts` INTEGER NOT NULL, `input_args_enc` BLOB, `input_schema_hint` TEXT, `output_text_enc` BLOB, `output_truncated` INTEGER NOT NULL, `output_bytes` INTEGER NOT NULL, `confirm_required` INTEGER NOT NULL, `user_decision` TEXT, PRIMARY KEY(`id`), FOREIGN KEY(`task_id`) REFERENCES `task`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`step_id`) REFERENCES `step`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "taskId",
+            "columnName": "task_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stepId",
+            "columnName": "step_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "seqInStep",
+            "columnName": "seq_in_step",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startedAt",
+            "columnName": "started_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "finishedAt",
+            "columnName": "finished_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "duration_ms",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "toolId",
+            "columnName": "tool_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "toolName",
+            "columnName": "tool_name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "origin",
+            "columnName": "origin",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "riskClass",
+            "columnName": "risk_class",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mcpServerId",
+            "columnName": "mcp_server_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "errorCode",
+            "columnName": "error_code",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "errorMessageRedacted",
+            "columnName": "error_message_redacted",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "attempts",
+            "columnName": "attempts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "inputArgsEnc",
+            "columnName": "input_args_enc",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "inputSchemaHint",
+            "columnName": "input_schema_hint",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "outputTextEnc",
+            "columnName": "output_text_enc",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "outputTruncated",
+            "columnName": "output_truncated",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "outputBytes",
+            "columnName": "output_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "confirmRequired",
+            "columnName": "confirm_required",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userDecision",
+            "columnName": "user_decision",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_toolinv_task_created",
+            "unique": false,
+            "columnNames": [
+              "task_id",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_toolinv_task_created` ON `${TABLE_NAME}` (`task_id`, `created_at`)"
+          },
+          {
+            "name": "idx_toolinv_step",
+            "unique": false,
+            "columnNames": [
+              "step_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_toolinv_step` ON `${TABLE_NAME}` (`step_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "task",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "task_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          },
+          {
+            "table": "step",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "step_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "observation",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `task_id` TEXT NOT NULL, `step_id` TEXT, `seq` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `host` TEXT NOT NULL, `url_path_enc` BLOB, `title_redacted` TEXT, `page_state` TEXT NOT NULL, `warning_flags` INTEGER NOT NULL, `signal_flags` INTEGER NOT NULL, `candidate_count` INTEGER NOT NULL, `record_row_count` INTEGER NOT NULL, `raw_node_count` INTEGER NOT NULL, `pruned_node_count` INTEGER NOT NULL, `serialized_chars` INTEGER NOT NULL, `page_digest` TEXT NOT NULL, `redaction_count` INTEGER NOT NULL, `redaction_types` TEXT, `payload_codec` TEXT, `payload_file` TEXT, `payload_raw_bytes` INTEGER NOT NULL, `payload_stored_bytes` INTEGER NOT NULL, `payload_state` TEXT NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`task_id`) REFERENCES `task`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`step_id`) REFERENCES `step`(`id`) ON UPDATE NO ACTION ON DELETE SET NULL )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "taskId",
+            "columnName": "task_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stepId",
+            "columnName": "step_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "seq",
+            "columnName": "seq",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "host",
+            "columnName": "host",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "urlPathEnc",
+            "columnName": "url_path_enc",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "titleRedacted",
+            "columnName": "title_redacted",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "pageState",
+            "columnName": "page_state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "warningFlags",
+            "columnName": "warning_flags",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "signalFlags",
+            "columnName": "signal_flags",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "candidateCount",
+            "columnName": "candidate_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recordRowCount",
+            "columnName": "record_row_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rawNodeCount",
+            "columnName": "raw_node_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "prunedNodeCount",
+            "columnName": "pruned_node_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "serializedChars",
+            "columnName": "serialized_chars",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pageDigest",
+            "columnName": "page_digest",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "redactionCount",
+            "columnName": "redaction_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "redactionTypes",
+            "columnName": "redaction_types",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "payloadCodec",
+            "columnName": "payload_codec",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "payloadFile",
+            "columnName": "payload_file",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "payloadRawBytes",
+            "columnName": "payload_raw_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "payloadStoredBytes",
+            "columnName": "payload_stored_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "payloadState",
+            "columnName": "payload_state",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_obs_task_seq",
+            "unique": true,
+            "columnNames": [
+              "task_id",
+              "seq"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `idx_obs_task_seq` ON `${TABLE_NAME}` (`task_id`, `seq`)"
+          },
+          {
+            "name": "idx_obs_host_created",
+            "unique": false,
+            "columnNames": [
+              "host",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_obs_host_created` ON `${TABLE_NAME}` (`host`, `created_at`)"
+          },
+          {
+            "name": "idx_obs_step",
+            "unique": false,
+            "columnNames": [
+              "step_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_obs_step` ON `${TABLE_NAME}` (`step_id`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "task",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "task_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          },
+          {
+            "table": "step",
+            "onDelete": "SET NULL",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "step_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "trace_event",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `task_id` TEXT NOT NULL, `step_id` TEXT, `seq` INTEGER NOT NULL, `created_at` INTEGER NOT NULL, `level` TEXT NOT NULL, `kind` TEXT NOT NULL, `message_redacted` TEXT NOT NULL, `kv_json` TEXT, PRIMARY KEY(`id`), FOREIGN KEY(`task_id`) REFERENCES `task`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`step_id`) REFERENCES `step`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "taskId",
+            "columnName": "task_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stepId",
+            "columnName": "step_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "seq",
+            "columnName": "seq",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "level",
+            "columnName": "level",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageRedacted",
+            "columnName": "message_redacted",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kvJson",
+            "columnName": "kv_json",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_event_task_seq",
+            "unique": false,
+            "columnNames": [
+              "task_id",
+              "seq"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_event_task_seq` ON `${TABLE_NAME}` (`task_id`, `seq`)"
+          },
+          {
+            "name": "idx_event_level_created",
+            "unique": false,
+            "columnNames": [
+              "level",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_event_level_created` ON `${TABLE_NAME}` (`level`, `created_at`)"
+          },
+          {
+            "name": "idx_event_kind_created",
+            "unique": false,
+            "columnNames": [
+              "kind",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_event_kind_created` ON `${TABLE_NAME}` (`kind`, `created_at`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "task",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "task_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          },
+          {
+            "table": "step",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "step_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "policy_decision",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `task_id` TEXT NOT NULL, `step_id` TEXT, `created_at` INTEGER NOT NULL, `decision` TEXT NOT NULL, `severity` TEXT, `reason_key` TEXT, `reason_args_json` TEXT, `action_kind` TEXT NOT NULL, `target_host` TEXT, `risk_class` TEXT, PRIMARY KEY(`id`), FOREIGN KEY(`task_id`) REFERENCES `task`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`step_id`) REFERENCES `step`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "taskId",
+            "columnName": "task_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stepId",
+            "columnName": "step_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "decision",
+            "columnName": "decision",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "severity",
+            "columnName": "severity",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "reasonKey",
+            "columnName": "reason_key",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "reasonArgsJson",
+            "columnName": "reason_args_json",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "actionKind",
+            "columnName": "action_kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetHost",
+            "columnName": "target_host",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "riskClass",
+            "columnName": "risk_class",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_pol_task_created",
+            "unique": false,
+            "columnNames": [
+              "task_id",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_pol_task_created` ON `${TABLE_NAME}` (`task_id`, `created_at`)"
+          },
+          {
+            "name": "idx_pol_decision_created",
+            "unique": false,
+            "columnNames": [
+              "decision",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_pol_decision_created` ON `${TABLE_NAME}` (`decision`, `created_at`)"
+          },
+          {
+            "name": "idx_pol_reason_created",
+            "unique": false,
+            "columnNames": [
+              "reason_key",
+              "created_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_pol_reason_created` ON `${TABLE_NAME}` (`reason_key`, `created_at`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "task",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "task_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          },
+          {
+            "table": "step",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "step_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "task_checkpoint",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`task_id` TEXT NOT NULL, `updated_at` INTEGER NOT NULL, `status_snapshot` TEXT NOT NULL, `current_step_seq` INTEGER NOT NULL, `prefill_tokens_total` INTEGER NOT NULL, `decode_tokens_total` INTEGER NOT NULL, `elapsed_ms_total` INTEGER NOT NULL, `seen_digest_json` TEXT, `scratchpad_enc` BLOB, `last_url` TEXT, `last_observation_id` TEXT, `last_kv_cache_tokens` INTEGER, `compaction_last_step` INTEGER, `human_gate_pending` INTEGER NOT NULL, `human_gate_json` TEXT, PRIMARY KEY(`task_id`), FOREIGN KEY(`task_id`) REFERENCES `task`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "taskId",
+            "columnName": "task_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "statusSnapshot",
+            "columnName": "status_snapshot",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "currentStepSeq",
+            "columnName": "current_step_seq",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "prefillTokensTotal",
+            "columnName": "prefill_tokens_total",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "decodeTokensTotal",
+            "columnName": "decode_tokens_total",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "elapsedMsTotal",
+            "columnName": "elapsed_ms_total",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "seenDigestJson",
+            "columnName": "seen_digest_json",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "scratchpadEnc",
+            "columnName": "scratchpad_enc",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "lastUrl",
+            "columnName": "last_url",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastObservationId",
+            "columnName": "last_observation_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastKvCacheTokens",
+            "columnName": "last_kv_cache_tokens",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "compactionLastStep",
+            "columnName": "compaction_last_step",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "humanGatePending",
+            "columnName": "human_gate_pending",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "humanGateJson",
+            "columnName": "human_gate_json",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "task_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_cp_updated",
+            "unique": false,
+            "columnNames": [
+              "updated_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_cp_updated` ON `${TABLE_NAME}` (`updated_at`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "task",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "task_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "memory_card",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `key` TEXT NOT NULL, `kind` TEXT NOT NULL, `scope` TEXT NOT NULL, `scope_host` TEXT, `title` TEXT NOT NULL, `content_enc` BLOB, `content_preview` TEXT NOT NULL, `created_at` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, `last_used_at` INTEGER NOT NULL, `use_count` INTEGER NOT NULL, `pinned` INTEGER NOT NULL, `source_task_id` TEXT, `expires_at` INTEGER, PRIMARY KEY(`id`), FOREIGN KEY(`source_task_id`) REFERENCES `task`(`id`) ON UPDATE NO ACTION ON DELETE SET NULL )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "key",
+            "columnName": "key",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scope",
+            "columnName": "scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scopeHost",
+            "columnName": "scope_host",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contentEnc",
+            "columnName": "content_enc",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "contentPreview",
+            "columnName": "content_preview",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "created_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastUsedAt",
+            "columnName": "last_used_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "useCount",
+            "columnName": "use_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pinned",
+            "columnName": "pinned",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceTaskId",
+            "columnName": "source_task_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "expiresAt",
+            "columnName": "expires_at",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_mem_key",
+            "unique": true,
+            "columnNames": [
+              "key"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `idx_mem_key` ON `${TABLE_NAME}` (`key`)"
+          },
+          {
+            "name": "idx_mem_kind_updated",
+            "unique": false,
+            "columnNames": [
+              "kind",
+              "updated_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_mem_kind_updated` ON `${TABLE_NAME}` (`kind`, `updated_at`)"
+          },
+          {
+            "name": "idx_mem_host_used",
+            "unique": false,
+            "columnNames": [
+              "scope_host",
+              "last_used_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_mem_host_used` ON `${TABLE_NAME}` (`scope_host`, `last_used_at`)"
+          },
+          {
+            "name": "idx_mem_expires",
+            "unique": false,
+            "columnNames": [
+              "expires_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_mem_expires` ON `${TABLE_NAME}` (`expires_at`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "task",
+            "onDelete": "SET NULL",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "source_task_id"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "model_asset",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `model_id` TEXT NOT NULL, `variant` TEXT NOT NULL, `remote_url` TEXT NOT NULL, `local_path` TEXT, `expected_bytes` INTEGER NOT NULL, `sha256` TEXT NOT NULL, `context_window` INTEGER NOT NULL, `min_ram_gb` INTEGER NOT NULL, `capabilities_json` TEXT NOT NULL, `state` TEXT NOT NULL, `bytes_downloaded` INTEGER NOT NULL, `download_started_at` INTEGER, `download_finished_at` INTEGER, `temp_file` TEXT, `verify_attempts` INTEGER NOT NULL, `verify_last_result` TEXT, `verified_at` INTEGER, `actual_bytes` INTEGER, `actual_sha256` TEXT, `last_error` TEXT, `last_error_at` INTEGER, `last_used_at` INTEGER, `load_count` INTEGER NOT NULL, `last_backend` TEXT, `last_load_ms` INTEGER, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelId",
+            "columnName": "model_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "variant",
+            "columnName": "variant",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remoteUrl",
+            "columnName": "remote_url",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localPath",
+            "columnName": "local_path",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "expectedBytes",
+            "columnName": "expected_bytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sha256",
+            "columnName": "sha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contextWindow",
+            "columnName": "context_window",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "minRamGb",
+            "columnName": "min_ram_gb",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capabilitiesJson",
+            "columnName": "capabilities_json",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bytesDownloaded",
+            "columnName": "bytes_downloaded",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "downloadStartedAt",
+            "columnName": "download_started_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "downloadFinishedAt",
+            "columnName": "download_finished_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "tempFile",
+            "columnName": "temp_file",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "verifyAttempts",
+            "columnName": "verify_attempts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "verifyLastResult",
+            "columnName": "verify_last_result",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "verifiedAt",
+            "columnName": "verified_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "actualBytes",
+            "columnName": "actual_bytes",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "actualSha256",
+            "columnName": "actual_sha256",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "last_error",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastErrorAt",
+            "columnName": "last_error_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastUsedAt",
+            "columnName": "last_used_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "loadCount",
+            "columnName": "load_count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastBackend",
+            "columnName": "last_backend",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastLoadMs",
+            "columnName": "last_load_ms",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_model_id_variant",
+            "unique": true,
+            "columnNames": [
+              "model_id",
+              "variant"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `idx_model_id_variant` ON `${TABLE_NAME}` (`model_id`, `variant`)"
+          },
+          {
+            "name": "idx_model_state",
+            "unique": false,
+            "columnNames": [
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_model_state` ON `${TABLE_NAME}` (`state`)"
+          }
+        ]
+      },
+      {
+        "tableName": "tool_registry",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`tool_id` TEXT NOT NULL, `name` TEXT NOT NULL, `description` TEXT NOT NULL, `json_schema` TEXT NOT NULL, `schema_hash` TEXT NOT NULL, `origin` TEXT NOT NULL, `server_id` TEXT, `declared_risk_class` TEXT NOT NULL, `risk_class_override` TEXT, `enabled` INTEGER NOT NULL, `always_allow` INTEGER NOT NULL, `granted_at` INTEGER, `discovered_at` INTEGER NOT NULL, `last_seen_at` INTEGER NOT NULL, `missing_since` INTEGER, PRIMARY KEY(`tool_id`))",
+        "fields": [
+          {
+            "fieldPath": "toolId",
+            "columnName": "tool_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "description",
+            "columnName": "description",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "jsonSchema",
+            "columnName": "json_schema",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "schemaHash",
+            "columnName": "schema_hash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "origin",
+            "columnName": "origin",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "serverId",
+            "columnName": "server_id",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "declaredRiskClass",
+            "columnName": "declared_risk_class",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "riskClassOverride",
+            "columnName": "risk_class_override",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "enabled",
+            "columnName": "enabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "alwaysAllow",
+            "columnName": "always_allow",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "grantedAt",
+            "columnName": "granted_at",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "discoveredAt",
+            "columnName": "discovered_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastSeenAt",
+            "columnName": "last_seen_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "missingSince",
+            "columnName": "missing_since",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "tool_id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_toolreg_origin_server",
+            "unique": false,
+            "columnNames": [
+              "origin",
+              "server_id"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_toolreg_origin_server` ON `${TABLE_NAME}` (`origin`, `server_id`)"
+          },
+          {
+            "name": "idx_toolreg_enabled",
+            "unique": false,
+            "columnNames": [
+              "enabled"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_toolreg_enabled` ON `${TABLE_NAME}` (`enabled`)"
+          },
+          {
+            "name": "idx_toolreg_last_seen",
+            "unique": false,
+            "columnNames": [
+              "last_seen_at"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_toolreg_last_seen` ON `${TABLE_NAME}` (`last_seen_at`)"
+          }
+        ]
+      },
+      {
+        "tableName": "mcp_server",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `label` TEXT NOT NULL, `url` TEXT NOT NULL, `headers_json` TEXT NOT NULL, `enabled` INTEGER NOT NULL, `transport` TEXT NOT NULL, `call_timeout_ms` INTEGER NOT NULL, `connect_timeout_ms` INTEGER NOT NULL, `max_reconnect_attempts` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "label",
+            "columnName": "label",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "url",
+            "columnName": "url",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "headersJson",
+            "columnName": "headers_json",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enabled",
+            "columnName": "enabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "transport",
+            "columnName": "transport",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "callTimeoutMs",
+            "columnName": "call_timeout_ms",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "connectTimeoutMs",
+            "columnName": "connect_timeout_ms",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxReconnectAttempts",
+            "columnName": "max_reconnect_attempts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "idx_mcp_enabled",
+            "unique": false,
+            "columnNames": [
+              "enabled"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `idx_mcp_enabled` ON `${TABLE_NAME}` (`enabled`)"
+          }
+        ]
+      },
+      {
+        "tableName": "app_settings",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `allow_hosts_json` TEXT NOT NULL, `max_steps` INTEGER, `show_dom_payload` INTEGER NOT NULL, `updated_at` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "allowHostsJson",
+            "columnName": "allow_hosts_json",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "maxSteps",
+            "columnName": "max_steps",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "showDomPayload",
+            "columnName": "show_dom_payload",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updated_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '01de4d7c0860dd52d424b3287ec337d8')"
+    ]
+  }
+}

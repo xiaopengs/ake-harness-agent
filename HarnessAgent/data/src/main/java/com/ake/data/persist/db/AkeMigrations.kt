@@ -91,18 +91,25 @@ object AkeMigrations {
         }
     }
 
+    // ──────────────────────────────────────────── 真实迁移（2 → 3）
+
+    val MIGRATION_2_3: Migration = ChatMigration2To3
+
     // ──────────────────────────────────────────── 样板（**不进 [ALL]**）
 
     /**
-     * 2 → 3 的样板：加列 + 建索引。真实改动时照抄这个形状。
+     * 4 → 5 的样板：加列 + 建索引。真实改动时照抄这个形状。
      *
      *  ① **必须幂等**：建索引一律 `IF NOT EXISTS`；删列先查 `pragma_table_info`。
      *  ② **不要依赖 `SupportSQLiteDatabase`**：本文全部走 `SQLiteConnection`，
      *     这样向 Room 3 迁移时不用改签名（§9.5）。
      *  ③ **大表加列用默认值而不是 UPDATE**：`ALTER TABLE ... ADD COLUMN x INTEGER NOT NULL DEFAULT 0`
      *     是 O(1)，而 `ADD COLUMN` + `UPDATE` 全表是 O(n)，在 trace_event 上会是几秒的卡顿。
+     *
+     * ★ 2026-10：原「2 → 3 样板」已**转正**为 [MIGRATION_2_3]（聊天化 Agent），
+     *   样板顺延到 4 → 5，避免同一个版本号挂着两条 `Migration(2, 3)`。
      */
-    val SAMPLE_MIGRATION_2_3: Migration = object : Migration(2, 3) {
+    val SAMPLE_MIGRATION_4_5: Migration = object : Migration(4, 5) {
         override fun migrate(connection: SQLiteConnection) {
             connection.execSQL(
                 "ALTER TABLE task ADD COLUMN budget_profile TEXT",
@@ -113,8 +120,8 @@ object AkeMigrations {
         }
     }
 
-    /** 3 → 4 的样板：带数据回填。 */
-    val SAMPLE_MIGRATION_3_4: Migration = object : Migration(3, 4) {
+    /** 5 → 6 的样板：带数据回填。 */
+    val SAMPLE_MIGRATION_5_6: Migration = object : Migration(5, 6) {
         override fun migrate(connection: SQLiteConnection) {
             connection.execSQL(
                 "UPDATE task SET budget_profile = 'DEFAULT' WHERE budget_profile IS NULL",
@@ -131,5 +138,5 @@ object AkeMigrations {
      *   把它放在最前面会对上 `Variable 'MIGRATION_1_2' must be initialized`（本轮真编译踩到）。
      *   `arrayOf(...)` 在这里是取值而不是延迟引用 —— 它是 `Array`，不是 `Lazy`。
      */
-    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2)
+    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
 }

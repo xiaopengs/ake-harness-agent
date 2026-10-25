@@ -42,7 +42,7 @@ val archCoreModules = setOf(
     ":core:ports",
     ":core:model-api",
 )
-val archLeafModules = setOf(":llm", ":browser", ":agent", ":mcp", ":data", ":ui")
+val archLeafModules = setOf(":llm", ":browser", ":agent", ":mcp", ":data", ":ui", ":chat")
 
 // ① 允许的 Gradle 依赖边（键 = 模块 path，值 = 允许的上游 path）
 val archAllowedEdges: Map<String, Set<String>> = buildMap {
@@ -61,19 +61,28 @@ val archAllowedEdges: Map<String, Set<String>> = buildMap {
     put(":browser", archCoreModules)
     put(":mcp", archCoreModules)
     put(":data", archCoreModules)
-    // ★ 硬约束：:ui 不得看见 :agent / :mcp / :data
+    // ★ 硬约束：:ui 不得看见 :agent / :mcp / :data / :chat
+    //   聊天 UI 消费的是 `core:ports/Chat.kt` 契约，不是 `:chat` 的实现。
+    //   「这个功能直接调更方便」不构成一条新的实现层边的理由 —— 见 §2.4 的收尾。
     put(":ui", archCoreModules)
     // :agent → :data 是白名单里唯一一条「实现层横向」例外，
     // 且经源码断言 ② 收紧为「只许碰 com.ake.data.persist.store 的接口，
     // 不许碰 Room / db 实现」。改这条前先看 settings.gradle.kts 的 L4→L3 说明。
     put(":agent", archCoreModules + ":data")
+    // ★ :chat —— 聊天会话编排（L5），向下依赖 :agent 的上下文/压缩/护栏内核。
+    //   必须直接依赖 :agent 而不是重抄一份预算算法：
+    //   「UI 显示一套预算、主循环跑另一套」是本项目已反复警告过的一致性灾难
+    //   （§2.2 理由 2）。这条边经源码断言 ② 收紧为「:chat 只能看见 :agent 的 public API
+    //   与 core 契约」，且 :chat 编译期必须同时通过 `:chat:compileDebugKotlin`。
+    put(":chat", archCoreModules + ":agent")
     // 组合根：唯一能看见全部实现层的模块
     put(":app", archCoreModules + archLeafModules)
 }
 
 // ② 源码 import 黑名单（前缀匹配）
 val archForbiddenImports: Map<String, Set<String>> = mapOf(
-    ":ui" to setOf("com.ake.agent.", "com.ake.mcp.", "com.ake.data."),
+    // :ui 不得看见任何实现层（含本轮新增的 :chat）。聊天 UI 的契约在 core:ports/Chat.kt。
+    ":ui" to setOf("com.ake.agent.", "com.ake.mcp.", "com.ake.data.", "com.ake.chat."),
     // 「不得依赖 :data 的具体实现」：Room 与 db 包一律不许进 :agent
     ":agent" to setOf("com.ake.mcp.", "com.ake.data.persist.db.", "androidx.room."),
     // 同 `:agent`：`:llm` 只能看见 `modeldist` 这一层决议，Room / db 实体不许越过。
@@ -81,6 +90,15 @@ val archForbiddenImports: Map<String, Set<String>> = mapOf(
     // `ModelAssetDao` / `ModelAssetEntity` 若进了 `:llm`，:llm 就绕过了账本状态机直接改库。
     ":llm" to setOf("com.ake.data.persist.db.", "androidx.room."),
     ":core:common" to setOf("com.ake.agent.", "com.ake.mcp.", "com.ake.data."),
+    // ★ :chat 只能看见 :agent 的 public API 与 core 契约。
+    //   不得直接碰 Room / MCP / browser 实现 / UI —— 与 :agent 同一套收紧手法。
+    //   `:chat → :data` 连 Gradle 边都没有：模板/会话/审计的落盘全部经 core:ports 的
+    //   Store Port（ChatSessionStorePort / AgentProfileStorePort / TemplateStorePort），
+    //   于是「换个存储实现要改 :chat」这件事在结构上不可能发生。
+    ":chat" to setOf(
+        "com.ake.mcp.", "com.ake.browser.",
+        "com.ake.data.persist.db.", "androidx.room.", "com.ake.ui.",
+    ),
 )
 
 // 剥掉 /* */ 与 // 注释（保留 URL 里的 :// 不被误判为行注释）

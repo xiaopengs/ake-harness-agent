@@ -310,7 +310,31 @@ public object EntityMappers {
         userDecision = s.userDecision,
     )
 
-    fun policyToEntity(r: PolicyDecisionRecord): PolicyDecisionEntity = PolicyDecisionEntity(
+    /**
+     * ★ v3：聊天场景的审计增强（上游 §8 S9）。
+     *
+     * ⚠ **两列目前只能填 null** —— `core:contract` 的 `PolicyDecisionRecord`
+     * 还没有承载 `agentId` / `chatSessionId` 的字段，而 `:core` 不在本轮改动范围内。
+     * 这里把带这两个参数的重载**先开出来**（V3 用例「两条都落带 agent_id 的
+     * policy_decision」一旦接线即可调用），并在回传里把确切签名交给邝随行补进
+     * `PolicyDecisionRecord`：
+     *
+     * ```
+     * public data class PolicyDecisionRecord(
+     *     // ...既有字段不动...
+     *     val agentId: String? = null,
+     *     val chatSessionId: String? = null,
+     * )
+     * ```
+     *
+     * 补齐之前，这两列在库里恒为 NULL —— **这是已知的、写下来的缺口**，
+     * 不是「忘了写」：先建列（加列零成本、表结构评审只发生一次），后接数据源。
+     */
+    fun policyToEntity(
+        r: PolicyDecisionRecord,
+        agentId: String? = null,
+        chatSessionId: String? = null,
+    ): PolicyDecisionEntity = PolicyDecisionEntity(
         id = r.id,
         taskId = r.taskId.value,
         stepId = r.stepId?.value,
@@ -322,6 +346,8 @@ public object EntityMappers {
         actionKind = r.actionKind,
         targetHost = r.targetHost,
         riskClass = r.riskClass,
+        agentId = agentId,
+        chatSessionId = chatSessionId,
     )
 
     fun policyToDomain(e: PolicyDecisionEntity): PolicyDecisionRecord = PolicyDecisionRecord(
@@ -394,10 +420,13 @@ public object EntityMappers {
     fun memoryToEntity(
         card: MemoryCard,
         contentEnc: ByteArray?,
+        /** ★ v3 人格隔离（上游 S7）：null = 全局共享。默认按 agent_id 隔离。 */
+        agentId: String? = null,
     ): MemoryCardEntity {
         val now = card.createdAtMillis
         return MemoryCardEntity(
             id = card.id,
+            agentId = agentId,
             key = memoryKey(card),
             kind = card.kind,
             scope = if (card.host.isBlank()) "GLOBAL" else "DOMAIN",

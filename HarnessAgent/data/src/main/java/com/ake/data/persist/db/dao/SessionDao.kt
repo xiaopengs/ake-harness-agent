@@ -44,4 +44,18 @@ interface SessionDao {
 
     @Query("DELETE FROM agent_session WHERE status = 'ARCHIVED' AND updated_at < :before")
     suspend fun deleteArchivedBefore(before: Long): Int
+
+    // ── ★ v3：与 chat_session 的关系（2026-10 · 霍承钧）
+    //
+    // `DELETE` 一个 chat_session 时**不得**连带删除 `agent_session`
+    // （主理人 U3 裁决：SET NULL —— 删对话不销毁任务轨迹，§8.2 B3）。
+    // ★ 因此这里只提供「解绑」，**刻意不提供** `deleteByChatSession`：
+    // 「解绑」与「删除」分成两个名字，是为了让调用方不可能顺手把执行容器也删了。
+
+    /** ★ 解绑而不是删除：会话没了，任务容器与它的轨迹继续走 v2 §4.4 自己的时效。 */
+    @Query("UPDATE agent_session SET chat_session_id = NULL WHERE chat_session_id = :sessionId")
+    suspend fun unbindChatSession(sessionId: String): Int
+
+    @Query("SELECT * FROM agent_session WHERE chat_session_id IS :sessionId")
+    suspend fun byChatSession(sessionId: String?): List<SessionEntity>
 }

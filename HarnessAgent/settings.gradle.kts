@@ -47,6 +47,12 @@ rootProject.name = "HarnessAgent"
 //   :browser          WebView 执行器 + DOM 感知
 //   :data             Room / 轨迹落盘（霍承钧）
 //                     ★ 2026-10 移除了 DataStore + protobuf 死依赖（见该模块头部注释）
+//   :chat             聊天会话编排（L5 会话编排层，霍承钧）
+//                     ★ 向下依赖 `:agent`（L5 → L4）：复用 ContextAssembler / SegmentCaps /
+//                       ContextBudget / InjectionIsolator / DeterministicCompactor /
+//                       ContentSanitizer / NonceSource —— **不在本模块重抄一份预算算法**
+//                       （docs/05-chat-agents-design.md §2.2 理由 2 / §2.4 的守卫 diff）。
+//                     ★ `:ui` 不得看见它：聊天 UI 只消费 `core:ports/Chat.kt` 的契约。
 //   :ui               Compose UI（苏映棠）
 //   :app              组合根 + Hilt 装配
 //
@@ -70,5 +76,6 @@ include(":mcp")
 include(":llm")
 include(":browser")
 include(":data")
+include(":chat")
 include(":ui")
 include(":app")

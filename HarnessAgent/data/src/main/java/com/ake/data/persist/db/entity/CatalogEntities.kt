@@ -16,6 +16,19 @@ import androidx.room.PrimaryKey
  * 长期记忆。数据库 §10.2 明确不做向量检索（只做简单键值 + 最近 N 条）⇒ MVP 不建 FTS 表。
  * `source_task_id` 用 SET_NULL：记忆生命周期长于任务，任务删了记忆还在，
  * 否则「记住偏好」毫无意义。
+ *
+ * ## ★ v3：人格隔离（上游 §8 S7 / 防 T9）
+ *
+ * 既有约束是 `UNIQUE(key)`（全局唯一）。加了 `agent_id` 之后两个人格想各存一条
+ * `preferred_language` 会**直接冲突** —— 不是泄漏，是**互相覆盖**，同样不可接受。
+ * 而 SQLite 的 `ALTER TABLE ADD COLUMN` **不能带 UNIQUE**，也不支持增删既有 UNIQUE
+ * 约束（§0.2 V5/V6）⇒ 只能走 12 步重建（见 `AkeMigrations.rebuildMemoryCard`）。
+ * 这是 v2 → v3 **唯一**的重建动作（§9-U1）🔴。
+ *
+ * ⚠ `UNIQUE(agent_id, key)` 对 `agent_id IS NULL` 的全局记忆不生效（SQLite 认为 NULL 彼此
+ * 不同）。这恰好是我们想要的语义（全局记忆本就该按 key 唯一定位），但它意味着
+ * **全局记忆的唯一性失去了库侧保护** —— 由 `MemoryStoreImpl` 写入时按 key 显式查一次。
+ * 这是一个已知的、可接受的、必须写下来的缺口（§6.4 末尾）。
  */
 @Entity(
     tableName = "memory_card",
@@ -29,7 +42,10 @@ import androidx.room.PrimaryKey
         ),
     ],
     indices = [
-        Index(name = "idx_mem_key", value = ["key"], unique = true),
+        // ★ 由 `UNIQUE(key)` 改为 `UNIQUE(agent_id, key)` —— 人格隔离的落点
+        Index(name = "idx_mem_agent_key", value = ["agent_id", "key"], unique = true),
+        // ★ 上游 R9 点名要复核的那条：新增 agent_id 维度，旧的保留
+        Index(name = "idx_mem_agent_host_used", value = ["agent_id", "scope_host", "last_used_at"]),
         Index(name = "idx_mem_kind_updated", value = ["kind", "updated_at"]),
         Index(name = "idx_mem_host_used", value = ["scope_host", "last_used_at"]),
         Index(name = "idx_mem_expires", value = ["expires_at"]),
@@ -37,6 +53,8 @@ import androidx.room.PrimaryKey
 )
 data class MemoryCardEntity(
     @PrimaryKey @ColumnInfo(name = "id") val id: String,
+    /** ★ null = 全局共享。人格隔离（上游 S7）：默认按 agent_id 隔离 */
+    @ColumnInfo(name = "agent_id") val agentId: String? = null,
     @ColumnInfo(name = "key") val key: String,
     @ColumnInfo(name = "kind") val kind: String,
     @ColumnInfo(name = "scope") val scope: String,

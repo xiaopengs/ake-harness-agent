@@ -9,9 +9,11 @@ import com.ake.core.ports.McpServerStorePort
 import com.ake.core.ports.SettingsStorePort
 import com.ake.core.ports.WipePort
 import com.ake.core.ports.WipeResult
+import com.ake.data.persist.agentasset.AgentAssetStore
 import com.ake.data.persist.db.AkeDatabase
 import com.ake.data.persist.payload.PayloadStore
 import com.ake.data.persist.store.MemoryStoreImpl
+import com.ake.data.persist.write.ChatMessageWriter
 import com.ake.data.persist.write.TaskStateWriter
 import com.ake.data.persist.write.TraceBufferWriter
 import java.io.File
@@ -30,14 +32,26 @@ import kotlinx.coroutines.withContext
  * ```
  * ① 删 Keystore 密钥     ← 主手段，先做（见下）
  * ② 停在途写入           ← 否则刚删完又被写回来
- * ②b 两个 Store clearAll ← ★ 本轮新增：配置落 Room 之后，它们回到了 ② 的管辖范围
+ * ②b 两个 Store clearAll ← ★ 配置落 Room 之后，它们回到了 ② 的管辖范围
  * ③ 删 Room 库文件       ← 含 -wal / -shm
  * ④ 删外置轨迹目录
+ * ④b ★★ 删聊天外置目录  ← v3：消息 payload + checkpoint envelope 共用 `filesDir/chat/`
+ * ④c ★★ 删人格资产目录  ← v3：`filesDir/agents/`（头像等）
  * ⑤ 删 DataStore 文件     （历史兼容：本工程目前无 DataStore 实例）
  * ⑤b 删 :ui 过渡实现的遗留目录（窗口期兼容，见 ②b 注释）
  * ⑥ ★ 删 WebView 痕迹    ← 本 App 最大一块不受我们控制的痕迹
  * ⑦ 模型文件删不删由用户单独决定
  * ```
+ *
+ * ## ★ v3 为什么必须新增 ④b / ④c（上游 §7.2 提示 6）
+ *
+ * 「一键清除」漏掉人格与聊天记录，**比不做这个功能更糟**：
+ * 用户按了「清除全部痕迹」，而最私密的那部分（`persona_charter_enc`、
+ * `chat_message.content_enc`、头像）还躺在磁盘上 —— 那是一次**对信任的透支**。
+ *
+ * ★ 两段都放在 ④ 之后、⑤ 之前：与 v2 的顺序原则一致 —— ③ 删库（指针）→ ④ 删文件（本体）；
+ * 而它们是**当前版本的正式数据**，⑤ 是历史兼容（历史兼容失败可以容忍，
+ * 正式数据失败必须进 `failures` 让用户看见）。
  *
  * ## 为什么「先删密钥」而不是「先删文件」
  *
@@ -78,6 +92,12 @@ public class WipeEverythingUseCase(
     private val memory: MemoryStoreImpl,
     private val mcpServers: McpServerStorePort,
     private val settings: SettingsStorePort,
+    /** ★ v3：聊天快照泳道（`ChatMessageWriter`）。**必须是同一个单例**，否则停错泳道。 */
+    private val chatWriter: ChatMessageWriter,
+    /** ★ v3：`filesDir/chat/`（消息 payload + envelope）。 */
+    private val chatPayloads: PayloadStore,
+    /** ★ v3：`filesDir/agents/`（头像等人格资产）。 */
+    private val agentAssets: AgentAssetStore,
     private val keystoreAlias: String = KEY_ALIAS,
 ) : WipePort {
 
@@ -97,11 +117,13 @@ public class WipeEverythingUseCase(
             KeyStore.getInstance(KEYSTORE).apply { load(null); deleteEntry(keystoreAlias) }
         }.onFailure { failures += step("keystore", it) }
 
-        // ② 停在途写入。★ 两条泳道都要停 —— 只停轨迹那一条的话，
-        //    状态泳道里的 `TaskFinish` 会在删完库之后把行重新写回来（看着像「清不掉」的灵异现象）。
+        // ② 停在途写入。★ 三条泳道都要停 —— 只停轨迹那一条的话，
+        //    状态泳道里的 `TaskFinish` 会在删完库之后把行重新写回来（看着像「清不掉」的灵异现象）；
+        //    ★ v3：聊天快照泳道（[chatWriter]）同理 —— 它是**同一个库**的第三位写者。
         runCatching {
             state.stopAndDropQueued()
             writer.stopAndDropQueued()
+            chatWriter.stopAndDropQueued()
         }.onFailure { failures += step("stop writers", it) }
 
         // ②b ★ 两个 Store 的 clearAll() —— `core/ports` 里那两条 TODO 等的就是这里。
@@ -125,6 +147,15 @@ public class WipeEverythingUseCase(
 
         // ④ 外置轨迹目录
         runCatching { payloads.purgeAll() }.onFailure { failures += step("trace payloads", it) }
+
+        // ④b ★★ 聊天外置目录 —— 消息 payload 与 checkpoint envelope **共用同一个根**
+        //      ⇒ 一次 purgeAll 全覆盖（这就是共用根的全部收益：新增一类落盘物时，
+        //         清除清单不需要跟着改）。顺序仍在 ③ 之后：先没了 DB 指针，再删文件。
+        runCatching { chatPayloads.purgeAll() }.onFailure { failures += step("chat payloads", it) }
+
+        // ④c ★★ 人格资产（头像）。与 ④b 同理：一个根覆盖全部人格资产。
+        //     ★ identicon 头像没有文件 ⇒ 由 `avatar_kind` 列区分，不在删除范围内（§7.4）。
+        runCatching { agentAssets.purgeAll() }.onFailure { failures += step("agent assets", it) }
 
         // ⑤ DataStore 文件（settings / domain_policy / mcp_servers）
         //    ★ 本工程目前**没有任何 DataStore 实例**（配置已落 Room，见 ConfigEntities 的类注释），

@@ -258,6 +258,11 @@ data class TraceEventEntity(
         Index(name = "idx_pol_task_created", value = ["task_id", "created_at"]),
         Index(name = "idx_pol_decision_created", value = ["decision", "created_at"]),
         Index(name = "idx_pol_reason_created", value = ["reason_key", "created_at"]),
+        // ★ v3：聊天场景的可审计性（上游 §8 S9）。
+        //   §10.4 的建议是**只建 chat_session_id**（V3 用例要按会话查），
+        //   `agent_id` 的查询需求出现时再建 —— 这条表是既有热写表（每步 1–2 行），
+        //   不给它加没必要的新索引。
+        Index(name = "idx_pol_chat_session", value = ["chat_session_id"]),
     ],
 )
 data class PolicyDecisionEntity(
@@ -272,4 +277,10 @@ data class PolicyDecisionEntity(
     @ColumnInfo(name = "action_kind") val actionKind: String,
     @ColumnInfo(name = "target_host") val targetHost: String?,
     @ColumnInfo(name = "risk_class") val riskClass: String?,
+
+    // ── ★ v3：聊天场景的审计增强（上游 §8 S9）
+    /** 由哪个人格发起的（技能调用场景才有）。 */
+    @ColumnInfo(name = "agent_id") val agentId: String?,
+    /** 由哪个会话发起的。 */
+    @ColumnInfo(name = "chat_session_id") val chatSessionId: String?,
 )

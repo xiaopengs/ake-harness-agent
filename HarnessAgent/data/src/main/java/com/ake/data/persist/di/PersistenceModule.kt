@@ -6,7 +6,11 @@ import androidx.room.RoomDatabase
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import com.ake.core.common.Clock
 import com.ake.core.common.FieldCipher
+import androidx.room.withTransaction
+import com.ake.core.ports.AgentProfileStorePort
+import com.ake.core.ports.CapabilityGrantPort
 import com.ake.core.ports.CheckpointStorePort
+import com.ake.core.ports.ChatSessionStorePort
 import com.ake.core.ports.DeviceHealthPort
 import com.ake.core.ports.McpServerStorePort
 import com.ake.core.ports.MemoryStorePort
@@ -15,9 +19,11 @@ import com.ake.core.ports.ObservationStorePort
 import com.ake.core.ports.PolicyDecisionSink
 import com.ake.core.ports.SettingsStorePort
 import com.ake.core.ports.TaskStorePort
+import com.ake.core.ports.TemplateStorePort
 import com.ake.core.ports.ToolPermissionStorePort
 import com.ake.core.ports.TraceStorePort
 import com.ake.core.ports.WipePort
+import com.ake.data.persist.agentasset.AgentAssetStore
 import com.ake.data.persist.db.AkeDatabase
 import com.ake.data.persist.db.AkeMigrations
 import com.ake.data.persist.db.AkePragmaConfig
@@ -33,18 +39,24 @@ import com.ake.data.persist.modeldist.ModelManifestSource
 import com.ake.data.persist.payload.PayloadStore
 import com.ake.data.persist.recovery.TaskReconciler
 import com.ake.data.persist.redact.PersistenceRedactionGate
+import com.ake.data.persist.store.AgentProfileStoreImpl
+import com.ake.data.persist.store.CapabilityGrantStoreImpl
 import com.ake.data.persist.store.CheckpointStoreImpl
+import com.ake.data.persist.store.ChatSessionStoreImpl
 import com.ake.data.persist.store.McpServerStoreImpl
 import com.ake.data.persist.store.MemoryStoreImpl
 import com.ake.data.persist.store.ModelAssetStoreImpl
 import com.ake.data.persist.store.ObservationRow
 import com.ake.data.persist.store.ObservationStoreImpl
 import com.ake.data.persist.store.PolicyDecisionSinkImpl
+import com.ake.data.persist.store.RouteDecisionSink
 import com.ake.data.persist.store.SettingsStoreImpl
 import com.ake.data.persist.store.StepTraceCodec
 import com.ake.data.persist.store.TaskStoreImpl
+import com.ake.data.persist.store.TemplateStoreImpl
 import com.ake.data.persist.store.ToolPermissionStoreImpl
 import com.ake.data.persist.store.TraceStoreImpl
+import com.ake.data.persist.write.ChatMessageWriter
 import com.ake.data.persist.write.PersistenceGovernor
 import com.ake.data.persist.write.PersistenceMetrics
 import com.ake.data.persist.write.TaskLivenessRegistry
@@ -68,6 +80,9 @@ import kotlinx.coroutines.asCoroutineDispatcher
 
 /** 单线程写执行器（§6.2：串行化所有写事务）。 */
 const val DISPATCHER_DB_WRITER: String = "dbWriter"
+
+/** ★ v3：聊天外置目录 `filesDir/chat/` 的 PayloadStore 限定符（与轨迹那一份区分）。 */
+const val DIR_CHAT: String = "chatPayloads"
 
 /**
  * `:data` 的装配（数据库 §3.10）。
@@ -162,6 +177,33 @@ public abstract class PersistenceBindingsModule {
     @Singleton
     public abstract fun bindWipePort(impl: WipeEverythingUseCase): WipePort
 
+    // ── ★ v3：聊天化 Agent 的三个 Port
+
+    @Binds
+    @Singleton
+    public abstract fun bindChatSessionStore(impl: ChatSessionStoreImpl): ChatSessionStorePort
+
+    @Binds
+    @Singleton
+    public abstract fun bindAgentProfileStore(impl: AgentProfileStoreImpl): AgentProfileStorePort
+
+    @Binds
+    @Singleton
+    public abstract fun bindTemplateStore(impl: TemplateStoreImpl): TemplateStorePort
+
+    /**
+     * ★ v3：Agent 级能力授权（两级授权里的第二级）。
+     *
+     * 这是 `:core:ports/Chat.kt` 里最后一个没有实现的 Port —— 补上它之后，
+     * `ChatSkillRegistry` 才第一次有真实的授权源，而不是靠 `:ui` 的 `@BindsOptionalOf` 兜底。
+     *
+     * ⚠ 它**只**写 `agent_capability_grant`，不碰 `tool_registry.enabled`。
+     *   两级授权取交集，Agent 级只能做减法 —— 见 `CapabilityGrantStoreImpl` 类注释。
+     */
+    @Binds
+    @Singleton
+    public abstract fun bindCapabilityGrants(impl: CapabilityGrantStoreImpl): CapabilityGrantPort
+
     public companion object {
 
         /**
@@ -222,6 +264,27 @@ public abstract class PersistenceBindingsModule {
         @JvmStatic
         public fun providePayloadStore(@ApplicationContext context: Context): PayloadStore =
             PayloadStore(File(context.filesDir, "trace"))
+
+        /**
+         * ★ v3：聊天外置目录 `filesDir/chat/`。
+         *
+         * 与 [providePayloadStore] **同一个类、不同根**（§7.2）：
+         * 消息 payload 与 checkpoint envelope 共用这一个根 ⇒ 一次 `purgeAll()`
+         * 全覆盖，新增一类落盘物时清除清单不需要跟着改。
+         */
+        @Provides
+        @Singleton
+        @Named(DIR_CHAT)
+        @JvmStatic
+        public fun provideChatPayloadStore(@ApplicationContext context: Context): PayloadStore =
+            PayloadStore(File(context.filesDir, "chat"))
+
+        /** ★ v3：人格资产目录 `filesDir/agents/`。只暴露 `purgeAll()`，不引入新的清除机制。 */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideAgentAssetStore(@ApplicationContext context: Context): AgentAssetStore =
+            AgentAssetStore(File(context.filesDir, "agents"))
 
         @Provides
         @Singleton
@@ -484,6 +547,109 @@ public abstract class PersistenceBindingsModule {
          * 之前 `:ui` 的 `AndroidPrivacyPort` 自己按 Context+Keystore 重写了一份，
          * 与本类重复 —— 那份应改为注入本类（`@Inject` 后 `wipe(deleteModelFiles)` 一行）。
          */
+        // ──────────────────────────────────────────────────────────────────────
+        // ★ v3：聊天化 Agent（docs/06 §3.9 / §7.2）
+        //
+        // ChatMessageWriter 由 `@Provides` 提供**单例**（必须同一个单例，
+        // 否则「停在途写入」会停错泳道 —— 与 TraceBufferWriter 那条警告同一条）。
+        // 三个 Store 走 `@Binds`，与既有 bindTaskStore 同形。
+        // ──────────────────────────────────────────────────────────────────────
+
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideChatMessageWriter(
+            db: AkeDatabase,
+            gate: PersistenceRedactionGate,
+            metrics: PersistenceMetrics,
+            @Named(DISPATCHER_DB_WRITER) writer: Executor,
+        ): ChatMessageWriter = ChatMessageWriter(
+            dao = db.chatMessageDao(),
+            gate = gate,
+            metrics = metrics,
+            writerContext = writer.asCoroutineDispatcher(),
+        )
+
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideChatSessionStore(
+            db: AkeDatabase,
+            writer: ChatMessageWriter,
+            gate: PersistenceRedactionGate,
+            clock: Clock,
+            @Named(DIR_CHAT) chatPayloads: PayloadStore,
+        ): ChatSessionStoreImpl = ChatSessionStoreImpl(
+            sessions = db.chatSessionDao(),
+            messages = db.chatMessageDao(),
+            tasks = db.taskDao(),
+            agentSessions = db.sessionDao(),
+            profiles = db.agentProfileDao(),
+            writer = writer,
+            gate = gate,
+            clock = clock,
+            transaction = { block -> db.withTransaction { block() } },
+            payloads = chatPayloads,
+        )
+
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideAgentProfileStore(
+            db: AkeDatabase,
+            gate: PersistenceRedactionGate,
+            clock: Clock,
+        ): AgentProfileStoreImpl = AgentProfileStoreImpl(
+            profiles = db.agentProfileDao(),
+            grants = db.capabilityGrantDao(),
+            sessions = db.chatSessionDao(),
+            messages = db.chatMessageDao(),
+            memory = db.memoryDao(),
+            gate = gate,
+            clock = clock,
+            transaction = { block -> db.withTransaction { block() } },
+        )
+
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideTemplateStore(
+            db: AkeDatabase,
+            gate: PersistenceRedactionGate,
+            profiles: AgentProfileStoreImpl,
+            clock: Clock,
+        ): TemplateStoreImpl = TemplateStoreImpl(
+            dao = db.templateDao(),
+            gate = gate,
+            profiles = profiles,
+            grants = db.capabilityGrantDao(),
+            clock = clock,
+        )
+
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideRouteDecisionSink(db: AkeDatabase, clock: Clock): RouteDecisionSink =
+            RouteDecisionSink(dao = db.routeDecisionDao(), clock = clock)
+
+        /**
+         * Agent 级能力授权。
+         *
+         * 只依赖 DAO + Clock，不需要 `PersistenceRedactionGate`：本表**没有任何一列能装正文**
+         * （`ref_id` 是能力标识、`kind` 是枚举），因此不存在需要过脱敏闸的字段 ——
+         * 与 `agent_profile.persona_charter_enc` 那种必须加密的列不是一类东西。
+         */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideCapabilityGrantStore(
+            db: AkeDatabase,
+            clock: Clock,
+        ): CapabilityGrantStoreImpl = CapabilityGrantStoreImpl(
+            grants = db.capabilityGrantDao(),
+            clock = clock,
+        )
+
         @Provides
         @Singleton
         @JvmStatic
@@ -496,6 +662,9 @@ public abstract class PersistenceBindingsModule {
             memory: MemoryStoreImpl,
             mcpServers: McpServerStorePort,
             settings: SettingsStorePort,
+            chatWriter: ChatMessageWriter,
+            @Named(DIR_CHAT) chatPayloads: PayloadStore,
+            agentAssets: AgentAssetStore,
         ): WipeEverythingUseCase = WipeEverythingUseCase(
             context = context,
             db = db,
@@ -505,6 +674,9 @@ public abstract class PersistenceBindingsModule {
             memory = memory,
             mcpServers = mcpServers,
             settings = settings,
+            chatWriter = chatWriter,
+            chatPayloads = chatPayloads,
+            agentAssets = agentAssets,
         )
     }
 }

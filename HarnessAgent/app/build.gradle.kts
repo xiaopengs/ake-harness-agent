@@ -202,6 +202,12 @@ dependencies {
     implementation(project(":agent"))
     implementation(project(":mcp"))
     implementation(project(":data"))
+    // ★ 2026-10：聊天编排（L5）。`:app` 是唯一能同时看见 `:chat`（实现）与
+    //   `core:ports/Chat.kt`（契约）的地方 ⇒ `ChatRunnerPort` / `SkillRegistryPort`
+    //   的 Hilt 绑定只能写在这里（见 `di/ChatPortsModule.kt`）。
+    //   `:ui` 仍然只能看见契约（架构守卫 ② 的 `com.ake.chat.` 黑名单），
+    //   它注入的是 `Optional<ChatRunnerPort>`，本条边不影响那条纪律。
+    implementation(project(":chat"))
     implementation(project(":ui"))
 
     implementation(platform(libs.compose.bom))

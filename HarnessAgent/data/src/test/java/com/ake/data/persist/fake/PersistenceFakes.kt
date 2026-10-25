@@ -179,6 +179,11 @@ internal class FakeTaskDao(
     override suspend fun setRetentionClass(ids: List<String>): Unit = unsupported("setRetentionClass")
     override suspend fun pickOldest(limit: Int): List<String> = unsupported("pickOldest")
     override suspend fun delete(id: String): Unit = unsupported("delete")
+
+    // ── v3：与 chat_message 的解绑（§8.2 B1）。本轮 FakeTaskDao 不覆盖聊天路径。
+    override suspend fun unbindChatMessage(messageId: String): Int = unsupported("unbindChatMessage")
+    override suspend fun unbindChatSession(sessionId: String): Int = unsupported("unbindChatSession")
+    override suspend fun byChatMessage(messageId: String?): List<TaskEntity> = unsupported("byChatMessage")
     override suspend fun countFull(): Int = unsupported("countFull")
 
     private fun unsupported(name: String): Nothing =

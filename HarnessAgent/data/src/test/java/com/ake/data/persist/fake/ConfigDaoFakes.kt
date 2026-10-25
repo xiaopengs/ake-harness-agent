@@ -151,6 +151,21 @@ internal class FakeAkeDatabase(private val configDao: ConfigDao) : AkeDatabase()
     override fun memoryDao(): MemoryDao = unsupported("memoryDao")
     override fun modelAssetDao(): ModelAssetDao = unsupported("modelAssetDao")
     override fun toolRegistryDao(): ToolRegistryDao = unsupported("toolRegistryDao")
+    // ── v3 聊天 DAO：本轮这两个替身不覆盖聊天路径，一律 unsupported。
+    //    ★ 刻意不返回「空实现」：静默的空值会让「覆盖到了」变成假象（见本文件 unsupported 的注释）。
+    override fun agentProfileDao(): com.ake.data.persist.db.dao.AgentProfileDao =
+        unsupported("agentProfileDao")
+    override fun chatSessionDao(): com.ake.data.persist.db.dao.ChatSessionDao =
+        unsupported("chatSessionDao")
+    override fun chatMessageDao(): com.ake.data.persist.db.dao.ChatMessageDao =
+        unsupported("chatMessageDao")
+    override fun capabilityGrantDao(): com.ake.data.persist.db.dao.CapabilityGrantDao =
+        unsupported("capabilityGrantDao")
+    override fun templateDao(): com.ake.data.persist.db.dao.TemplateDao =
+        unsupported("templateDao")
+    override fun routeDecisionDao(): com.ake.data.persist.db.dao.RouteDecisionDao =
+        unsupported("routeDecisionDao")
+
 
     override fun createOpenHelper(config: DatabaseConfiguration): androidx.sqlite.db.SupportSQLiteOpenHelper =
         unsupported("createOpenHelper")
@@ -184,6 +199,20 @@ internal class BareAkeDatabase(private val configDao: ConfigDao) : AkeDatabase()
     override fun memoryDao(): MemoryDao = unsupported("memoryDao")
     override fun modelAssetDao(): ModelAssetDao = unsupported("modelAssetDao")
     override fun toolRegistryDao(): ToolRegistryDao = unsupported("toolRegistryDao")
+
+    // ── v3 聊天 DAO：本替身不覆盖聊天路径，一律 unsupported（理由见 [FakeAkeDatabase] 的同名注释）。
+    override fun agentProfileDao(): com.ake.data.persist.db.dao.AgentProfileDao =
+        unsupported("agentProfileDao")
+    override fun chatSessionDao(): com.ake.data.persist.db.dao.ChatSessionDao =
+        unsupported("chatSessionDao")
+    override fun chatMessageDao(): com.ake.data.persist.db.dao.ChatMessageDao =
+        unsupported("chatMessageDao")
+    override fun capabilityGrantDao(): com.ake.data.persist.db.dao.CapabilityGrantDao =
+        unsupported("capabilityGrantDao")
+    override fun templateDao(): com.ake.data.persist.db.dao.TemplateDao =
+        unsupported("templateDao")
+    override fun routeDecisionDao(): com.ake.data.persist.db.dao.RouteDecisionDao =
+        unsupported("routeDecisionDao")
 
     override fun createOpenHelper(config: DatabaseConfiguration): androidx.sqlite.db.SupportSQLiteOpenHelper =
         unsupported("createOpenHelper")

@@ -237,4 +237,28 @@ interface TaskDao {
 
     @Query("SELECT COUNT(*) FROM task WHERE retention_class = 'FULL'")
     suspend fun countFull(): Int
+
+    // ── ★ v3：与 chat_message 的关系（2026-10 · 霍承钧）
+    //
+    // §8.2 B1 是最容易写错的一条：`task` 被 DIGEST / 删除时**不得**删除 `chat_message`；
+    // 反过来，删 `chat_session` 时也**不得**删除 `task`。
+    // 于是两个方向都只提供「解绑」：把 `chat_message_id` 置 NULL，消息行照旧活着
+    // （会话拥有它，任务轨迹的生命周期由 v2 §4.4 自己管）。
+
+    /** 任务被 DIGEST / 删除时解绑（B1 方向）。 */
+    @Query("UPDATE task SET chat_message_id = NULL WHERE chat_message_id = :messageId")
+    suspend fun unbindChatMessage(messageId: String): Int
+
+    /** 删除会话时解绑该会话派生出的全部任务（B3 方向）。 */
+    @Query(
+        """
+        UPDATE task SET chat_message_id = NULL
+         WHERE chat_message_id IN (SELECT id FROM chat_message WHERE session_id = :sessionId)
+        """,
+    )
+    suspend fun unbindChatSession(sessionId: String): Int
+
+    /** 「这句话派生了哪个任务」的反查（命中 idx_task_chat_message）。 */
+    @Query("SELECT * FROM task WHERE chat_message_id IS :messageId")
+    suspend fun byChatMessage(messageId: String?): List<TaskEntity>
 }

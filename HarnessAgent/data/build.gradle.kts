@@ -65,3 +65,16 @@ dependencies {
 
     testImplementation(libs.bundles.testUnit)
 }
+
+/**
+ * ★ Room schema 导出位置（2026-10 · 霍承钧）
+ *
+ * `exportSchema = true` 只是「导出」，**导出到哪**默认由 Room 决定（各 AGP 版本不尽相同）。
+ * 本轮把它钉死在 `data/schemas/`，因为 `AkeMigrationSchemaTest` 要读 `3.json`
+ * 与 `AkeMigrations.MIGRATION_2_3` 的手写 DDL 逐列比对 ——
+ * 那条断言必须有一个**确定的、签入 git 的**路径，否则「改了 Entity 忘了改迁移」
+ * 这件事仍然只能靠人肉比对发现。
+ */
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}

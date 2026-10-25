@@ -74,6 +74,44 @@ public class PayloadStore(private val root: File) {
         }
     }
 
+    // ────────────────────────────────────────────────────────────────────────
+    // ★ v3：聊天外置 payload（`filesDir/chat/<sessionId>/<seq>-<id>.txt.gz`）
+    //
+    // 同一个类、不同根（§7.2）—— 这就是「新增一类落盘物时清除清单不需要跟着改」的收益。
+    //
+    // ★ 为什么单独开 gzip 两个方法而不是复用上面的 `write()`：
+    //   上面那条用的是 `DeflaterOutputStream`（raw deflate），而 `read()` 用的是
+    //   `GZIPInputStream` —— 两者并不配对。本轮不动既有那对（轨迹在用它，改了要连带改数据），
+    //   聊天这边从第一天就用**真正配对的** GZIP 写/读（§4.2：`payload_codec = 'gzip'`）。
+    // ────────────────────────────────────────────────────────────────────────
+
+    /** 写一个 gzip 文本文件，返回**相对目录键的文件名**。 */
+    suspend fun writeGzip(dirKey: String, fileName: String, text: String): String? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val dir = File(root, dirKey).apply { mkdirs() }
+                val tmp = File(dir, "$fileName.tmp")
+                val dst = File(dir, fileName)
+                tmp.outputStream().use { raw -> GZIPOutputStream(raw).use { it.write(text.toByteArray(Charsets.UTF_8)) } }
+                forceAndRename(tmp, dst)
+                "$dirKey/$fileName"
+            }.getOrElse { t ->
+                AkeLog.w(TAG, "chat payload write failed $dirKey/$fileName: ${t.message}")
+                null
+            }
+        }
+
+    suspend fun readGzip(dirKey: String, fileName: String): String? = withContext(Dispatchers.IO) {
+        runCatching {
+            val f = File(File(root, dirKey), fileName)
+            if (!f.exists()) return@runCatching null
+            f.inputStream().use { java.util.zip.GZIPInputStream(it).readBytes().toString(Charsets.UTF_8) }
+        }.getOrElse { null }
+    }
+
+    /** §8.2 ④：删除会话时删它的整个目录。**事务外调用**（先没了 DB 指针，再删本体）。 */
+    suspend fun purgeSession(sessionId: String) = purgeTask(sessionId)
+
     /** §8.5 一键清除 / §4.5 清理：整任务目录删掉。 */
     suspend fun purgeTask(taskId: String) = withContext(Dispatchers.IO) {
         runCatching { dirOf(taskId).deleteRecursively() }
