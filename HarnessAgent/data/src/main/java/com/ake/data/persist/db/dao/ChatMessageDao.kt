@@ -60,7 +60,8 @@ interface ChatMessageDao {
      * ★ 终态提交：把 STREAMING 收敛，并一次性记账 token。
      *
      * `WHERE status = 'STREAMING'` 这一条守卫很重要：它让「重复提交」变成 0 行受影响，
-     * 而不是把一条已经 ABORTED 的消息又写回 COMPLETE（§2.5 纪律：中断不是无效）。
+     * 而不是把一条已经 `ABORTED` / `FAILED`（冷启收敛过）的消息又写回 COMPLETE
+     * （§2.5 纪律：中断不是无效 —— 终态一旦落定，只能被看见，不能被抹平）。
      */
     @Query(
         """
@@ -168,8 +169,60 @@ interface ChatMessageDao {
     )
     suspend fun latestBoundary(sessionId: String): ChatMessageEntity?
 
-    /** 冷启动 sweep：把所有卡在 STREAMING 的收敛为 ABORTED（§2.5 纪律 2）。 */
-    @Query("UPDATE chat_message SET status = 'ABORTED' WHERE status = 'STREAMING'")
+    /**
+     * 冷启动 sweep：把所有卡在 `STREAMING` 的收敛为 **`FAILED`**（§2.5 纪律 2）。
+     *
+     * ## ★ 为什么是 `FAILED` 而不是 `ABORTED`（2026-10 语义修复 · 霍承钧）
+     *
+     * 两个词的分界线不是措辞偏好，而是**这个事件该不该被关注**：
+     *
+     * | 终态 | 语义 | 谁造成的 | 要不要排查 |
+     * |---|---|---|---|
+     * | `ABORTED` | 用户按了停止按钮 | **用户**（正常行为） | ❌ 不该进缺陷统计 |
+     * | `FAILED` | 链路没走完 | **系统**（缺陷） | ✅ 必须能被捞出来 |
+     *
+     * 冷启时还留着的 `STREAMING` 行，成因只有一个：**上一轮进程没走到终态提交就走了**
+     * （LMK / native abort / 崩溃）。把它们标成 `ABORTED`，等于把每一次「进程死了」
+     * 都伪装成「用户主动停的」—— 于是将来查「这条消息为什么没回」时，
+     * 这类事件在数据里**根本不可见**。这不只是措辞问题，是把一类缺陷从统计中擦掉。
+     *
+     * ## ★ 关于「失败原因」字段：本表**没有**这一列，本方法也**刻意不加**
+     *
+     * `chat_message` 里没有任何一列能装失败原因。`commit()` 只收到 `MessageStatus`
+     * 三个值（`COMPLETE` / `ABORTED` / `FAILED`，见 `:chat` 的 `ChatLoop` 终态映射），
+     * 而 `ChatTerminalReason` 那 9 个值（`MODEL_FAILED` / `BUDGET_EXHAUSTED` /
+     * `POLICY_DENIED` / `SKILL_FAILED` / `MODEL_NOT_LOADED` / `REQUEST_STORE_FAILED` /
+     * `STORE_FAILED` …）**从来没有落过库** —— 它们只活在 Port 层的事件与日志里。
+     * ⇒「swept 行缺一个原因」不是它独有的缺口，而是本表**每一行** `FAILED` 的一致形态：
+     *   要填也没地方填，不是「允许为空」，是**这个字段不存在**。
+     *
+     * 加列 `failure_reason` 在本轮不成立，三条理由：
+     *  ① 本表是全工程**写放大最热**的表（流式快照每 400 ms 一次 UPDATE），
+     *     加列 ⇒ v3→v4 手写迁移 + `4.json` + `AkeMigrationSchemaTest` 逐列比对，
+     *     为一条冷启路径去动最热写入表的 schema，代价与收益倒挂；
+     *  ② 唯一能给这一列填有意义值的地方都在 `:chat`（本轮硬约束：不可改），
+     *     于是新列对**除 sweep 外的所有** `FAILED` 行恒为 NULL ——
+     *     一个「看着该有值却永远没有」的列比没有这一列更糟
+     *     （`task.terminal_reason` 就是被逼出来的：那一侧把 `ABORTED` 复用成了垃圾桶，
+     *     才需要补一列把 `ORPHANED_*` 捞回来。**本表有 4 个状态，不必重走那条路**）；
+     *  ③ 判据是「这类缺陷**能被等值查询发现**」，`status = 'FAILED'` 已经满足；
+     *     再细分「是哪种失败」是另一个命题，见下。
+     *
+     * ⇒ 裁决：不加列。**「我们不知道它为什么停」这件事本身，就是不写原因的诚实表达。**
+     *   要补原因，应当由 `:chat` 把 `ChatTerminalReason` 一起落库、一次改齐所有产出方 +
+     *   一条 v3→v4 迁移，而不是在这里先开一个只有 1 个产出方有值的洞。
+     *   在此之前，「这批 `FAILED` 里哪些是 sweep 产生的」由冷启日志区分 ——
+     *   见 `ChatSessionStoreImpl.sweepStreaming()` 里那条带 `PROCESS_KILLED` 的 WARN。
+     *
+     * ## ★ 两处刻意不动
+     *
+     *  - **`WHERE status = 'STREAMING'` 守卫保留**：已经 `ABORTED`（用户主动停）或
+     *    `COMPLETE` 的行一行都不会被碰到 —— 这正是「用户 stop() 的路径仍然是 ABORTED」
+     *    的结构性保证（不靠调用方自觉）。
+     *  - **不动 `updated_at`**：它记的是「最后一次快照落盘时间」，是判断
+     *    「中断了多久 / 流了多久」的唯一证据。收敛状态不该顺手把它抹掉。
+     */
+    @Query(ChatMessageDao.SWEEP_SQL)
     suspend fun sweepStreaming(): Int
 
     /**
@@ -239,4 +292,28 @@ interface ChatMessageDao {
     @Query("SELECT COUNT(*) FROM chat_message WHERE session_id = :sessionId")
     suspend fun countOf(sessionId: String): Int
 
+    public companion object {
+        /**
+         * sweep 的收敛目标态。
+         *
+         * ★ 抽成常量不是为了「好改」，是为了**能被 JVM 单测断言**：
+         * `:data` 是 androidLibrary，纯 JVM 单测起不了真 Room/SQLite（见
+         * `AkeMigrationSchemaTest` 类注释的同一困境），而「sweep 收敛到哪个状态」
+         * 是这条链路上**唯一真正决定语义**的字符串。写成常量之后，
+         * `ChatSweepStreamingTest` 可以对 Room 将来实际执行的那条 SQL 做等值断言，
+         * 而不是让测试里的假 DAO 自己复述一遍答案（那样改错了也照样绿）。
+         *
+         * 与 `ChatMigration2To3.STATEMENTS` 是同一条纪律：**把要断言的 SQL 变成数据**。
+         */
+        public const val SWEEP_TERMINAL_STATUS: String = "FAILED"
+
+        /**
+         * 冷启收敛语句。
+         *
+         * 三条要素缺一不可：目标态 `FAILED`（缺陷）、来源态 `STREAMING`（中间态）、
+         * 以及 `WHERE` 守卫（只碰中间态，绝不覆盖已成终态的行）。
+         */
+        public const val SWEEP_SQL: String =
+            "UPDATE chat_message SET status = '" + SWEEP_TERMINAL_STATUS + "' WHERE status = 'STREAMING'"
+    }
 }

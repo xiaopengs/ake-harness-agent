@@ -55,8 +55,18 @@ public annotation class DefaultDispatcher
  * ★ **只写装配，不写别人的实现**：这里只把「接口」绑到「各模块自己提供的实现类」，
  * 不含任何业务规则。业务规则归各自的 L3/L4 模块。
  *
- * 尚未落地的模块（`:mcp` / `:data` / `:ui` 的 Port 实现）在它们各自的
- * Hilt 模块里绑定；本文件不占位、不引用不存在的类，以免编译期就绑死。
+ * 各模块的 Port 实现在它们**自己的** Hilt 模块里绑定，本文件不重复绑、也不占位：
+ *
+ * ```
+ *   :data  → PersistenceModule        会话 / 人格 / 模板 / 能力授权 / 轨迹 / 任务
+ *   :ui    → UiRuntimeModule           HumanGate / PrivacyPort / ToolShutdownPort
+ *   :ui    → ChatWiringModule          @BindsOptionalOf（声明"可能有"，不是实现）
+ *   :mcp   → app/di/McpHiltModule      McpConnectionPort / ToolPermissionStorePort
+ * ```
+ *
+ * ★ 2026-10 修正：这里原文写「尚未落地的模块（`:mcp` / `:data` / `:ui` 的 Port 实现）」。
+ *   三者现在**全部**已有绑定 —— 留着一句"尚未落地"，下一个人就会去找一个不存在的缺口，
+ *   或者更糟：据此以为某个 Port 是可选依赖。（关千锤 P1-5：已知错误的注释比没有注释更糟。）
  */
 @Module
 @InstallIn(SingletonComponent::class)

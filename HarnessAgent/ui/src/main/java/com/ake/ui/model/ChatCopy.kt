@@ -98,6 +98,41 @@ public fun chatTerminalCopyOf(reason: ChatTerminalReason): ChatTerminalCopy = wh
         nextRes = R.string.chat_term_store_failed_next,
         retryable = true,
     )
+
+    /**
+     * ★ **这句话没能写进存储，所以本轮根本没有开始回答**（一个 token 都没生成）。
+     *
+     * ## 为什么不复用 `STORE_FAILED` 那两句（这是本次拆分存在的**全部理由**）
+     *
+     * 两档的共同点只有「存储坏了」，时间线完全不同，而用户读文案时只会代入自己
+     * 看到的那一幕：
+     *
+     * | 终态 | 屏幕上有什么 | 用户读完会去做什么 |
+     * |---|---|---|
+     * | `STORE_FAILED` | **一段完整的回答**（已经流出来了） | 「答都答了，别浪费」→ 重试把它存下来 |
+     * | `REQUEST_STORE_FAILED` | 一句自己发出去的话，**后面什么都没有** | 同上 —— 然后去找一个不存在的回答 |
+     *
+     * 上一版 ①②（`append(USER)` / `beginAssistant`）的失败也报 `STORE_FAILED`，
+     * 于是「模型一个字都没答」被说成「回答生成好了，但没存下来」。这不是措辞瑕疵：
+     * 用户会反复滚动、反复重发同一个问题、甚至去折腾模型设置，只因为界面承诺了一段
+     * 从未存在过的回答。**归因越界比多一个枚举贵得多**（见 `core:ports/Chat.kt` 该值的注释）。
+     *
+     * 所以这一档的三句话各有分工：标题把「没答」说在前面（先止损，别让人找），
+     * 正文把责任指到存储（对症），并**主动堵掉「补回来」这个念头**
+     * —— 本枚举不携带文本，也没有任何缓存持有这一轮的产物。
+     *
+     * ## 为什么 `retryable = true`
+     *
+     * 可重试的是「**把这句话再发一次**」，不是「补写一次」。`:ui` 的 `retry()`
+     * 正是这么做的：复用 `lastUserText` 与 `turnId`（§9-U4），不新开一轮；
+     * 而 `clientRequestId` 每次新建 —— 万一上一轮 USER 行其实已经落盘
+     * （`beginAssistant` 失败那一路），幂等键会挡住重复消息，不会出现两条一样的话。
+     */
+    ChatTerminalReason.REQUEST_STORE_FAILED -> ChatTerminalCopy(
+        titleRes = R.string.chat_term_request_store_failed_title,
+        nextRes = R.string.chat_term_request_store_failed_next,
+        retryable = true,
+    )
 }
 
 /**

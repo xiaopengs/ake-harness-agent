@@ -64,6 +64,10 @@ public data class ChatTurnFailure(
          * 全靠 `chatTerminalCopyOf` 的穷尽性把问题抓出来。少一个保护点就多一次「靠运气」。
          * 列全之后，新增终态会在**两个**地方同时编译失败，逼着作者回答
          * 「它算不算失败」这个必须由人来答的问题。
+         *
+         * ★ 这道检查已经赚回一次成本：`REQUEST_STORE_FAILED` 加进来时本文件立刻红，
+         *   于是「这句话没存下来、本轮没开始答」被**显式**判定为失败（它当然要占一条气泡：
+         *   用户得知道自己的话去哪了），而不是靠 `else` 蒙混过去。
          */
         public fun of(turnId: String?, reason: ChatTerminalReason): ChatTurnFailure? = when (reason) {
             ChatTerminalReason.COMPLETED,
@@ -75,6 +79,7 @@ public data class ChatTurnFailure(
             ChatTerminalReason.POLICY_DENIED,
             ChatTerminalReason.SKILL_FAILED,
             ChatTerminalReason.MODEL_NOT_LOADED,
+            ChatTerminalReason.REQUEST_STORE_FAILED,
             ChatTerminalReason.STORE_FAILED,
             -> ChatTurnFailure(turnId, reason, chatTerminalCopyOf(reason).retryable)
         }

@@ -36,6 +36,33 @@ import java.util.UUID
 import javax.inject.Inject
 
 /**
+ * 一条**库里永远不会收敛**的占位消息，以及它该被渲染成什么。
+ *
+ * ## 它存在的唯一理由：写路径坏了，而 UI 不能等数据库
+ *
+ * `commitAssistant` 失败时（`ChatTerminalReason.STORE_FAILED`），助手占位行的
+ * `status = STREAMING` 就再也改不动了 —— 写路径本身坏了，任何补写都会继续失败。
+ * 那一行要等到**下次冷启的 `sweepStreaming()`** 才会变成 `FAILED`。
+ *
+ * 用户在这段时间里看到的是一条永远「正在生成」的空气泡。这不是"稍微慢一点"，
+ * 而是界面在**持续撒谎**：模型其实早就答完了（文本就在 [text] 里）。
+ *
+ * 所以这一档不在等数据库收敛，而是由 UI 把这一轮的失败现场**覆盖**到那条消息的渲染上：
+ * 立刻显示「回答生成好了，但没存下来」+ 重试。**纯渲染层，不写库** —— 写不进去。
+ *
+ * @property messageId 被覆盖的那条消息（= Terminal 事件里的 `messageId`，也是 `liveMessageId`）
+ * @property failure 本轮失败现场；脚注的标题 / 下一步 / 是否可重试都从它取
+ * @property text 失败发生时**已经流到屏幕上的那段回答**。它是这段话唯一的持有者：
+ *   库里那行是空的，而 `liveText` 会在下一轮开始时被清空。不在这里冻住，用户已经读过的
+ *   回答就会凭空消失 —— 那正好是 `STORE_FAILED` 文案要避免的事（"回答是好的"）。
+ */
+public data class UnconvergedPlaceholder(
+    val messageId: String,
+    val failure: ChatTurnFailure,
+    val text: String,
+)
+
+/**
  * 一次会话的完整可渲染状态。
  *
  * ## 为什么"落库消息"与"飞行中的文本"是两个字段
@@ -50,6 +77,12 @@ import javax.inject.Inject
  *
  * 分开之后：气泡优先渲染 `liveText`（当它是这一轮正在生成的那条），
  * 一旦库里出现同一 messageId 且状态不是 STREAMING，就把覆盖层清掉（见 [onMessages]）。
+ *
+ * ## 第三层：[stuck]
+ *
+ * `messages` 是「库里的事实」，但它可能是**陈旧的**事实 —— 写路径坏掉时那行会永远停在
+ * `STREAMING`。所以还需要一层"已知不会收敛"的覆盖，见 [UnconvergedPlaceholder]。
+ * 三层的优先级：`stuck`（界面接管） > `liveText`（正在生成） > `messages`（落盘事实）。
  */
 public data class ChatUi(
     val sessionId: String? = null,
@@ -68,6 +101,13 @@ public data class ChatUi(
     val failure: ChatTurnFailure? = null,
     /** 上一轮的终态，用于顶部一句话结论。 */
     val terminal: ChatTerminalReason? = null,
+    /**
+     * ★ 已知**不会收敛**的占位消息，`messageId` → 覆盖内容。
+     *
+     * 跨轮存活（`beginTurn` 不清它）：那条消息属于**上一轮**，新一轮开始不该让它的
+     * "永远转圈"复活一次。只有库里真的出现非 `STREAMING` 版本时才移除（[onMessages]）。
+     */
+    val stuck: Map<String, UnconvergedPlaceholder> = emptyMap(),
     /** ★ `ChatRunnerPort` 没有 Hilt 绑定时的降级标志：只读历史，发送禁用。 */
     val runnerMissing: Boolean = false,
     /**
@@ -381,15 +421,48 @@ public class ChatViewModel @Inject constructor(
 
             is ChatEvent.Terminal -> {
                 val failure = ChatTurnFailure.of(currentTurnId, event.reason)
-                _ui.update {
-                    it.copy(
+                _ui.update { s ->
+                    val stuck = unconvergedPlaceholderOf(s, event, failure)
+                    s.copy(
                         streaming = false,
                         failure = failure,
                         terminal = event.reason,
+                        stuck = if (stuck == null) s.stuck else s.stuck + (stuck.messageId to stuck),
                     )
                 }
             }
         }
+    }
+
+    /**
+     * 这一轮的失败现场要不要**接管**那条占位行的渲染（见 [UnconvergedPlaceholder]）。
+     *
+     * ## 为什么只认 `STORE_FAILED`
+     *
+     * 挑的不是"严重程度"，而是「这个终态是否**由写库失败本身定义**」：
+     *
+     *  - `STORE_FAILED` 的成因就是 `commitAssistant` 返回 `Err` ⇒ 那一行**一定**还停在
+     *    `STREAMING`，可以无条件接管，不存在误伤；
+     *  - 其余终态（`SKILL_FAILED` / `MODEL_FAILED` …）都是**推理侧**的结论，那一行通常
+     *    已经被正常收敛（`SKILL_FAILED` 甚至可能是 `COMPLETE` —— 技能挂了但正文是好的）。
+     *    对这些终态强行覆盖，会把一段**好的回答**画成红色失败气泡：用"修转圈"换来了"说谎"。
+     *
+     * `:chat` 里 `commitAssistant` 失败时如果不是 `COMPLETED` 就保留原终态（`ChatLoop` 第 746 行），
+     * 所以「`MODEL_FAILED` 且提交也失败」那种叠加态本文件仍看不到，那条气泡会继续转圈到冷启。
+     * 要修它需要 `:chat` 告诉我们"提交也失败了"这个独立事实 —— 那是契约变更，不在 `:ui` 权限内，
+     * 已写进本轮汇报。宁可留下一个已知的转圈，也不要在 `:ui` 里猜。
+     */
+    private fun unconvergedPlaceholderOf(
+        s: ChatUi,
+        event: ChatEvent.Terminal,
+        failure: ChatTurnFailure?,
+    ): UnconvergedPlaceholder? {
+        val id = event.messageId ?: return null
+        if (failure == null) return null
+        if (event.reason != ChatTerminalReason.STORE_FAILED) return null
+        // ★ 文本必须在这里冻住：下一轮 `beginTurn` 会把 `liveText` 清空，
+        //   而库里那行是空的 —— 不留这一份，用户已经读过的回答就没了。
+        return UnconvergedPlaceholder(messageId = id, failure = failure, text = s.liveText)
     }
 
     private suspend fun ensureSession(agentId: String, hint: String): String? =
@@ -404,8 +477,12 @@ public class ChatViewModel @Inject constructor(
     /**
      * 订阅落库消息。
      *
-     * 顺便处理"覆盖层的退场"：当同 messageId 的消息以非 STREAMING 状态出现在库里时，
-     * 说明终态已提交 —— 此时必须清掉 `liveText`，否则同一段话会被渲染两遍。
+     * 顺便处理两件退场：
+     *  - **覆盖层退场**：当同 messageId 的消息以非 STREAMING 状态出现在库里时，
+     *    说明终态已提交 —— 此时必须清掉 `liveText`，否则同一段话会被渲染两遍。
+     *  - **失败接管退场**：`stuck` 里的 id 一旦在库里收敛（冷启 sweep 把卡住的
+     *    `STREAMING` 收敛成 `FAILED`，或某次补写真的成功了），界面就该把话语权
+     *    还给数据库。这也让 `stuck` 不会随会话时长无限长。
      */
     private fun bindMessages(sessionId: String) {
         messagesJob?.cancel()
@@ -420,11 +497,15 @@ public class ChatViewModel @Inject constructor(
         _ui.update { s ->
             val settled = s.liveMessageId != null &&
                 list.any { it.id == s.liveMessageId && it.status != MessageStatus.STREAMING }
+            val converged = s.stuck.keys.filter { id ->
+                list.any { it.id == id && it.status != MessageStatus.STREAMING }
+            }.toSet()
             s.copy(
                 messages = list,
                 loadingHistory = false,
                 liveMessageId = if (settled) null else s.liveMessageId,
                 liveText = if (settled) "" else s.liveText,
+                stuck = if (converged.isEmpty()) s.stuck else s.stuck - converged,
             )
         }
     }

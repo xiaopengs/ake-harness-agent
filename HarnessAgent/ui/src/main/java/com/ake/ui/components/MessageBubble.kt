@@ -55,6 +55,13 @@ import com.ake.ui.theme.AkeColors
  *
  * 只给页面顶部一条横幅的话，用户往回翻到那条失败消息时看不到任何理由，
  * 只会看到一句戛然而止的话。原因必须跟着它自己走。
+ *
+ * ## [statusOverride]：库里那行的状态可能是**陈旧事实**
+ *
+ * `commitAssistant` 写失败时，占位行的 `STREAMING` 再也改不动（写路径坏了），
+ * 要等下次冷启 sweep 才收敛。此时数据库说的「还在生成」与事实相反 ——
+ * 模型早就答完了。所以调用方可以把这一轮的失败状态**覆盖**上来，
+ * **纯渲染，不回写**：那扇门已经关上了。
  */
 @Composable
 public fun MessageBubble(
@@ -63,11 +70,20 @@ public fun MessageBubble(
     modifier: Modifier = Modifier,
     streaming: Boolean = false,
     liveText: String? = null,
+    /**
+     * 覆盖 `message.status` 的显示状态（`null` = 照数据库说的画）。
+     *
+     * 只改**渲染**：徽标、气泡底色、失败脚注一律跟着它走，
+     * 但 `message` 本身不被伪造 —— 数据仍是数据，投影仍是投影。
+     */
+    statusOverride: MessageStatus? = null,
     failure: ChatTurnFailure? = null,
     skillCard: SkillCardUi? = null,
     onRetry: () -> Unit = {},
     onOpenTask: ((String) -> Unit)? = null,
 ) {
+    val status = statusOverride ?: message.status
+
     when (message.kind) {
         MessageKind.COMPACT_BOUNDARY -> {
             ChatNote(stringResource(R.string.chat_note_compacted), modifier)
@@ -96,7 +112,7 @@ public fun MessageBubble(
                             name = message.skillRef?.id ?: message.role.name,
                             ref = message.skillRef,
                             result = message.textRedacted.takeIf { it.isNotBlank() },
-                            status = message.status,
+                            status = status,
                             taskId = message.taskId,
                         ),
                         onOpenTask = onOpenTask,
@@ -146,11 +162,11 @@ public fun MessageBubble(
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
-                messageStatusLabelRes(message.status)?.let { res ->
+                messageStatusLabelRes(status)?.let { res ->
                     Spacer(Modifier.width(6.dp))
                     Tag(
                         text = stringResource(res),
-                        color = if (message.status == MessageStatus.FAILED) {
+                        color = if (status == MessageStatus.FAILED) {
                             AkeColors.RiskForbidden
                         } else {
                             MaterialTheme.colorScheme.outline
@@ -160,7 +176,7 @@ public fun MessageBubble(
             }
             Spacer(Modifier.height(4.dp))
 
-            val failed = message.status == MessageStatus.FAILED
+            val failed = status == MessageStatus.FAILED
             Surface(
                 shape = RoundedCornerShape(4.dp, 16.dp, 16.dp, 16.dp),
                 color = if (failed) {

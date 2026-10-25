@@ -13,8 +13,12 @@ import javax.inject.Provider
 /**
  * 组合根。
  *
- * 只做三件事：装日志 sink、注册内存回调、把「低内存 ⇒ 释放模型」这条链路接上。
+ * `onCreate` 只做三件**时序敏感**的事：装日志 sink、触发冷启收尾、注册内存回调。
  * 其余一律由 Hilt 模块装配（见 `di/`）。
+ *
+ * ★ 2026-10 修正：这里的原文写着「只做三件事：装日志 sink、注册内存回调、把低内存 ⇒
+ *   释放模型接上」—— 那份清单漏了 `coldStart.get()`，也就是漏掉了当时本轮真正的修复点。
+ *   注释比代码少一条，后人读注释会以为冷启接线不存在（或者以为它发生在别处）。
  */
 @HiltAndroidApp
 public class AkeApp : Application() {
@@ -38,7 +42,12 @@ public class AkeApp : Application() {
      *   上一轮的**生产调用点为 0** —— 方法写得对、单测也过，但没人从启动路径上喊它们，
      *   于是模板市场永久空白、存量人格永久哑、`STREAMING` 永不收敛。
      *   单例的 `init` 自触发（与 `TaskStateWriter` 调 `TaskReconciler` 同款）保证了
-     *   「只要装配就一定跑」，`app/src/test/.../ColdStartWiringTest` 守着这条接线不被剪掉。
+     *   「只要装配就一定跑」。
+     *
+     * ★ 守护这条接线的测试是 `app/src/test/.../ColdStartWiringTest`，它断言的是
+     *   **行为**（`onCreate` 真的解引用了这个 provider；coordinator 一被构造就把两条 hook
+     *   跑起来），不是源码里有没有那行字 —— 上一版扫字符串的写法在被注释掉的代码面前
+     *   永远全绿（关千锤 P1-2）。
      */
     @Inject
     internal lateinit var coldStart: Provider<ColdStartCoordinator>

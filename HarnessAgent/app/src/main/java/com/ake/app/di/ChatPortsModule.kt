@@ -31,11 +31,21 @@ import javax.inject.Singleton
  *
  * ## 这个模块补的是什么缺口
  *
- * `:ui` 的 `ChatWiringModule` 用 `@BindsOptionalOf` 声明了三个 Port 可能不存在，
- * 于是 `ChatViewModel` 注入 `Optional<ChatRunnerPort>`，缺席时降级为「只读历史 + 发送禁用」。
+ * `:ui` 的 `ChatWiringModule` 用 `@BindsOptionalOf` 声明了三个 Port 可能不存在
+ * （`ChatRunnerPort` / `SkillRegistryPort` / `CapabilityGrantPort`），
+ * 于是 `ChatViewModel` 注入 `Optional<…>`，缺席时降级为「只读历史 + 发送禁用」。
  * 那是**正确的兜底**，不是长期状态：`@BindsOptionalOf` 只声明「可能有」，
  * 图里没有实现时给 `Optional.empty()`，有实现时同一个 `Optional` 自动变成 present，
- * **`:ui` 一行都不用改** —— 本模块就是把「有实现」这一半补上。
+ * **`:ui` 一行都不用改**。
+ *
+ * 三个缺口现在的归属（★ 2026-10 校正，关千锤 P1-5：`:ui` 的那张表里
+ * 「`CapabilityGrantPort` 全工程无实现」是**假话**，早已由 `:data` 绑上）：
+ *
+ * | Port | 谁补上 |
+ * |---|---|
+ * | `ChatRunnerPort` | **本模块**（`services.loop`） |
+ * | `SkillRegistryPort` | **本模块**（`services.skills`） |
+ * | `CapabilityGrantPort` | `:data` 的 `PersistenceBindingsModule.bindCapabilityGrants`（本模块不重复绑） |
  *
  * `@BindsOptionalOf` 与真实绑定**可以共存**：前者绑定的是 `Optional<T>`，
  * 后者绑定的是 `T`，是两个不同的 key，不构成 `[Dagger/DuplicateBindings]`。
@@ -54,11 +64,6 @@ import javax.inject.Singleton
  * 所以这里**只** `@Provides ChatServices`，另两个 Port 是它的投影（`services.loop` /
  * `services.skills`）。给 `ChatLoop` / `ChatSkillRegistry` 各写一个 `@Provides`
  * 会真的造出两个实例 —— 因为 `:chat` 没有 `@Inject constructor`，Dagger 无法复用。
- *
- * ## `CapabilityGrantPort` 不在这里
- *
- * 它的实现属于 `:data`（`CapabilityGrantStoreImpl`），由
- * `PersistenceBindingsModule.bindCapabilityGrants` 绑定。组合根不重复绑。
  */
 @Module
 @InstallIn(SingletonComponent::class)

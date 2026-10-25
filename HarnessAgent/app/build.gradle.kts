@@ -190,6 +190,23 @@ android {
         compose = true
         buildConfig = true
     }
+
+    testOptions {
+        unitTests {
+            // ★ 2026-10（关千锤 P1-2）：`ColdStartWiringTest` 从"扫源码字符串"改成
+            //   "真的把 `AkeApp.onCreate()` 跑一遍"。后者必然要碰 `Application` 的父类方法
+            //   与 `android.util.Log`（`AkeLog.install(AndroidLogSink)`），而单元测试用的是
+            //   桩 android.jar —— 默认实现是"抛 RuntimeException("Stub!")"。
+            //   打开这一项后，桩方法返回类型默认值（void → no-op），于是
+            //   `Application.onCreate()` / `Log.i()` 可以在 JVM 上被调用而不炸。
+            //
+            // ⚠ 代价要写清楚：它让**所有** :app 单测里的 Android 调用都变成静默 no-op
+            //   （比如误以为 `Context.getFilesDir()` 返回了目录，实际是 null）。
+            //   `:app` 的单测只该验证"组合根有没有接线"，不该验证 Android 行为 ——
+            //   真要验证后者就得上 Robolectric/仪器化，那是另一件事。
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {

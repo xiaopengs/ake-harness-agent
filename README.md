@@ -219,7 +219,7 @@ cd HarnessAgent
 **已完成并通过真机级编译验证**
 
 - **全部 12 个模块 `compileDebugKotlin` / `compileKotlin` 均 BUILD SUCCESSFUL**（含 Hilt KSP 与 Room KSP）
-- **`./gradlew test`：546 通过 / 0 失败**（立项时全工程仅 4 个单测；第 3 轮新增 160 例）
+- **`./gradlew test`：552 通过 / 0 失败**（立项时全工程仅 4 个单测；第 3 轮新增 166 例）
 - **`checkModuleDependencies`：OK** —— 12 个模块的依赖边均在白名单内，`:ui` 对 `:chat`/`:agent`/`:mcp`/`:data` 的 import 为 0
 - `:app` —— Dagger 依赖图贯通，MissingBinding 清零；`ChatRunnerPort`/`SkillRegistryPort`/`CapabilityGrantPort` 均已真绑定（生成代码里是 `Optional.of(...)` 而非 `Optional.empty()`）
 - 依赖红线已排除：`ktor-client-plugins-sse` 该坐标在任何版本都不存在（SSE 已收进 `ktor-client-core`），已从 catalog 移除
@@ -272,7 +272,7 @@ debug → release 缩减 **34.47MB（-36.2%）**。第 3 轮新增 `:chat` + 23 
 |---|---|
 | 从未产出过 APK | ✅ **已解除** —— debug 93.70MB + release 60.04MB |
 | AGP 与 R8 从未执行 | ✅ **已解除** —— `assembleRelease` 跑通，R8 真实执行 |
-| 七个模块零测试 | ✅ **已解除** —— 4 → **546 通过** |
+| 七个模块零测试 | ✅ **已解除** —— 4 → **552 通过** |
 | **从未在任何真机上运行过一次** | ❌ **仍然成立 —— 这是现在唯一充分的一条** |
 
 复审新识别的 P0：
@@ -294,7 +294,7 @@ debug → release 缩减 **34.47MB（-36.2%）**。第 3 轮新增 `:chat` + 23 
 
 合计约 **0%，宽口径 ≤5%**。放宽到相邻纯逻辑（如模型分发状态机）有 30–45%，但那不是风险本体。
 
-**546 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
+**552 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
 
 > **禁令**（验收文档已写死）：不得把 `assembleRelease` 成功表述为"release 验证通过"。
 > 它能证明：编译/KSP/资源与 manifest 合并跑通、R8 真执行、高危符号存活、`.so` 入双 ABI、可复现。

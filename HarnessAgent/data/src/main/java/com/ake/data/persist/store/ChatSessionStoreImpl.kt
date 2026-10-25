@@ -233,7 +233,31 @@ public class ChatSessionStoreImpl internal constructor(
         )
     }
 
-    override suspend fun sweepStreaming(): Int = runCatching { messages.sweepStreaming() }.getOrDefault(0)
+    /**
+     * 冷启收敛：遗留 `STREAMING` → `FAILED`（成因见 [ChatMessageDao.sweepStreaming] 的注释）。
+     *
+     * ## ★ 为什么这里要打一条带 `PROCESS_KILLED` 的 WARN
+     *
+     * `chat_message` 没有 `failure_reason` 列（理由见 DAO 侧注释），所以「这批 FAILED
+     * 是进程被杀留下的、不是模型出错」这条信息**不在库里的任何一列**。
+     * 它是排查「用户消息为什么没回」时唯一能区分两者的东西，不能连日志也不留：
+     *
+     *  - 库侧：`SELECT ... WHERE status = 'FAILED'` ⇒ 缺陷**能被发现**（本轮修复的目的）；
+     *  - 日志侧：`reason=PROCESS_KILLED` ⇒ 发现之后**能定性**（不是模型坏了）。
+     *
+     * 只在真的收敛了行时打（稳态下 sweep 恒为 0 行），冷启路径上没有噪音代价。
+     *
+     * 失败仍返回 0 而不是抛：冷启不该被一次 sweep 失败堵死 —— 但必须留痕，
+     * 否则「一条都没收敛」与「根本没执行」在调用方眼里完全一样。
+     */
+    override suspend fun sweepStreaming(): Int = runCatching { messages.sweepStreaming() }
+        .onSuccess { rows ->
+            if (rows > 0) {
+                AkeLog.w(TAG, "sweepStreaming: $rows 条遗留 STREAMING 收敛为 FAILED (reason=PROCESS_KILLED)")
+            }
+        }
+        .onFailure { AkeLog.w(TAG, "sweepStreaming failed: ${it.message}") }
+        .getOrDefault(0)
 
     /** ★ 焦点释放时的复水基准。**同步写**（§4.6 / §9-U11），失败要进 Outcome 让用户看见。 */
     override suspend fun recordFocusRelease(

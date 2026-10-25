@@ -6,12 +6,14 @@ import com.ake.data.persist.db.dao.CapabilityGrantDao
 import com.ake.data.persist.db.dao.ChatMessageDao
 import com.ake.data.persist.db.dao.ChatSessionDao
 import com.ake.data.persist.db.dao.MemoryDao
+import com.ake.data.persist.db.dao.SessionDao
 import com.ake.data.persist.db.dao.TemplateDao
 import com.ake.data.persist.db.entity.AgentCapabilityGrantEntity
 import com.ake.data.persist.db.entity.AgentProfileEntity
 import com.ake.data.persist.db.entity.ChatMessageEntity
 import com.ake.data.persist.db.entity.ChatSessionEntity
 import com.ake.data.persist.db.entity.MemoryCardEntity
+import com.ake.data.persist.db.entity.SessionEntity
 import com.ake.data.persist.db.entity.TemplateRegistryEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -258,7 +260,7 @@ internal class UnsupportedChatSessionDao : ChatSessionDao {
         throw UnsupportedOperationException("UnsupportedChatSessionDao.$name 未被本轮测试覆盖")
 }
 
-internal class UnsupportedChatMessageDao : ChatMessageDao {
+internal open class UnsupportedChatMessageDao : ChatMessageDao {
     override suspend fun insertIgnoringConflict(msg: ChatMessageEntity): Long = unsupported("insertIgnoringConflict")
     override suspend fun insert(msg: ChatMessageEntity): Long = unsupported("insert")
     override suspend fun writeSnapshot(
@@ -313,8 +315,33 @@ internal class UnsupportedChatMessageDao : ChatMessageDao {
     override suspend fun unbindTask(taskId: String): Int = unsupported("unbindTask")
     override suspend fun countOf(sessionId: String): Int = unsupported("countOf")
 
-    private fun unsupported(name: String): Nothing =
+    protected fun unsupported(name: String): Nothing =
         throw UnsupportedOperationException("UnsupportedChatMessageDao.$name 未被本轮测试覆盖")
+}
+
+/**
+ * `agent_session` 的「没有实现」版本。
+ *
+ * 它存在的唯一理由：`ChatSessionStoreImpl` 的构造要一个 `SessionDao`，
+ * 而绝大多数用例（sweep / 消息写入 / 会话读取）根本不碰它。
+ * **返回空值会伪造「这里已被覆盖」的假象**，所以一律抛（与上面同一条纪律）。
+ */
+internal class UnsupportedSessionDao : SessionDao {
+    override suspend fun upsert(session: SessionEntity): Unit = unsupported("upsert")
+    override fun recent(limit: Int): Flow<List<SessionEntity>> = unsupported("recent")
+    override suspend fun byId(id: String): SessionEntity? = unsupported("byId")
+    override fun observe(id: String): Flow<SessionEntity?> = unsupported("observe")
+    override suspend fun touch(id: String, updatedAt: Long, lastTaskId: String?, lastUrl: String?): Unit =
+        unsupported("touch")
+
+    override suspend fun setStatus(id: String, status: String, updatedAt: Long): Unit = unsupported("setStatus")
+    override suspend fun delete(id: String): Unit = unsupported("delete")
+    override suspend fun deleteArchivedBefore(before: Long): Int = unsupported("deleteArchivedBefore")
+    override suspend fun unbindChatSession(sessionId: String): Int = unsupported("unbindChatSession")
+    override suspend fun byChatSession(sessionId: String?): List<SessionEntity> = unsupported("byChatSession")
+
+    private fun unsupported(name: String): Nothing =
+        throw UnsupportedOperationException("UnsupportedSessionDao.$name 未被本轮测试覆盖")
 }
 
 internal class UnsupportedMemoryDao : MemoryDao {

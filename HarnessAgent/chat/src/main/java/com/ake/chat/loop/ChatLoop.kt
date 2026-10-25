@@ -213,6 +213,12 @@ public class ChatLoop(
 
         // ── ① 落用户消息（不可丢泳道）。失败 ⇒ 这一轮不能开始，且必须让用户看见。
         val now = clock.nowMillis()
+        // ★ P1-4：落库幂等键由**这一轮的身份**派生，不用 `req.clientRequestId`。
+        //   理由见 `userMessageKey`：调用方每次重试都会生成新的随机构，用它当键
+        //   等于没有键（UNIQUE 一次都不命中 ⇒ 会话里堆出 N 条一样的用户消息）。
+        val requestKey = userMessageKey(sid, req.turnId)
+        // 用 lambda 重载：默认级别是 INFO，这行根本不会输出，不该为它拼字符串。
+        AkeLog.d(TAG) { "turn start: session=$sid turn=${req.turnId} inbound=${req.clientRequestId} key=$requestKey" }
         val appended = store.append(
             AppendMessage(
                 id = Ulid.next(now),
@@ -221,14 +227,15 @@ public class ChatLoop(
                 role = MessageRole.USER,
                 kind = MessageKind.TEXT,
                 text = req.userText,
-                clientRequestId = req.clientRequestId,
+                clientRequestId = requestKey,
                 createdAt = now,
             ),
         )
         if (appended is Outcome.Err) {
             AkeLog.w(TAG, "user message append failed: ${appended.error.code}")
-            // ★ P0-3：落盘失败**不是**模型失败。借 MODEL_FAILED 会把用户送去换模型。
-            out.send(ChatEvent.Terminal(sid, null, STORE_FAILURE_REASON))
+            // ★ P1-1：这一处失败时**回答还没有开始生成**，所以不能报 STORE_FAILED
+            //   （那档的文案是「回答生成好了，但没存下来」——用户会去找一个不存在的回答）。
+            out.send(ChatEvent.Terminal(sid, null, REQUEST_STORE_FAILURE_REASON))
             return
         }
 
@@ -667,7 +674,9 @@ public class ChatLoop(
         val begun = store.beginAssistant(sid, req.turnId, messageId)
         if (begun is Outcome.Err) {
             AkeLog.w(TAG, "beginAssistant failed: ${begun.error.code}")
-            return TurnResult(null, STORE_FAILURE_REASON)
+            // ★ P1-1：占位行都建不出来 ⇒ 那句「回答生成好了」是纯粹的假话。
+            //   用户消息已经落库了（上一步），所以重发时幂等键会挡住重复的用户消息。
+            return TurnResult(null, REQUEST_STORE_FAILURE_REASON)
         }
 
         val prompt = assemble(
@@ -727,7 +736,9 @@ public class ChatLoop(
 
         if (committed is Outcome.Err) {
             AkeLog.w(TAG, "commitAssistant failed after retry: ${committed.error.code}")
-            // ★ P0-3：模型答完了、但没存下来 ⇒ STORE_FAILED，不是 MODEL_FAILED。
+            // ★ 只有走到这里才有资格说「回答生成好了，但没存下来」：
+            //   本轮模型确实答完了（`full` 里就是那段文本，delta 也已经在屏幕上流过了），
+            //   卡住的是提交。生成前那两处写库失败走 REQUEST_STORE_FAILURE_REASON（P1-1）。
             //   只在「本轮本来算成功」时改写终态：模型自己失败（MODEL_FAILED）或用户中止
             //   （USER_ABORT）的归因比存储失败更上游，抢走它会变成第二种误归因。
             return TurnResult(
@@ -985,7 +996,11 @@ public class ChatLoop(
      *   与 `:data` 的 `TaskStateWriter.init` 调 `TaskReconciler.sweep()` 同一手法）。
      *   在这之前它是 0 调用 —— 于是「进程被杀留下的 STREAMING 脏行永不收敛」
      *   这条后果一直成立，而方法本身看起来是好的。
-     *   `app/src/test/.../ColdStartWiringTest` 会用源码扫描守住这条线。
+     *   `app/src/test/.../ColdStartWiringTest` 用**行为断言**守住这条线
+     *   （2026-10 二次修正，关千锤 P1-2）：上一版那个测试只扫源码里的字符串，
+     *   调用点被注释掉之后仍然全绿 —— 它挡不住任何东西。现在它真的构造
+     *   `ColdStartCoordinator`（不调任何方法），断言 `chat` / `db` 两个 `Lazy`
+     *   各被解引用一次：这行若被摘掉，`chat` 那个依赖 0 次，测试红。
      */
     public suspend fun onColdStart(): Int = store.sweepStreaming()
 
@@ -1045,10 +1060,58 @@ public class ChatLoop(
          * 代价却由用户承担 —— 落盘失败被显示成「模型出错了」，而 UI 那一档 `retryable = true`，
          * 于是用户会去换模型、清缓存，全都对着空气使劲。
          *
-         * 现在枚举有这一档了（见 `core:ports/Chat.kt`），本模块**所有**落盘失败路径
-         * （`append(USER)` / `beginAssistant` / 重试后的 `commitAssistant`）都必须汇到这一个常量，
-         * 不允许任何一处再写 `MODEL_FAILED`：归因错误的终态比没有终态更糟。
+         * ★ 2026-10 二次修正（关千锤 P1-1）：本常量现在**只管 `commitAssistant`**
+         *   （= 模型答完了、产物在内存里、提交失败）。生成前那两处写库失败
+         *   （`append(USER)` / `beginAssistant`）改用 [REQUEST_STORE_FAILURE_REASON] ——
+         *   它们发生时**回答还没有开始生成**，套用本档的「回答生成好了，但没存下来」
+         *   是在说假话。两档的分界写在 `ChatTerminalReason` 的注释里，不在这个文件里。
          */
         public val STORE_FAILURE_REASON: ChatTerminalReason = ChatTerminalReason.STORE_FAILED
+
+        /**
+         * ★ 生成**之前**的写库失败 ⇒ [ChatTerminalReason.REQUEST_STORE_FAILED]。
+         *
+         * 覆盖两个调用点：落 USER 消息、建助手占位行。这两处失败时一个 token 都没产生，
+         * 所以 UI 只能说「这句话没能存下来，本轮没有开始」，不能说「回答没存下来」。
+         *
+         * ⚠ 与 [STORE_FAILURE_REASON] 的区别是**阶段**，不是严重程度：两处都要让用户看见，
+         * 两处都 `retryable = true`，但指向的动作不同（重发 vs 补写失败后的重发）。
+         */
+        public val REQUEST_STORE_FAILURE_REASON: ChatTerminalReason =
+            ChatTerminalReason.REQUEST_STORE_FAILED
+
+        /**
+         * ★★ 用户消息的落库幂等键：**由这一轮的身份派生**（关千锤 P1-4）。
+         *
+         * ```
+         *   key = "user:<sessionId>:<turnId>"
+         * ```
+         *
+         * ## 为什么不用 `ChatTurnRequest.clientRequestId`
+         *
+         * 那个字段是**入站请求**的标识，由调用方每次发起时生成（`:ui` 用
+         * `UUID.randomUUID()`）。而重试恰恰是"再发起一次"⇒ 每次都是新随机值
+         * ⇒ `UNIQUE(client_request_id)` 一次都不会命中 ⇒ 用户点三次重试，
+         * 会话里出现 4 条一模一样的用户消息。契约里"幂等键"的注释
+         * 与实现方向相反，这个键就是把它掰回来的地方。
+         *
+         * ## 为什么 (sessionId, turnId) 是正确的那对
+         *
+         * `turnId` 是**轮次分组键**，契约要求「重试时复用」（§9-U4），
+         * 而「用户真的又发了一遍」在新的一轮里必然是新的 `turnId`。于是：
+         *
+         * | 场景 | turnId | 键 | 结果 |
+         * |---|---|---|---|
+         * | 重试同一轮 | 复用 | 相同 | `INSERT OR IGNORE` 命中 ⇒ 不落第二条 |
+         * | 用户又发一遍 | 新建 | 不同 | 正常落一条（哪怕文字一模一样） |
+         *
+         * 也就是说：**重试与"再说一遍"的分界线是 turnId，不是文本是否相同** ——
+         * 拿文本去重会把"用户真的重复说了一句话"吃掉，那是另一种数据丢失。
+         *
+         * 带上 `sessionId` 是因为 `client_request_id` 的 UNIQUE 索引是**全表**的
+         * （`idx_chat_msg_request`），两个会话里同名的 turnId 不该互相压制。
+         */
+        public fun userMessageKey(sessionId: String, turnId: String): String =
+            "user:$sessionId:$turnId"
     }
 }

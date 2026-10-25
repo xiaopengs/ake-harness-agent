@@ -31,6 +31,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.ake.core.ports.ChatTerminalReason
+import com.ake.core.ports.MessageStatus
 import com.ake.ui.R
 import com.ake.ui.components.AgentAvatar
 import com.ake.ui.components.AlertBar
@@ -103,9 +104,13 @@ public fun ChatScreen(
         }
 
         // 上一轮的终态：只对"没说完"的轮次给结论，`COMPLETED` 不打扰
+        //
+        // ★ 例外：`stuck` 非空时这段话已经贴在气泡脚注里了（那里离"没说完的那条消息"
+        //   更近，还带着重试按钮）。横幅再来一遍，屏幕上就出现两段一字不差的长文案 ——
+        //   重复的告警会被读成"两个不同的问题"，用户反而不知道该看哪一处。
         ui.terminal?.let { reason ->
             val copy = chatTerminalCopyOf(reason)
-            if (reason != ChatTerminalReason.COMPLETED) {
+            if (reason != ChatTerminalReason.COMPLETED && ui.stuck.isEmpty()) {
                 BannerSlot {
                     AlertBar(
                         text = stringResource(copy.titleRes) + " · " + stringResource(copy.nextRes),
@@ -129,13 +134,20 @@ public fun ChatScreen(
             // 倒着喂：index 0 = 最新一条 = 贴在输入框上方
             items(items = ui.messages.asReversed(), key = { it.id }) { msg ->
                 val live = ui.isLive(msg.id)
+                // ★ 写路径坏掉时库里那行永远是 STREAMING（直到冷启 sweep）。
+                //   这一层覆盖让用户立刻看到"答完了但没存下来 + 重试"，而不是一直转圈。
+                val stuck = ui.stuck[msg.id]
                 MessageBubble(
                     message = msg,
                     agentName = agentName,
                     streaming = live,
-                    liveText = if (live) ui.liveText else null,
+                    // liveText 是"正在生成"的那一段；stuck.text 是失败时冻住的那一段 ——
+                    // 两者都代表"这话在库里查不到，但它确实说过"，所以走同一个渲染位。
+                    liveText = if (live) ui.liveText else stuck?.text,
+                    statusOverride = stuck?.let { MessageStatus.FAILED },
                     // 失败现场只贴给同一轮的消息，避免历史里的旧失败也挂上新一轮的原因
-                    failure = ui.failure?.takeIf { it.turnId == msg.turnId || it.turnId == null },
+                    failure = stuck?.failure
+                        ?: ui.failure?.takeIf { it.turnId == msg.turnId || it.turnId == null },
                     skillCard = ui.skillCardOf(msg),
                     onOpenTask = onOpenTask,
                     onRetry = viewModel::retry,

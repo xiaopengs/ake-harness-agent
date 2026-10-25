@@ -1,109 +1,174 @@
 package com.ake.app.startup
 
+import com.ake.app.AkeApp
+import com.ake.chat.ports.ChatServices
+import com.ake.core.common.Clock
+import com.ake.data.persist.db.AkeDatabase
+import com.ake.data.persist.redact.PersistenceRedactionGate
 import com.google.common.truth.Truth.assertThat
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
+import dagger.Lazy
+import javax.inject.Provider
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Test
 
 /**
- * # 「调用点存在」的守卫（关千锤 P0-2 点名要的那条测试）
+ * # 冷启接线的**行为**守卫（关千锤 P1-2：上一版是纸做的）
  *
- * ## 为什么要写这种看起来很丑的测试
+ * ## 上一版为什么是假的
  *
- * 上一轮的缺陷不是「实现错了」，而是「实现的**生产调用点为 0**」：
- * `TemplateBootstrap.bootstrap()` 与 `ChatLoop.onColdStart()` 各自有完整实现、
- * 各自有单测，全都过。可它们一次都没被跑过 —— 于是模板市场永久空白、
- * 存量人格永久「只回文字」、`STREAMING` 消息永久转圈。
+ * 它读 `ColdStartCoordinator.kt` / `AkeApp.kt` 的源码文本，断言其中出现了
+ * `"coldStart.get()"`、`"TemplateBootstrap.bootstrap("` 这些字符串。
+ * 关千锤的负向验证一次击杀：**把 `coldStart.get()` 整行注释掉，4 条测试全绿** ——
+ * 因为注释里的字符串还在。注释/条件化/挪进 `if (false)` 都拦不住，
+ * 而它唯一的价值就是"下次重构把线剪了要红"。
  *
- * 这类缺陷**任何单元测试都抓不到**：单测按定义会自己调那个方法。
- * 能抓住它的只有两种手段 —— 「谁调它」的类型约束，或者「源码里到底有没有这一行」的扫描。
- * 前者在这个仓库里做不到（`:app` 是唯一的组合根，它调什么天然是自由的），
- * 所以只剩后者。它丑，但它是唯一能防止**下一次重构又把线剪了**的办法。
+ * ## 现在断的是行为
  *
- * ## 断的是什么
- *
- * | 断言 | 防止的事故 |
+ * | 测试 | 断言的是运行结果，不是文本 |
  * |---|---|
- * | `ColdStartCoordinator` 里出现 `TemplateBootstrap.bootstrap(` | 模板 / 授权回填被摘掉（市场空白 + 存量人格哑） |
- * | 同一文件里出现 `.onColdStart()` | `STREAMING` 收敛被摘掉（气泡永久转圈） |
- * | 该文件里有 `init {` 与 `launch {` | 退化成「需要别人记得调」的函数（那就又回到 0 调用点） |
- * | `AkeApp.kt` 里有 `coldStart.get()` | 单例从不被实例化 ⇒ `init` 自触发也不发生（接线被剪） |
+ * | [applicationOnCreateActuallyResolvesTheCoordinator] | `AkeApp.onCreate()` 真的调了 `coldStart.get()`：注入一个记账 `Provider`，看它被 `get()` 了**几次**。整行注释掉 ⇒ 0 次 ⇒ 红 |
+ * | [constructingTheCoordinatorAloneRunsBothHooks] | 只 `new` 一个 `ColdStartCoordinator`、**不调任何方法**，然后 `awaitReady()`：两个 `Lazy` 依赖各自被解引用一次 ⇒ 证明 `init` 自触发且两条 hook 都在那条路径上。删掉 `TemplateBootstrap.bootstrap` 或 `loop.onColdStart()` 任一条 ⇒ 对应 `Lazy` 0 次 ⇒ 红；删掉 `init { scope.launch }` ⇒ `awaitReady()` 超时 ⇒ 红 |
  *
- * 扫描范围**只有 `:app` 的主源码**：这是「组合根」的定义域，业务实现不该在这里出现，
- * 所以这里出现 `TemplateBootstrap.` 就一定是接线而不是重复实现。
+ * ## 为什么要靠反射塞 `Provider`
+ *
+ * `AkeApp` 的成员是 `@Inject lateinit var`，只有 Hilt 的生成代码会填它。
+ * 单测里没有 Hilt，于是手工塞一个**记账**的 `Provider`：
+ * 这恰好是"`onCreate` 有没有解引用它"最直接的观测面。
+ * 比起起一个 Robolectric + `@HiltAndroidTest`，这不需要往构建里加任何新依赖，
+ * 也不会因为 Hilt 版本升级而腐化。
+ *
+ * ## 为什么第二个测试直接构造真实 `ColdStartCoordinator`
+ *
+ * 没有用 fake 顶替它 —— 那会把这个测试变成"测 fake"。真实构造 + 两个
+ * **会记账的** `Lazy`：只要 `run()` 里那两行被删，「解引用」就不会发生。
+ * `Lazy` 被解引用后立刻抛异常，是为了让 `run()` 走完上半段（`runCatching` 会吞掉），
+ * 不必真的连上 Room —— 这一步断的是**接线**，不是 `TemplateBootstrap` 的写库行为
+ * （那有 `:data` 自己的单测）。
  */
 class ColdStartWiringTest {
 
     @Test
-    fun coordinatorCallsBothColdStartHooks() {
-        val source = read(appMainSource().resolve("com/ake/app/startup/ColdStartCoordinator.kt"))
+    fun applicationOnCreateActuallyResolvesTheCoordinator() {
+        val app = AkeApp()
 
-        assertThat(source).contains("TemplateBootstrap.bootstrap(")
-        assertThat(source).contains(".onColdStart()")
+        // ★ 为什么要调用两次 onCreate（这不是笔误）
+        //
+        // `@HiltAndroidApp` 的生成基类 `Hilt_AkeApp.onCreate()` 第一件事就是
+        // `hiltInternalInject()`：它建 Dagger 组件，并把**真实**的
+        // `Provider<ColdStartCoordinator>` 写进 `coldStart` 字段 —— 也就是说，
+        // 只有在注入发生过之后，我们塞进去的记账 Provider 才不会被覆盖。
+        // Hilt 用 `injected` 布尔保证注入只做一次，所以：
+        //
+        //   第 1 次 onCreate  → 完成注入（顺带用真实 provider 建了真 coordinator）
+        //   塞入记账 Provider
+        //   第 2 次 onCreate  → 注入被跳过 ⇒ 被测的就是 `coldStart.get()` 那一行
+        //
+        // 另一种写法（不调 onCreate、直接反射 `hiltInternalInject()`）能少建一次图，
+        // 但那就把测试钉在 Hilt 的**私有方法名**上了；调两次 onCreate 只依赖公开契约。
+        app.onCreate()
+
+        val recording = RecordingProvider { inertCoordinator() }
+        app.injectProvider("coldStart", recording)
+
+        app.onCreate()
+
+        // 1 次 = 接线在；0 次 = 那行被注释/删掉了（上一版源码扫描的漏洞正是这个）。
+        assertThat(recording.gets).isEqualTo(1)
     }
 
     @Test
-    fun coordinatorSelfTriggersInsteadOfWaitingToBeCalled() {
-        val source = read(appMainSource().resolve("com/ake/app/startup/ColdStartCoordinator.kt"))
+    fun constructingTheCoordinatorAloneRunsBothHooks() = runBlocking {
+        val db = RecordingLazy<AkeDatabase>()
+        val chat = RecordingLazy<ChatServices>()
+        val gate = RecordingLazy<PersistenceRedactionGate>()
 
-        // 「自触发」= 构造函数一返回，工作就已经被 launch 出去了。
-        // 少了这一条，本类就只是一个普通函数集合 ⇒ 又变成「等人来调」⇒ 迟早又变成 0 调用点。
-        assertThat(source).contains("init {")
-        assertThat(source).contains("launch {")
-    }
-
-    @Test
-    fun applicationActuallyInstantiatesTheCoordinator() {
-        val app = read(appMainSource().resolve("com/ake/app/AkeApp.kt"))
-
-        // 单例的 init 自触发只有在**它被创建**时才发生。少了这一行，
-        // ColdStartCoordinator 写得再对也永远不会被 Hilt 构造成实例。
-        assertThat(app).contains("ColdStartCoordinator")
-        assertThat(app).contains("coldStart.get()")
-    }
-
-    /**
-     * 卡住「只写模板、不回填授权」这个真实发生过的半修。
-     *
-     * `bootstrap()` 与 `ensureBuiltins()` 的差别就是授权回填；如果有人把它换回
-     * `ensureBuiltins()`（签名相近、看起来更"轻"），模板市场会好，而存量人格仍然哑 ——
-     * 那是本轮最难被发现的一种「修了一半」。
-     */
-    @Test
-    fun bootstrapIsTheFullEntryNotTheTemplateOnlyOne() {
-        val source = read(appMainSource().resolve("com/ake/app/startup/ColdStartCoordinator.kt"))
-
-        assertThat(source).contains("capabilityGrantDao")
-        assertThat(source).doesNotContain("TemplateBootstrap.ensureBuiltins(")
-    }
-
-    // ─────────────────────────────────────── 源码定位
-
-    /**
-     * 定位 `:app` 的 `src/main/java`。
-     *
-     * 单测的工作目录依构建器不同可能是模块目录（AGP 的默认）或根目录，
-     * 所以这里按候选顺序找，**找不到就大声失败** —— 静默跳过等于把守卫悄悄关掉，
-     * 那正是本文件要防的那种事故。
-     */
-    private fun appMainSource(): Path {
-        val candidates = listOf(
-            "src/main/java",
-            "app/src/main/java",
-            "../app/src/main/java",
+        // ★ 只有构造。没有任何人调 run()/bootstrap()/onColdStart()。
+        val coordinator = ColdStartCoordinator(
+            scope = CoroutineScope(Job() + Dispatchers.Default),
+            chat = chat,
+            db = db,
+            gate = gate,
+            clock = FixedClock,
         )
-        return candidates.asSequence()
-            .map { Paths.get(it) }
-            .firstOrNull { Files.isDirectory(it.resolve("com/ake/app")) }
-            ?: throw AssertionError(
-                "找不到 :app 的主源码目录（试过 $candidates，cwd=${Paths.get("").toAbsolutePath()}）。" +
-                    "本测试靠源码扫描守住冷启接线，扫不到就等于没守。",
-            )
+
+        // 自触发是"构造完就已经在跑"：没有它这里会一直等 ⇒ 超时 ⇒ 红。
+        val report = withTimeout(5_000) { coordinator.awaitReady() }
+
+        // ① 模板 / 授权回填那条：先要拿到 AkeDatabase
+        assertThat(db.accesses).isEqualTo(1)
+        // ② STREAMING 收敛那条：先要拿到 ChatServices（再取 .loop.onColdStart()）
+        assertThat(chat.accesses).isEqualTo(1)
+        // 两条都因为"解引用即抛"而记进 failures —— 顺带证明它们**各自独立**，
+        // 一条炸了不会把另一条跳过（这是冷启兜底的硬要求）。
+        assertThat(report.failures).hasSize(2)
     }
 
-    private fun read(path: Path): String {
-        if (!Files.exists(path)) throw AssertionError("接线文件不见了：$path")
-        return path.toFile().readText()
+    // ─────────────────────────────────────── 测试替身
+
+    /**
+     * 会记账的 `Provider`：`get()` 调了几次就是几。
+     *
+     * 返回的对象刻意是"哑"的：本测试只关心 `AkeApp` 有没有解引用它，
+     * 不关心 coordinator 干了什么（由第二个测试负责）。
+     */
+    private class RecordingProvider<T : Any>(private val value: () -> T) : Provider<T> {
+        var gets: Int = 0
+            private set
+
+        override fun get(): T {
+            gets++
+            return value()
+        }
+    }
+
+    /**
+     * 会记账的 `dagger.Lazy`：解引用即抛。
+     *
+     * ★ 注意这里实现的是 `dagger.Lazy`（`get()`），**不是** `kotlin.Lazy`（`value`）——
+     * `ColdStartCoordinator` 的构造参数就是 Dagger 的那个（它要跟 Hilt 的注入方式一致）。
+     * 两者同名不同物，写错时的报错是「`value` overrides nothing」。
+     *
+     * 抛异常是刻意的 —— 一旦让它返回真对象，这个测试就得连 Room / 整个 `:chat` 依赖树，
+     * 而它要断的只是"这两行代码还在不在 init 触发的那条路径上"。
+     * `ColdStartCoordinator` 内部对两个依赖都用了 `runCatching`，所以抛出会被记成
+     * `failures` 而不是让协程炸掉。
+     */
+    private class RecordingLazy<T> : Lazy<T> {
+        var accesses: Int = 0
+            private set
+
+        override fun get(): T {
+            accesses++
+            throw IllegalStateException("this test only asserts the wiring, not the DB access")
+        }
+    }
+
+    private object FixedClock : Clock {
+        override fun nowMillis(): Long = 1_000L
+    }
+
+    /**
+     * 一个**构造即用**的 coordinator，给"`AkeApp` 有没有解引用"那条测试用。
+     *
+     * 它的 `scope` 用一个永不执行的 dispatcher：本测试不关心它跑不跑，只关心它被不被创建。
+     * 这里用 `Job()` 单独一棵协程树，避免泄漏到测试进程里。
+     */
+    private fun inertCoordinator(): ColdStartCoordinator = ColdStartCoordinator(
+        scope = CoroutineScope(Job() + Dispatchers.Unconfined),
+        chat = RecordingLazy(),
+        db = RecordingLazy(),
+        gate = RecordingLazy(),
+        clock = FixedClock,
+    )
+
+    /** 反射塞 Hilt 注入点。字段名在字节码里不会被 mangle，所以按名字取是稳的。 */
+    private fun AkeApp.injectProvider(field: String, provider: Provider<*>) {
+        val f = AkeApp::class.java.getDeclaredField(field)
+        f.isAccessible = true
+        f.set(this, provider)
     }
 }

@@ -21,12 +21,17 @@ import com.ake.chat.fixtures.RecordingPolicy
 import com.ake.chat.skill.BrowserTaskSkill
 import com.ake.chat.skill.ChatSkillRegistry
 import com.ake.core.common.Clock
+import com.ake.core.common.Outcome
 import com.ake.core.common.RedactionGate
 import com.ake.core.ports.CapabilityRef
 import com.ake.core.ports.ChatEvent
 import com.ake.core.ports.ChatTerminalReason
 import com.ake.core.ports.ChatTurnRequest
+import com.ake.core.ports.FocusHolder
 import com.ake.core.ports.FocusKind
+import com.ake.core.ports.FocusLease
+import com.ake.core.ports.FocusPriority
+import com.ake.core.ports.InferenceFocus
 import com.ake.core.ports.InferenceTarget
 import com.ake.core.ports.MessageStatus
 import com.ake.core.ports.NoAbortSignal
@@ -66,6 +71,8 @@ class ChatLoopTest {
         answer: String = "好的，我在本地帮你查过了。",
         gate: FakeHumanGate = humanGate,
         routing: RoutingPort = LocalOnlyRoutingPort(clock),
+        /** 外部持有的仲裁器：`releaseFocus` 的回归测试要求从外面观察租约状态。 */
+        focus: InferenceFocus = InferenceFocusArbiter(clock),
     ): ChatLoop {
         val model = FakeModelPort(routerScript, answer)
         val isolator = InjectionIsolator(policy)
@@ -76,7 +83,7 @@ class ChatLoopTest {
         )
         return ChatLoop(
             model = model,
-            focus = InferenceFocusArbiter(clock),
+            focus = focus,
             store = store,
             profiles = FakeProfileStore(),
             skills = skills,
@@ -249,7 +256,8 @@ class ChatLoopTest {
 
         // 落盘失败必须让用户看见（§4.4 不可丢泳道），且不能开始生成
         assertThat(events).hasSize(1)
-        assertThat((events.single() as ChatEvent.Terminal).reason).isEqualTo(ChatLoop.STORE_FAILURE_REASON)
+        assertThat((events.single() as ChatEvent.Terminal).reason)
+            .isEqualTo(ChatLoop.REQUEST_STORE_FAILURE_REASON)
     }
 
     @Test
@@ -345,7 +353,7 @@ class ChatLoopTest {
         val loop = buildLoop()
         store.appendFails = true
         assertThat(loop.turn(request("turn-1")).toList().terminalReason())
-            .isEqualTo(ChatTerminalReason.STORE_FAILED)
+            .isEqualTo(ChatTerminalReason.REQUEST_STORE_FAILED)
 
         store.appendFails = false
         // 关千锤的原话是「写库失败一次 ⇒ 该会话永久发不出消息」。这一行就是那句话的反面。
@@ -393,7 +401,7 @@ class ChatLoopTest {
         repeat(5) { i ->
             store.appendFails = true
             assertThat(loop.turn(request("t-bad-$i")).toList().terminalReason())
-                .isEqualTo(ChatTerminalReason.STORE_FAILED)
+                .isEqualTo(ChatTerminalReason.REQUEST_STORE_FAILED)
         }
         store.appendFails = false
         assertThat(loop.turn(request("t-good", "终于可以发了")).toList().terminalReason())
@@ -401,50 +409,53 @@ class ChatLoopTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // P0-3：落盘失败必须归因到 STORE_FAILED，而不是 MODEL_FAILED
+    // P0-3 + P1-1：落盘失败的**归因**必须与真实发生的事一致
+    //
+    // 这一组的分界线不是"严重程度"，而是**回答有没有生成过**：
+    //   生成前写库失败 ⇒ REQUEST_STORE_FAILED（用户看到"这句话没存下来，本轮没开始"）
+    //   生成后提交失败 ⇒ STORE_FAILED         （用户看到"回答生成好了，但没存下来"）
     // ══════════════════════════════════════════════════════════════════════════
 
     @Test
-    fun storeFailureIsStoreFailedNotModelFailed() = runBlocking {
-        val loop = buildLoop()
-        store.appendFails = true
-        val terminal = loop.turn(request()).toList().terminalReason()
-
-        assertThat(terminal).isEqualTo(ChatTerminalReason.STORE_FAILED)
-        // 这一条是本测试的重点：借 MODEL_FAILED 会让 UI 显示「模型出错了」，
-        // 而用户照着那条建议去换模型 / 清缓存，一次都不会有用。
-        assertThat(terminal).isNotEqualTo(ChatTerminalReason.MODEL_FAILED)
-    }
-
-    @Test
-    fun beginAssistantFailureIsAlsoStoreFailedAndSkipsGeneration() = runBlocking {
-        val loop = buildLoop()
-        store.beginFails = true
-        val events = loop.turn(request()).toList()
-
-        assertThat(events.terminalReason()).isEqualTo(ChatTerminalReason.STORE_FAILED)
-        // 占位行都建不出来 ⇒ 一个 delta 都不该发（否则 UI 会渲染一条永远收不了尾的气泡）
-        assertThat(events.filterIsInstance<ChatEvent.AssistantDelta>()).isEmpty()
-    }
-
-    @Test
-    fun commitFailureIsRetriedOnceThenReportedAsStoreFailed() = runBlocking {
+    fun commitFailureIsAnsweredButNotStored() = runBlocking {
         val loop = buildLoop()
         store.commitFails = true
         val events = loop.turn(request()).toList()
 
         // ① 同一轮内重试过一次「落盘」（不是重新生成）
         assertThat(store.commitAttempts).isEqualTo(2)
-        // ② 模型那边的生成只跑了一次（重试的是 commit，不是整轮）
+        // ② ★ 回答**真的生成过**：屏幕上流过 delta。这是"答完了没存下来"这句话成立的前提。
         assertThat(events.filterIsInstance<ChatEvent.AssistantDelta>()).isNotEmpty()
         // ③ 终态归因到存储
         assertThat(events.terminalReason()).isEqualTo(ChatTerminalReason.STORE_FAILED)
     }
 
     /**
+     * ★ P1-1 的核心断言：**生成前**的写库失败不能报「回答生成好了，但没存下来」。
+     *
+     * 上一版把 `append` / `beginAssistant` 的失败也汇到了 `STORE_FAILED`，
+     * 而 UI 那一档的文案是「回答生成好了，但没存下来」+「模型已经答完了」。
+     * 用户读到这句话的合理推论是"模型答了，只是我看不到" —— 而真相是**一个 token 都没产生**。
+     *
+     * 所以这里同时断三件事：终态是 `REQUEST_STORE_FAILED`、不是 `STORE_FAILED`、
+     * 且**一个 delta 都没有**（用它证明"没有回答"这个事实，而不是靠注释声明）。
+     */
+    @Test
+    fun storeFailureBeforeGenerationMustNotClaimAnAnswerExists() = runBlocking {
+        val loop = buildLoop()
+        store.beginFails = true
+        val events = loop.turn(request()).toList()
+
+        assertThat(events.terminalReason()).isEqualTo(ChatTerminalReason.REQUEST_STORE_FAILED)
+        assertThat(events.terminalReason()).isNotEqualTo(ChatTerminalReason.STORE_FAILED)
+        // 没有回答 ⇒ 不许出现任何 assistant 内容（否则那句话就不是"归因错"，而是"前后矛盾"）
+        assertThat(events.filterIsInstance<ChatEvent.AssistantDelta>()).isEmpty()
+    }
+
+    /**
      * 反向断言：**模型**失败仍然是 `MODEL_FAILED`。
      *
-     * 没有这一条，把落盘失败改归 `STORE_FAILED` 这件事很容易被"顺手"做成
+     * 没有这一条，把落盘失败改归存储这件事很容易被"顺手"做成
      * 「凡是 Err 都是 STORE_FAILED」—— 那是同一个错误的反方向，只是换了一批用户被误导。
      */
     @Test
@@ -460,17 +471,92 @@ class ChatLoopTest {
             .isEqualTo(ChatTerminalReason.MODEL_FAILED)
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // P1-3：`openSession` 失败必须放掉租约（否则派生任务一次都起不来）
+    //
+    // 关千锤的负向验证：删掉 `releaseFocus(lease)` ⇒ 115 例全绿 ⇒ 这个修复**零覆盖**。
+    // 它的故障表现极难排查（聊天侧看起来一切正常，只有任务永远拿不到焦点），
+    // 所以这里断的不是"日志好看"，而是**下一个 DERIVED_TASK 能不能拿到租约**。
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun conversationOpenFailureReleasesTheLeaseSoDerivedTasksStillRun() = runBlocking {
+        val focus = InferenceFocusArbiter(clock)
+        val model = FakeModelPort().apply { failOpenSession = true }
+        val loop = buildLoopWith(model, focus = focus)
+
+        // 这一轮注定失败：建不起 Conversation ⇒ MODEL_NOT_LOADED
+        assertThat(loop.turn(request("turn-1")).toList().terminalReason())
+            .isEqualTo(ChatTerminalReason.MODEL_NOT_LOADED)
+        assertThat(model.opened).isEqualTo(1)
+
+        // ① 仲裁器里不许留着一个已经没有持有者的 `Chat(sid)`
+        assertThat(focus.current()).isNull()
+
+        // ② 这才是后果断言：派生任务必须能拿到焦点。
+        //    没 release 的话这里是 Err(FOCUS_BUSY) —— 表现为「任务一次都起不来」。
+        val lease = focus.acquire(FocusHolder.Task("task-1", null), FocusPriority.DERIVED_TASK)
+        assertThat(lease).isInstanceOf(Outcome.Ok::class.java)
+        @Suppress("UNCHECKED_CAST")
+        (lease as Outcome.Ok<FocusLease>).value.close()
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // P1-4：重试不能重复落 USER 消息
+    //
+    // 幂等键由 `(sessionId, turnId)` 派生（`ChatLoop.userMessageKey`）。
+    // 断言的落点是「库里到底有几条 USER 行」—— 不是"键长得对不对"，
+    // 因为键长得再对，只要重试时换了键，`UNIQUE` 就形同虚设（这正是原始缺陷）。
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun retryingTheSameTurnDoesNotDuplicateTheUserMessage() = runBlocking {
+        val loop = buildLoop()
+
+        // 同一轮重试三次。★ 注意：每次的 `clientRequestId` 都不同 ——
+        // 这正是 `:ui` 的真实行为（`UUID.randomUUID()` 每次新建），也是原缺陷的成因。
+        val attempts = listOf("inbound-a", "inbound-b", "inbound-c").map { inbound ->
+            loop.turn(request("turn-1").copy(clientRequestId = inbound)).toList()
+        }
+
+        // ① 每一次都是正常完成的一轮（重试没有被幂等挡掉）
+        attempts.forEach { assertThat(it.terminalReason()).isEqualTo(ChatTerminalReason.COMPLETED) }
+        // ② 而库里只有**一条**用户消息
+        assertThat(store.stored.count { it.role.name == "USER" }).isEqualTo(1)
+        // ③ 三次用的是同一个派生键（幂等成立的原因）
+        assertThat(store.requestKeys.toSet()).hasSize(1)
+        assertThat(store.requestKeys.first()).isEqualTo(ChatLoop.userMessageKey("sess-1", "turn-1"))
+    }
+
+    /**
+     * 反面：**用户真的又发了一遍**必须落一条新的。
+     *
+     * 与上一条一起构成完整的判据 —— 只有"重试不重复"而没有"新消息不被吃掉"，
+     * 那就变成了另一种数据丢失（用户说两遍一样的话，第二遍消失）。
+     */
+    @Test
+    fun sayingTheSameThingAgainInANewTurnIsStillStored() = runBlocking {
+        val loop = buildLoop()
+
+        loop.turn(request("turn-1", "帮我看看今天有什么安排")).toList()
+        loop.turn(request("turn-2", "帮我看看今天有什么安排")).toList()
+
+        assertThat(store.stored.count { it.role.name == "USER" }).isEqualTo(2)
+        assertThat(store.requestKeys.toSet()).hasSize(2)
+    }
+
     // ── 便捷构造（保持与 buildLoop 同一套依赖，只是把 model 暴露出来断言 opened 次数）
 
     private fun buildLoopWith(
         model: FakeModelPort,
         profileStore: FakeProfileStore = FakeProfileStore(),
+        focus: InferenceFocus = InferenceFocusArbiter(clock),
     ): ChatLoop {
         val isolator = InjectionIsolator(policy)
         val collector = ChatHistoryCollector { model.estimateTokens(it) }
         return ChatLoop(
             model = model,
-            focus = InferenceFocusArbiter(clock),
+            focus = focus,
             store = store,
             profiles = profileStore,
             skills = ChatSkillRegistry(listOf(BrowserTaskSkill(taskRunner, clock)), grants),

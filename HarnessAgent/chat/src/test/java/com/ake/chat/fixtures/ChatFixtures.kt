@@ -99,6 +99,9 @@ class FakeModelPort(
      */
     var throwOnGenerate: Boolean = false
 
+    /** 置上之后 `openSession()` 返回 `Err`（模拟模型没装好 / native 拒绝建会话）。 */
+    var failOpenSession: Boolean = false
+
     override suspend fun load(config: ModelLoadConfig): Outcome<Unit> = Outcome.Ok(Unit)
     override suspend fun unload(): Outcome<Unit> = Outcome.Ok(Unit)
     override val runtimeState: Flow<ModelRuntimeState> = flowOf(ModelRuntimeState.Unloaded)
@@ -106,6 +109,7 @@ class FakeModelPort(
     override suspend fun openSession(spec: SessionSpec): Outcome<ModelSession> {
         opened++
         lastSpec = spec
+        if (failOpenSession) return Outcome.Err(AppError.invalidInput("fake_open_session_failed"))
         return Outcome.Ok(
             FakeModelSession(routerScript, answerText, gate) { throwOnGenerate }.also { lastSession = it },
         )
@@ -190,6 +194,20 @@ class FakeChatStore(
 
     var compactionMarks: MutableList<Pair<String, Int>> = mutableListOf()
 
+    /**
+     * 每条 USER 消息带进来的幂等键（按到达顺序）。断言"重试复用同一个键"的观测面。
+     */
+    val requestKeys: MutableList<String?> = mutableListOf()
+
+    /**
+     * 模拟 `chat_message` 表上 `UNIQUE(client_request_id)` + `INSERT OR IGNORE`。
+     *
+     * ★ 这一行不是"过度建模"，而是让「重试会不会重复落一条用户消息」这个断言**有牙齿**：
+     *   没有它，不管 `:chat` 传什么键，假件都会老老实实落一条，测试永远绿 ——
+     *   那和线上 `UNIQUE` 形同虚设的样子一模一样（关千锤 P1-4 的原始现象）。
+     */
+    private val seenKeys: MutableSet<String> = mutableSetOf()
+
     private var seq: Int = 0
 
     override fun sessions(agentId: String?, includeArchived: Boolean): Flow<List<ChatSessionSummary>> =
@@ -226,6 +244,10 @@ class FakeChatStore(
 
     override suspend fun append(msg: AppendMessage): Outcome<Unit> {
         if (appendFails) return Outcome.Err(AppError.invalidInput("append_failed"))
+        requestKeys += msg.clientRequestId
+        // ★ 幂等：同一个键第二次到达 ⇒ 0 行受影响，不落第二条（真实实现见 `:data` 的 insertIgnoringConflict）
+        val key = msg.clientRequestId
+        if (key != null && !seenKeys.add(key)) return Outcome.Ok(Unit)
         seq++
         stored += ChatMessageView(
             id = msg.id,

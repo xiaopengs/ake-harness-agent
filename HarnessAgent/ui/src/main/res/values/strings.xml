@@ -117,6 +117,18 @@
     -->
     <string name="chat_term_store_failed_title">回答生成好了，但没存下来</string>
     <string name="chat_term_store_failed_next">模型已经答完了，卡在写入存储这一步 —— 换模型或清缓存都不会改善。先腾一点手机空间（旧模型包、旧会话），再点「重试」：重试会把这一轮重新生成并落盘一次。</string>
+    <!--
+      ★ REQUEST_STORE_FAILED：这句话没进库，本轮**一个字都没答**。
+
+      与上面 STORE_FAILED 的差别不是语气，而是**用户该做的事不同**，所以两句必须分得开：
+        · STORE_FAILED         「回答生成好了，但没存下来」→ 东西存在过，重试＝重新生成
+        · REQUEST_STORE_FAILED 「话没存下来，所以没答」   → 东西根本不存在，重试＝把话再发一次
+      因此这里**不提**「回答」二字（提了用户就会去找一个不存在的回答），并且明说
+      「没有可以补回来的东西」—— 这句话直接掐掉"反复重发同一个问题试试看"的错误动作。
+      「模型」二字同样不出现：成因是存储，不是推理。
+    -->
+    <string name="chat_term_request_store_failed_title">这句话没能存下来，所以本轮没有开始回答</string>
+    <string name="chat_term_request_store_failed_next">先看一下手机存储（空间是不是满了、有没有写权限、迁移有没有做完），腾出地方后把这句话原样再发一次。上一轮模型一个字都还没答，没有可以「补回来」的回答 —— 重发就是唯一有效的动作。</string>
 
     <!-- ── Agent 列表 ──────────────────────────────────────── -->
     <string name="agent_list_title">Agent</string>

@@ -99,7 +99,14 @@ public data class AppendMessage(
     val kind: MessageKind,
     /** 未脱敏原文；由 `:data` 侧过 `PersistenceRedactionGate` 后落盘。 */
     val text: String,
-    /** ★ 仅 USER 消息带：幂等键（重试不再产生第二条）。 */
+    /**
+     * ★ 仅 USER 消息带：落库幂等键。
+     *
+     * **值由 `:chat` 从 `(sessionId, turnId)` 派生**（`ChatLoop.userMessageKey`），
+     * 不是调用方那个随机入站 id —— 随机值在重试路径上必然每次都不同，
+     * `UNIQUE(client_request_id)` 就永远不会命中（关千锤第 4 轮 P1-4）。
+     * `:data` 侧靠 `INSERT OR IGNORE` + 该列的 UNIQUE 索引完成去重。
+     */
     val clientRequestId: String? = null,
     val callId: String? = null,
     val taskId: String? = null,
@@ -153,7 +160,13 @@ public interface ChatSessionStorePort {
         redactionCount: Int,
     ): Outcome<Unit>
 
-    /** 冷启动 sweep：把所有卡在 STREAMING 的收敛为 ABORTED（§2.5 纪律 2）。 */
+    /**
+     * 冷启动 sweep：把所有卡在 STREAMING 的收敛为 **FAILED**（§2.5 纪律 2）。
+     *
+     * 不能收敛成 `ABORTED` —— 那是「用户主动停」的语义。进程被杀留下的
+     * `STREAMING` 若伪装成 `ABORTED`，等于把「进程死了」这类缺陷从统计里擦掉，
+     * 将来查「为什么这条消息没回」时数据里根本看不见。
+     */
     public suspend fun sweepStreaming(): Int
 
     /** ★ 焦点释放时写复水基准。**同步写**，是可丢泳道的反面（§4.6）。 */
@@ -587,9 +600,30 @@ public interface ChatRunnerPort {
 
 public data class ChatTurnRequest(
     val sessionId: String,
-    /** 幂等键：断网重发/重试也不产生第二条 assistant 消息 */
+    /**
+     * 调用方的**入站请求标识**（MCP / AppFunctions / UI 各自生成），只用于日志与审计对齐。
+     *
+     * ## ★★ 它不是落库的幂等键（2026-10 修正，关千锤第 4 轮 P1-4）
+     *
+     * 这里原本写的是「幂等键：断网重发/重试也不产生第二条 assistant 消息」。
+     * 那句话与实现相反，而且是**结构上不可能**成立的：重试由调用方发起，调用方每发起一次
+     * 就生成一个新的随机值（`:ui` 的 `ChatViewModel.startTurn` 就是
+     * `UUID.randomUUID()`），于是 `UNIQUE(client_request_id)` 一次都不会命中 ——
+     * 用户点三次「重试」，会话里就有 4 条一模一样的用户消息。
+     *
+     * 「谁能保证同一个值」这件事只有一个答案：**这一轮的身份**，即 [turnId]
+     * （重试必须复用它，见下）。所以幂等键由 `:chat` 从 `(sessionId, turnId)` 派生
+     * （`ChatLoop.userMessageKey`），调用方传什么都不会影响去重。
+     *
+     * ⇒ 「重试同一轮」与「用户真的又发了一遍」的分界线是 **[turnId] 换没换**：
+     *   前者复用 ⇒ 同一个幂等键 ⇒ `INSERT OR IGNORE` 命中冲突 ⇒ 不落第二条；
+     *   后者新 turnId ⇒ 新键 ⇒ 正常落一条。
+     */
     val clientRequestId: String,
-    /** ★ 轮次分组键。与 `clientRequestId` 分开：后者是幂等键，**重试时 turnId 应当复用**（§9-U4）。 */
+    /**
+     * 轮次分组键。与 `clientRequestId` 分开：后者是入站标识，**幂等去重与重试都以本字段为准**
+     * （重试复用、新消息新建，§9-U4）。
+     */
     val turnId: String,
     val userText: String,
     val abort: AbortSignal = NoAbortSignal,
@@ -703,6 +737,43 @@ public enum class ChatTerminalReason {
     MODEL_NOT_LOADED,
 
     /**
+     * ★ **请求没能写进存储 ⇒ 这一轮根本没开始（一个 token 都没生成）。**
+     *
+     * 它和 [STORE_FAILED] 的分界线是**时间线**，不是措辞偏好：
+     *
+     * ```
+     *   ① 落 USER 消息      ──✗──> REQUEST_STORE_FAILED   （还没有"回答"这个东西）
+     *   ② 建助手占位行      ──✗──> REQUEST_STORE_FAILED   （还没有"回答"这个东西）
+     *   ③ 模型生成 ……          （到这里才开始有"回答"）
+     *   ④ 提交终态          ──✗──> STORE_FAILED           （回答已经流到屏幕上了）
+     * ```
+     *
+     * ## 为什么必须拆成两档（关千锤第 4 轮验收 P1-1）
+     *
+     * [STORE_FAILED] 的语义是「模型答完了，但没存下来」，对应的文案是
+     * 「回答生成好了，但没存下来」。而 ①② 两处失败时**一个 token 都没有产生** ——
+     * 用户读到那句话，理解成「模型答了，只是我看不到」，于是去找回不存在的回答、
+     * 反复重发同一个问题。**归因越界比多一个枚举贵得多。**
+     *
+     * ## 用户该做什么
+     *
+     * 先看存储（空间 / 迁移 / 权限），然后**把这句话重发一次** —— 而不是"重试补写"：
+     * 没有任何东西可补写。因此本档 `retryable` 为 `true`，但文案必须指向存储，
+     * 不能说「回答已经在内存里」。
+     *
+     * ## 两种触发面
+     *
+     * | 触发点 | 用户看到的事实 |
+     * |---|---|
+     * | `append(USER)` 返回 `Err` | 这句话没进库：会话里看不到它，重发是正确的动作 |
+     * | `beginAssistant` 返回 `Err` | 这句话进库了，但没有可渲染的回答行：重发时幂等键会挡住重复的用户消息 |
+     *
+     * 两者对用户是同一件事（**没有回答**），所以共用一档 —— 这不是"一个码打天下"，
+     * 而是「回答存在与否」这条唯一的语义边界决定的。
+     */
+    REQUEST_STORE_FAILED,
+
+    /**
      * ★ **模型答完了，但没存下来。**
      *
      * 与 [MODEL_FAILED] 的区别不是措辞，而是**用户下一步该做什么**：
@@ -719,8 +790,10 @@ public enum class ChatTerminalReason {
      *
      * ## 语义边界（写在这里，防止后人把它当垃圾桶）
      *
-     * 本值**只**表示「推理链路跑通了、产物在内存里、持久化这一段失败」：
-     *  - ✅ `append(USER)` / `beginAssistant` / `commitAssistant` 返回 `Outcome.Err`；
+     * 本值**只**表示「推理链路跑通了、产物在内存里、**回答的终态提交**失败」：
+     *  - ✅ `commitAssistant` 返回 `Err`（重试一次之后仍失败）；
+     *  - ❌ `append(USER)` / `beginAssistant` 失败（那是 [REQUEST_STORE_FAILED]：
+     *    回答根本没开始生成，说"回答生成好了"是假话）；
      *  - ❌ 模型 `generate` 返回 `Err`（那是 [MODEL_FAILED]，与磁盘无关）；
      *  - ❌ 预算 / 策略 / 焦点（各有自己的值）。
      *
@@ -730,7 +803,8 @@ public enum class ChatTerminalReason {
      * 模型产出的那一段只活在产生它的那一轮的内存里；一旦 `commitAssistant` 放弃，
      * 那一段就没有第二个持有者了。所以：
      *  - 瞬时抖动：由 `:chat` 在**同一轮内**对 `commitAssistant` 重试一次兜住（UPDATE by id，幂等）；
-     *  - 真失败：把整轮重发（`ChatTurnRequest.clientRequestId` 保证 USER 消息不会重复落盘）。
+     *  - 真失败：把整轮重发（幂等键由 `ChatLoop.userMessageKey(sessionId, turnId)` 派生，
+     *    USER 消息不会重复落盘）。
      *
      * ★ 因此 `:ui` 侧这一档的 `retryable` 应为 `true`，但**文案必须指向存储**
      *   （「清一点空间再试」），不能沿用模型失败那一条。
