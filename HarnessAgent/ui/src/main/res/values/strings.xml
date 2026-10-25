@@ -108,6 +108,15 @@
     <string name="chat_term_skill_failed_next">展开那张技能卡片能看到卡在第几步；重试通常有效，连续失败多半是站点变了。</string>
     <string name="chat_term_model_not_loaded_title">模型还没加载</string>
     <string name="chat_term_model_not_loaded_next">先去模型页把模型准备好，再回来发消息。</string>
+    <!--
+      ★ STORE_FAILED：模型答完了，但没存下来。
+
+      这两句刻意不提「模型」二字：用户一看到模型故障就会去换模型、清缓存、重下权重，
+      而这些动作对「磁盘写不进去」一点用都没有 —— 归因错了，重试多少次都不会好。
+      所以标题先说清「回答是好的」，正文把责任指到存储，并给一条真的有效的路径。
+    -->
+    <string name="chat_term_store_failed_title">回答生成好了，但没存下来</string>
+    <string name="chat_term_store_failed_next">模型已经答完了，卡在写入存储这一步 —— 换模型或清缓存都不会改善。先腾一点手机空间（旧模型包、旧会话），再点「重试」：重试会把这一轮重新生成并落盘一次。</string>
 
     <!-- ── Agent 列表 ──────────────────────────────────────── -->
     <string name="agent_list_title">Agent</string>
@@ -137,10 +146,8 @@
     <string name="agent_detail_persona">人格设定</string>
     <string name="agent_detail_persona_hint">这段文本进 SYSTEM 的 persona 段。Charter Core 在它之上且不可编辑 —— 这是防人设越权的结构手段，不靠模型听话。</string>
     <string name="agent_detail_capabilities">扩展能力</string>
-    <string name="agent_detail_capabilities_hint">能力只能做减法：只有在设置页全局开放过的，这里才勾得上。</string>
-    <string name="agent_detail_cap_limit">最多 %1$d 个。已经选满 —— 先取消一个才能再加。</string>
-    <string name="agent_detail_cap_missing">技能注册表还没接线（SkillRegistryPort 没有 Hilt 绑定），这里暂时只能看到已保存在人设里的能力引用。</string>
-    <string name="agent_detail_grant_missing">授权接口还没接线（CapabilityGrantPort 没有 Hilt 绑定），改动只写进这次编辑的草稿，不会落库。</string>
+    <string name="agent_detail_capabilities_hint">这里列出这个 Agent 已被授予的能力，只读。授权只能做减法：只有在工具页全局开放过的能力，才可能出现在这张表里。</string>
+    <string name="agent_detail_cap_limit">能力上限：%1$d 个。</string>
     <string name="agent_detail_saved">已保存</string>
     <string name="agent_detail_save_failed">保存失败：%1$s</string>
     <string name="agent_detail_scan_warning">人设扫描命中 %1$s —— 这个 Agent 的每次技能调用都会被要求二次确认。</string>
@@ -203,6 +210,23 @@
     <string name="cap_empty">这个 Agent 现在没有可勾选的能力。</string>
     <string name="cap_limit_reached">已经选满 %1$d 个 —— 先取消一个才能再加。</string>
     <string name="cap_forbidden">被护栏硬禁止，不可勾选</string>
-    <string name="cap_missing_grants">授权状态读不到（CapabilityGrantPort 未接线）：勾选记录只在本次会话内有效。</string>
+    <string name="cap_missing_grants">读不到可用能力清单（技能注册表未接线）：这里只能列出模板自带的能力引用。</string>
+
+    <!--
+      ── 「零能力」的三处说明 ──────────────────────────────────
+
+      ★ P0-4：「只回文字」那个坑的另一半。
+
+      一个没配任何扩展能力的 Agent，行为上完全正常 —— 它就是个聊天机器人。
+      问题在于它看起来和「能操作浏览器」的 Agent 一模一样，于是用户会认为 App 坏了。
+      三处文案同一个调子：**这是设定，不是故障**。所以都用中性提示条（不是红色报错条），
+      并且都给出「怎么加能力」的具体路径，而不是一句「请配置」。
+    -->
+    <string name="create_no_capability_notice">当前一个能力都没勾。这样建出来的 Agent 只会聊天 —— 不会打开网页，也不会调用任何工具。仍然可以创建；以后想给它加能力，在它的详情页里用「以它为模板新建」，新建时把能力勾上。</string>
+    <string name="chat_no_capability_notice">这个 Agent 还没有配置扩展能力，只会聊天：不会打开网页，也不会调用工具。这是它的设定，不是出错。</string>
+    <string name="agent_detail_cap_empty">这个 Agent 还没有任何扩展能力 —— 它只会聊天，不会操作网页，也不会调用工具。</string>
+    <string name="agent_detail_cap_empty_next">加能力的路径：用下面的「以它为模板新建」，在新弹出的创建页里勾选能力。这一页本轮只能看不能改（人格存储只有「新增」没有「更新」，按编辑保存会静默多出一个同名 Agent），所以这里没有开关不是漏做了。</string>
+    <string name="agent_detail_cap_present">已授予 %1$d 项扩展能力（列在下面）。本轮还没有修改授权的入口 —— 要调整，同样走「以它为模板新建」重选一次。</string>
+    <string name="agent_detail_cap_unreadable">读不到这个 Agent 的授权表，无法判断它到底有没有能力。</string>
 
 </resources>

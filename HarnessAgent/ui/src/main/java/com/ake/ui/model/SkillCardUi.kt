@@ -54,10 +54,29 @@ public data class ChatTurnFailure(
     val retryable: Boolean,
 ) {
     public companion object {
-        /** 只有「没说完」才值得占用气泡的一条位置；`COMPLETED` / `USER_ABORT` 不算失败。 */
+        /**
+         * 只有「没说完」才值得占用气泡的一条位置；`COMPLETED` / `USER_ABORT` 不算失败。
+         *
+         * ## 为什么这里逐个列出失败终态，而不是写 `else ->`
+         *
+         * 语义上 `else` 在这里是安全的（非完成、非中止的都属于失败），但**它是静默的**：
+         * 上一版就是 `else`，所以 `STORE_FAILED` 加进枚举时这里一声不响地通过了 ——
+         * 全靠 `chatTerminalCopyOf` 的穷尽性把问题抓出来。少一个保护点就多一次「靠运气」。
+         * 列全之后，新增终态会在**两个**地方同时编译失败，逼着作者回答
+         * 「它算不算失败」这个必须由人来答的问题。
+         */
         public fun of(turnId: String?, reason: ChatTerminalReason): ChatTurnFailure? = when (reason) {
-            ChatTerminalReason.COMPLETED, ChatTerminalReason.USER_ABORT -> null
-            else -> ChatTurnFailure(turnId, reason, chatTerminalCopyOf(reason).retryable)
+            ChatTerminalReason.COMPLETED,
+            ChatTerminalReason.USER_ABORT,
+            -> null
+
+            ChatTerminalReason.MODEL_FAILED,
+            ChatTerminalReason.BUDGET_EXHAUSTED,
+            ChatTerminalReason.POLICY_DENIED,
+            ChatTerminalReason.SKILL_FAILED,
+            ChatTerminalReason.MODEL_NOT_LOADED,
+            ChatTerminalReason.STORE_FAILED,
+            -> ChatTurnFailure(turnId, reason, chatTerminalCopyOf(reason).retryable)
         }
     }
 }

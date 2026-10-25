@@ -90,6 +90,15 @@ class FakeModelPort(
     /** 置上之后 `generate()` 会在这里挂住，用于测试「同一会话并发轮次」这类时序。 */
     var gate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
 
+    /**
+     * 置上之后 `generate()` 直接抛 `RuntimeException`。
+     *
+     * 用于覆盖 `ChatLoop.turn` 里 `catch (t: Throwable)` 那条路径 ——
+     * 它和三条 `return` 一样，是「必须复位 in-flight 标记」的退出路径之一。
+     * ★ 刻意抛「非 Outcome.Err」：`Outcome.Err` 走的是返回值分支，不是异常分支。
+     */
+    var throwOnGenerate: Boolean = false
+
     override suspend fun load(config: ModelLoadConfig): Outcome<Unit> = Outcome.Ok(Unit)
     override suspend fun unload(): Outcome<Unit> = Outcome.Ok(Unit)
     override val runtimeState: Flow<ModelRuntimeState> = flowOf(ModelRuntimeState.Unloaded)
@@ -97,7 +106,9 @@ class FakeModelPort(
     override suspend fun openSession(spec: SessionSpec): Outcome<ModelSession> {
         opened++
         lastSpec = spec
-        return Outcome.Ok(FakeModelSession(routerScript, answerText, gate).also { lastSession = it })
+        return Outcome.Ok(
+            FakeModelSession(routerScript, answerText, gate) { throwOnGenerate }.also { lastSession = it },
+        )
     }
 
     /** 端侧估算是本地启发式：4 字符 ≈ 1 token，与 `:llm` 的量级一致即可。 */
@@ -108,6 +119,8 @@ class FakeModelSession(
     private val routerScript: List<String>,
     private val answerText: String,
     private val gate: kotlinx.coroutines.CompletableDeferred<Unit>? = null,
+    /** 每次生成时现取：同一个会话（`ChatLoop` 会复用）里允许测试中途把开关关掉。 */
+    private val shouldThrow: () -> Boolean = { false },
 ) : ModelSession {
 
     override val sessionId: SessionId = SessionId("fake-session")
@@ -119,6 +132,7 @@ class FakeModelSession(
     override suspend fun generate(req: GenerationRequest): Outcome<GenerationResult> {
         requests += req
         gate?.await()
+        if (shouldThrow()) throw IllegalStateException("fake_generate_threw")
         if (failGenerate) {
             return Outcome.Err(AppError.invalidInput("fake_generate_failure"))
         }
@@ -157,30 +171,51 @@ class FakeChatStore(
     var lastMode: LoopMode = LoopMode.REPLY
     var modeEpoch: Int = 0
     var appendFails: Boolean = false
+
+    /**
+     * 让 `sessions()` 返回空表 ⇒ `ChatLoop.resolveScope()` 找不到会话 ⇒ 走
+     * 「session 不存在或人格不可读」那条提前返回。**可开关**，因为 P0-1 的回归断言
+     * 需要「同一条路径失败一次之后，同一会话还能正常发下一条」。
+     */
+    var sessionVisible: Boolean = true
+
+    /** 让 `beginAssistant()` 失败（落盘失败的另一条入口，`append` 之外）。 */
+    var beginFails: Boolean = false
+
+    /** 让 `commitAssistant()` 失败。配合 [commitAttempts] 断言「同一轮内重试过一次」。 */
+    var commitFails: Boolean = false
+
+    /** `commitAssistant` 被调了几次（含重试）。 */
+    var commitAttempts: Int = 0
+
     var compactionMarks: MutableList<Pair<String, Int>> = mutableListOf()
 
     private var seq: Int = 0
 
     override fun sessions(agentId: String?, includeArchived: Boolean): Flow<List<ChatSessionSummary>> =
         flowOf(
-            listOf(
-                ChatSessionSummary(
-                    id = sessionId,
-                    agentId = this.agentId,
-                    title = "测试会话",
-                    createdAt = 0L,
-                    updatedAt = 0L,
-                    lastMessageAt = 0L,
-                    messageCount = stored.size,
-                    previewRedacted = null,
-                    unreadCount = 0,
-                    lastReadSeq = 0,
-                    compactedUptoSeq = 0,
-                    lastMode = lastMode,
-                    modeEpoch = modeEpoch,
-                    archived = false,
-                ),
-            ).filter { agentId == null || it.agentId == agentId },
+            if (!sessionVisible) {
+                emptyList()
+            } else {
+                listOf(
+                    ChatSessionSummary(
+                        id = sessionId,
+                        agentId = this.agentId,
+                        title = "测试会话",
+                        createdAt = 0L,
+                        updatedAt = 0L,
+                        lastMessageAt = 0L,
+                        messageCount = stored.size,
+                        previewRedacted = null,
+                        unreadCount = 0,
+                        lastReadSeq = 0,
+                        compactedUptoSeq = 0,
+                        lastMode = lastMode,
+                        modeEpoch = modeEpoch,
+                        archived = false,
+                    ),
+                ).filter { agentId == null || it.agentId == agentId }
+            },
         )
 
     override suspend fun ensureForNewTurn(agentId: String, titleHint: String?): Outcome<String> =
@@ -210,6 +245,7 @@ class FakeChatStore(
     }
 
     override suspend fun beginAssistant(sessionId: String, turnId: String, messageId: String): Outcome<Unit> {
+        if (beginFails) return Outcome.Err(AppError.invalidInput("begin_failed"))
         seq++
         stored += ChatMessageView(
             id = messageId,
@@ -234,6 +270,8 @@ class FakeChatStore(
         kvCacheTokensAfter: Int,
         redactionCount: Int,
     ): Outcome<Unit> {
+        commitAttempts++
+        if (commitFails) return Outcome.Err(AppError.invalidInput("commit_failed"))
         commits += messageId to status
         val i = stored.indexOfLast { it.id == messageId }
         if (i >= 0) stored[i] = stored[i].copy(status = status, textRedacted = text)

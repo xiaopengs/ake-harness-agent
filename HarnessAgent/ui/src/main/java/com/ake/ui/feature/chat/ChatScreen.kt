@@ -36,10 +36,12 @@ import com.ake.ui.components.AgentAvatar
 import com.ake.ui.components.AlertBar
 import com.ake.ui.components.EmptyHint
 import com.ake.ui.components.MessageBubble
+import com.ake.ui.components.NoticeBar
 import com.ake.ui.components.StreamingCursor
 import com.ake.ui.components.Tag
 import com.ake.ui.components.riskColorOf
 import com.ake.ui.components.riskLabelOf
+import com.ake.ui.model.CapabilityPresence
 import com.ake.ui.model.chatTerminalCopyOf
 import com.ake.ui.theme.AkeColors
 import com.ake.ui.runtime.UiHumanGate
@@ -173,6 +175,19 @@ public fun ChatScreen(
                 gate = gate,
                 onAllow = viewModel::allowOnce,
                 onReject = viewModel::rejectOnce,
+            )
+        }
+
+        // ★ 零能力提示（P0-4）：「只回文字」的另一半。
+        //
+        //   放在输入框**上方**、常驻、中性色，不弹窗也不可关闭：
+        //   用户马上要打字了，这是他能看到「为什么它什么都不做」的最后一个位置；
+        //   而一旦它真的只回了文字，用户已经读过这句话，不会去怀疑 App 坏了。
+        //   只在**确认**零能力时出现（`UNKNOWN` 不出现）—— 见 `CapabilityPresence`。
+        if (ui.capabilityPresence == CapabilityPresence.NONE) {
+            NoticeBar(
+                text = stringResource(R.string.chat_no_capability_notice),
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
             )
         }
 

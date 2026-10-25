@@ -7,13 +7,20 @@ import com.ake.core.common.Clock
 import com.ake.core.common.Outcome
 import com.ake.core.ports.AgentProfile
 import com.ake.core.ports.AgentProfileStorePort
+import com.ake.core.ports.CapabilityGrantPort
+import com.ake.core.ports.CapabilityRef
+import com.ake.ui.model.CapabilityPresence
+import com.ake.ui.model.capabilityPresenceOf
 import com.ake.ui.util.readableError
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.Optional
 import javax.inject.Inject
 
 public data class AgentDetailUi(
@@ -22,6 +29,10 @@ public data class AgentDetailUi(
     val profile: AgentProfile? = null,
     val errorText: String? = null,
     val busy: Boolean = false,
+    /** 已授予的能力（只读展示，按 `ref` 排序后渲染，避免每次进来顺序抖动）。 */
+    val capabilities: List<CapabilityRef> = emptyList(),
+    /** 三态：读不到授权表时必须是 UNKNOWN，不能折成「没有」（见 [CapabilityPresence]）。 */
+    val capabilityPresence: CapabilityPresence = CapabilityPresence.UNKNOWN,
 )
 
 /**
@@ -39,21 +50,29 @@ public data class AgentDetailUi(
  * 所以这里的选择是：
  *  - 展示与删除走 Port（都真实可用）；
  *  - 编辑不给入口，改成「以它为模板新建一份」（prefill 到创建页，语义诚实）；
- *  - 能力授权需要 `CapabilityGrantPort`，它全工程无实现 ⇒ 界面上明说，不给假开关。
+ *  - **能力授权改为真实读取 `CapabilityGrantPort`**（`:data` 的 `CapabilityGrantStoreImpl`
+ *    已绑定，早先那句「全工程无实现」的界面文案已经过期）；读到了就列出来，
+ *    读到空就明说「它只会聊天」并指向「以它为模板新建」，
+ *    读不到就说读不到 —— 三种情况必须分开，不能合并成一句「暂无」。
  *
  * 等 `:data` 补上 `update(id, draft)` 之后，这里加一个编辑入口即可，其余不用动。
  */
 @HiltViewModel
 public class AgentDetailViewModel @Inject constructor(
     private val profiles: AgentProfileStorePort,
+    grants: Optional<CapabilityGrantPort>,
     private val clock: Clock,
     savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
+
+    private val grants: CapabilityGrantPort? = grants.orElse(null)
 
     private val profileId: String = savedStateHandle.get<String>(ARG_PROFILE_ID).orEmpty()
 
     private val _ui = MutableStateFlow(AgentDetailUi())
     public val ui: StateFlow<AgentDetailUi> = _ui.asStateFlow()
+
+    private var grantsJob: Job? = null
 
     init {
         load()
@@ -70,11 +89,42 @@ public class AgentDetailViewModel @Inject constructor(
         viewModelScope.launch {
             _ui.update { it.copy(loading = true) }
             when (val r = profiles.byId(profileId)) {
-                is Outcome.Ok -> _ui.update { it.copy(loading = false, profile = r.value, notFound = false) }
+                is Outcome.Ok -> {
+                    _ui.update { it.copy(loading = false, profile = r.value, notFound = false) }
+                    watchCapabilities(profileId)
+                }
                 is Outcome.Err -> _ui.update {
                     it.copy(loading = false, notFound = true, errorText = readableError(r.error))
                 }
             }
+        }
+    }
+
+    /**
+     * 订阅授权表。`profileId` 就是 `agent_profile.id`（主键），正是
+     * `agent_capability_grant.agent_id` 外键指向的那一列 —— 这里不需要再做 id 归一。
+     */
+    private fun watchCapabilities(profileId: String) {
+        val g = grants ?: run {
+            _ui.update { it.copy(capabilityPresence = CapabilityPresence.UNKNOWN) }
+            return
+        }
+        grantsJob?.cancel()
+        grantsJob = viewModelScope.launch {
+            g.grantsOf(profileId)
+                .catch {
+                    _ui.update { it.copy(capabilityPresence = CapabilityPresence.UNKNOWN) }
+                }
+                .collect { map ->
+                    val granted = map.filterValues { it }.keys
+                        .sortedWith(compareBy({ it.kind.name }, { it.id }))
+                    _ui.update {
+                        it.copy(
+                            capabilities = granted,
+                            capabilityPresence = capabilityPresenceOf(map),
+                        )
+                    }
+                }
         }
     }
 

@@ -7,6 +7,7 @@ import com.ake.core.common.Clock
 import com.ake.core.common.Outcome
 import com.ake.core.ports.AbortSignal
 import com.ake.core.ports.AgentProfileStorePort
+import com.ake.core.ports.CapabilityGrantPort
 import com.ake.core.ports.ChatEvent
 import com.ake.core.ports.ChatMessageView
 import com.ake.core.ports.ChatRunnerPort
@@ -14,11 +15,14 @@ import com.ake.core.ports.ChatSessionStorePort
 import com.ake.core.ports.ChatTerminalReason
 import com.ake.core.ports.ChatTurnRequest
 import com.ake.core.ports.MessageStatus
+import com.ake.ui.model.CapabilityPresence
 import com.ake.ui.model.ChatTurnFailure
 import com.ake.ui.model.SkillCardUi
+import com.ake.ui.model.capabilityPresenceOf
 import com.ake.ui.runtime.UiHumanGate
 import com.ake.ui.util.readableError
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -66,6 +70,14 @@ public data class ChatUi(
     val terminal: ChatTerminalReason? = null,
     /** ★ `ChatRunnerPort` 没有 Hilt 绑定时的降级标志：只读历史，发送禁用。 */
     val runnerMissing: Boolean = false,
+    /**
+     * 这个 Agent 的扩展能力三态（见 [CapabilityPresence]）。
+     *
+     * 默认 [CapabilityPresence.UNKNOWN] 而不是 `NONE`：还没读到授权表时保持沉默，
+     * 不能拿「还没读到」去冒充「没有」—— 那条提示一旦误报，用户会去重复配置一个
+     * 本来就配好的能力，然后认为配置不生效。
+     */
+    val capabilityPresence: CapabilityPresence = CapabilityPresence.UNKNOWN,
     /** 落库 / 事件流的失败原因（`AppError.reasonKey` 或异常信息）。 */
     val errorText: String? = null,
 ) {
@@ -106,6 +118,8 @@ public class ChatViewModel @Inject constructor(
     private val sessions: ChatSessionStorePort,
     private val profiles: AgentProfileStorePort,
     runner: Optional<ChatRunnerPort>,
+    /** 授权表（可选）。只用来回答「这个 Agent 有没有能力」，见 [CapabilityPresence]。 */
+    grants: Optional<CapabilityGrantPort>,
     /** 确认闸门。技能在聊天里触发的 CONFIRM 就走这个单例 —— 确认必须回到气泡。 */
     private val gate: UiHumanGate,
     private val clock: Clock,
@@ -113,6 +127,7 @@ public class ChatViewModel @Inject constructor(
 ) : ViewModel() {
 
     private val runner: ChatRunnerPort? = runner.orElse(null)
+    private val grants: CapabilityGrantPort? = grants.orElse(null)
 
     private val _ui = MutableStateFlow(ChatUi(runnerMissing = this.runner == null))
     public val ui: StateFlow<ChatUi> = _ui.asStateFlow()
@@ -123,6 +138,33 @@ public class ChatViewModel @Inject constructor(
     private var messagesJob: Job? = null
     private var turnJob: Job? = null
     private var abortFlag: ChatAbortFlag? = null
+    private var capabilityJob: Job? = null
+
+    /**
+     * ★ 发送防抖的**权威闸**（不是界面上的禁用态）。
+     *
+     * 从「点了发送」到「`streaming = true` 真的写进状态」之间有一段异步窗口：
+     * 新会话要先 `ensureForNewTurn` 建 sessionId，那是两次挂起调用。
+     * 手快的用户在这段窗口里点第二下，两次点击读到的 `streaming` 都是 `false`，
+     * 于是同一句话被发成**两轮** ⇒ 后端按并发轮次拒掉后一次，返回
+     * `POLICY_DENIED` + `retryable=false`，界面上就出现「安全策略拦下了这一步」。
+     * 用户只是点了两下，却被告知策略拒绝 —— 这是**UI 造出来的状态**，
+     * 就该在 UI 掐掉，而不是给它写一句像样的文案。
+     *
+     * 所以 `send()` 在**第一行同步判定**并占位，界面按钮的禁用态只是它的视觉投影。
+     */
+    private var turnInFlight: Boolean = false
+
+    /**
+     * 当前这一轮的序号。
+     *
+     * 用来解决「旧一轮的 `finally` 打到新一轮头上」：`stop()` 之后立刻再发一句时，
+     * 被取消的那个协程的 `finally` 是**稍后**才跑的 —— 它会晚于新的一轮开始，
+     * 于是把新轮刚设上的 `streaming = true` 抹回 `false`，顺手把防抖闸也放开。
+     * 表现是「发送按钮在生成中出现，点一下又发了一轮」。
+     * 只让序号最新的那一轮有权收敛状态，就消除这个窗口。
+     */
+    private var turnToken: Long = 0L
 
     /** 上一轮的用户原文与 turnId —— 重试要复用 turnId（§9-U4），不能新开一轮。 */
     private var lastUserText: String? = null
@@ -153,7 +195,10 @@ public class ChatViewModel @Inject constructor(
 
     public fun send() {
         val text = _ui.value.input.trim()
-        if (text.isEmpty() || _ui.value.streaming) return
+        if (text.isEmpty()) return
+        // ★ 防抖在**这里**，不在按钮上：按钮的 `enabled` 只是一个视觉投影，
+        //   真正的闸必须是与状态写入同一个同步段里的这一行（见 [turnInFlight]）。
+        if (!beginTurn()) return
         _ui.update { it.copy(input = "") }
         lastUserText = text
         startTurn(text, turnId = UUID.randomUUID().toString())
@@ -168,7 +213,7 @@ public class ChatViewModel @Inject constructor(
      */
     public fun retry() {
         val text = lastUserText ?: return
-        if (_ui.value.streaming) return
+        if (!beginTurn()) return
         val turnId = currentTurnId ?: UUID.randomUUID().toString()
         startTurn(text, turnId = turnId)
     }
@@ -178,6 +223,33 @@ public class ChatViewModel @Inject constructor(
         abortFlag?.abort()
         turnJob?.cancel()
         turnJob = null
+        endTurn()
+    }
+
+    /**
+     * 占位并同步把界面切到「正在生成」。
+     *
+     * @return `false` = 已经有一轮在跑（或正在起跑），本次点击必须被丢掉。
+     */
+    private fun beginTurn(): Boolean {
+        if (turnInFlight || _ui.value.streaming) return false
+        turnInFlight = true
+        _ui.update {
+            it.copy(
+                streaming = true,
+                liveText = "",
+                liveMessageId = null,
+                failure = null,
+                terminal = null,
+                errorText = null,
+            )
+        }
+        return true
+    }
+
+    /** 释放闸门。**必须**与 [beginTurn] 配对，否则发送按钮会永久卡住。 */
+    private fun endTurn() {
+        turnInFlight = false
         _ui.update { it.copy(streaming = false) }
     }
 
@@ -193,51 +265,51 @@ public class ChatViewModel @Inject constructor(
         val r = runner
         if (r == null) {
             _ui.update { it.copy(runnerMissing = true) }
+            endTurn()
             return
         }
         val agentId = _ui.value.agentId
         if (agentId == null && _ui.value.sessionId == null) {
             _ui.update { it.copy(errorText = "err_chat_no_agent") }
+            endTurn()
             return
         }
 
         turnJob?.cancel()
+        val token = ++turnToken
         turnJob = viewModelScope.launch {
-            val sid = _ui.value.sessionId ?: ensureSession(agentId!!, text) ?: return@launch
-            if (_ui.value.sessionId != sid) {
-                _ui.update { it.copy(sessionId = sid) }
-                bindMessages(sid)
-            }
-
-            _ui.update {
-                it.copy(
-                    streaming = true,
-                    liveText = "",
-                    liveMessageId = null,
-                    failure = null,
-                    terminal = null,
-                    errorText = null,
-                )
-            }
-            currentTurnId = turnId
-            val abort = ChatAbortFlag().also { abortFlag = it }
-
-            val request = ChatTurnRequest(
-                sessionId = sid,
-                clientRequestId = UUID.randomUUID().toString(),
-                turnId = turnId,
-                userText = text,
-                abort = abort,
-            )
-
             try {
+                val sid = _ui.value.sessionId ?: ensureSession(agentId!!, text) ?: return@launch
+                if (_ui.value.sessionId != sid) {
+                    _ui.update { it.copy(sessionId = sid) }
+                    bindMessages(sid)
+                }
+
+                currentTurnId = turnId
+                val abort = ChatAbortFlag().also { abortFlag = it }
+
+                val request = ChatTurnRequest(
+                    sessionId = sid,
+                    clientRequestId = UUID.randomUUID().toString(),
+                    turnId = turnId,
+                    userText = text,
+                    abort = abort,
+                )
+
                 // ★ 逐事件归约，不阻塞、不攒批：每个 delta 立刻进 StateFlow
                 r.turn(request).collect { event -> reduce(event) }
+            } catch (c: CancellationException) {
+                // 用户点了「停止」不是错误。吞掉它而不落到下面的 Throwable 分支，
+                // 否则停止之后界面上会多出一行英文异常（`readableError` 的兜底是类名）。
+                throw c
             } catch (t: Throwable) {
                 _ui.update { it.copy(errorText = readableError(t)) }
             } finally {
-                _ui.update { it.copy(streaming = false) }
-                abortFlag = null
+                // 只有最新一轮有权收敛状态（见 [turnToken]）
+                if (token == turnToken) {
+                    endTurn()
+                    abortFlag = null
+                }
             }
         }
     }
@@ -360,12 +432,41 @@ public class ChatViewModel @Inject constructor(
     private fun loadAgent(agentId: String) {
         viewModelScope.launch {
             when (val r = profiles.byAgentId(agentId)) {
-                is Outcome.Ok -> _ui.update {
-                    it.copy(agentId = agentId, agentName = r.value.name)
+                is Outcome.Ok -> {
+                    _ui.update { it.copy(agentId = agentId, agentName = r.value.name) }
+                    // ★ 用 `profile.id`（ULID 主键）而不是路由上的 `agentId`（对外短名）：
+                    //   `agent_capability_grant.agent_id` 的外键指向 `agent_profile(id)`，
+                    //   传短名查出来永远是空 map ⇒ 会把每个 Agent 都误判成「零能力」。
+                    watchCapabilities(r.value.id)
                 }
                 // 人格被删了但会话还在：不让页面空着，给一个可读的兜底名
                 is Outcome.Err -> _ui.update { it.copy(agentName = "") }
             }
+        }
+    }
+
+    /**
+     * 订阅这个 Agent 的授权表，只为了回答一个问题：**它有没有能力**。
+     *
+     * ## 为什么要有这条订阅，而不是在创建时判定一次
+     *
+     * 「零能力」不是创建那一刻的快照，而是**当前事实**：撤回一次授权、或换一份人格，
+     * 都会让它从「能操作浏览器」变回「只会聊天」。提示条必须跟着走，
+     * 否则用户撤回授权后还会被告知一切正常，然后看着它什么都不做。
+     *
+     * 读不到（Port 不在 Hilt 图里 / Flow 抛错）⇒ 停在 [CapabilityPresence.UNKNOWN]，
+     * 界面保持沉默，宁可不说也不说错（理由见 `CapabilityPresence` 的类注释）。
+     */
+    private fun watchCapabilities(profileId: String) {
+        val g = grants ?: return
+        capabilityJob?.cancel()
+        capabilityJob = viewModelScope.launch {
+            g.grantsOf(profileId)
+                .catch { _ui.update { s -> s.copy(capabilityPresence = CapabilityPresence.UNKNOWN) } }
+                .collect { map ->
+                    val presence = capabilityPresenceOf(map)
+                    _ui.update { s -> s.copy(capabilityPresence = presence) }
+                }
         }
     }
 

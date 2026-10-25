@@ -272,6 +272,35 @@ public fun AlertBar(text: String, color: Color = AkeColors.RiskForbidden, modifi
     }
 }
 
+/**
+ * 常驻提示条：告诉用户一件**不是错、但必须知道**的事。
+ *
+ * ## 为什么不直接复用 [AlertBar]
+ *
+ * `AlertBar` 默认是红色 + SemiBold —— 那是「结果不可信 / 已失败」的语义。而这一类提示
+ * （例：这个 Agent 还没配能力、所以只会聊天）里**用户没做错任何事**，它讲的是现状。
+ * 用红色去讲现状，用户第一反应是「我搞坏了什么」，然后去找一个不存在的修复动作。
+ *
+ * 所以这里给中性色（`surfaceVariant` 底 + `outline` 描边 + 常规字重）：
+ * 看得见、认得清、不刺眼，也不抢下面的主操作。
+ */
+@Composable
+public fun NoticeBar(text: String, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 9.dp)) {
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
 // ────────────────────────────────────────────────────────────── 输入
 
 @Composable

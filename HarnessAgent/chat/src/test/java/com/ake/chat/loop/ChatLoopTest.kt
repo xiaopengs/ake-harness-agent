@@ -20,15 +20,20 @@ import com.ake.chat.fixtures.FakeTraceStore
 import com.ake.chat.fixtures.RecordingPolicy
 import com.ake.chat.skill.BrowserTaskSkill
 import com.ake.chat.skill.ChatSkillRegistry
+import com.ake.core.common.Clock
 import com.ake.core.common.RedactionGate
 import com.ake.core.ports.CapabilityRef
 import com.ake.core.ports.ChatEvent
 import com.ake.core.ports.ChatTerminalReason
 import com.ake.core.ports.ChatTurnRequest
 import com.ake.core.ports.FocusKind
+import com.ake.core.ports.InferenceTarget
 import com.ake.core.ports.MessageStatus
 import com.ake.core.ports.NoAbortSignal
 import com.ake.core.ports.Resolved
+import com.ake.core.ports.RouteContext
+import com.ake.core.ports.RoutingDecision
+import com.ake.core.ports.RoutingPort
 import com.ake.core.ports.TurnMode
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.flow.toList
@@ -60,6 +65,7 @@ class ChatLoopTest {
         routerScript: List<String> = listOf("""{"mode":"reply"}"""),
         answer: String = "好的，我在本地帮你查过了。",
         gate: FakeHumanGate = humanGate,
+        routing: RoutingPort = LocalOnlyRoutingPort(clock),
     ): ChatLoop {
         val model = FakeModelPort(routerScript, answer)
         val isolator = InjectionIsolator(policy)
@@ -77,7 +83,7 @@ class ChatLoopTest {
             policy = policy,
             health = FakeHealth(),
             egress = ChatEgress(
-                LocalOnlyRoutingPort(clock),
+                routing,
                 LocalOnlyEgressGate(),
                 ChatEgress.AuditSink.NONE,
                 clock,
@@ -305,6 +311,155 @@ class ChatLoopTest {
         assertThat(loop.onColdStart()).isEqualTo(0)
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // P0-1：in-flight 标记的泄漏（关千锤第 3 轮验收）
+    //
+    // 每一条**提前 return** 的路径各一条测试，断言的都是同一件事：
+    //   「这条路径失败过一次之后，**同一会话**还能正常发出下一条消息」。
+    //
+    // ★ 为什么原来的测试没抓到：它只断言了第一轮（`appendFailure…` 断言了
+    //   `events.size == 1` 就结束了）。泄漏的后果**只体现在第二轮**，所以只测第一轮
+    //   的测试对这类缺陷是结构性盲的 —— 这也是本组测试存在的理由，而不是"多测一点"。
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /** 路径 ①：`resolveScope()` 返回 null（会话不存在 / 人格不可读）。 */
+    @Test
+    fun unknownSessionReleasesTheFlightMarkerAfterItFails() = runBlocking {
+        val loop = buildLoop()
+        store.sessionVisible = false
+
+        assertThat(loop.turn(request("turn-1")).toList().terminalReason())
+            .isEqualTo(ChatTerminalReason.POLICY_DENIED)
+
+        // 会话恢复可读 ⇒ 同一会话必须立刻能发。泄漏时这里会**永远**是 POLICY_DENIED，
+        // 而 ChatLoop 是单例 ⇒ 线上只能杀进程。
+        store.sessionVisible = true
+        val second = loop.turn(request("turn-2", "第二句")).toList()
+        assertThat(second.terminalReason()).isEqualTo(ChatTerminalReason.COMPLETED)
+        assertThat(second.filterIsInstance<ChatEvent.AssistantDelta>()).isNotEmpty()
+    }
+
+    /** 路径 ②：`store.append(USER)` 失败（写库失败一次）。 */
+    @Test
+    fun appendFailureReleasesTheFlightMarker() = runBlocking<Unit> {
+        val loop = buildLoop()
+        store.appendFails = true
+        assertThat(loop.turn(request("turn-1")).toList().terminalReason())
+            .isEqualTo(ChatTerminalReason.STORE_FAILED)
+
+        store.appendFails = false
+        // 关千锤的原话是「写库失败一次 ⇒ 该会话永久发不出消息」。这一行就是那句话的反面。
+        val second = loop.turn(request("turn-2", "第二句")).toList()
+        assertThat(second.terminalReason()).isEqualTo(ChatTerminalReason.COMPLETED)
+        assertThat(store.stored.map { it.role.name }).contains("ASSISTANT")
+    }
+
+    /** 路径 ③：出云裁决不是 `LOCAL_ONLY`（本模块没有云端实现 ⇒ 明确拒绝）。 */
+    @Test
+    fun egressRejectionReleasesTheFlightMarker() = runBlocking {
+        val routing = ToggleRouting(clock, InferenceTarget.CLOUD_ASSISTED)
+        val loop = buildLoop(routing = routing)
+
+        assertThat(loop.turn(request("turn-1")).toList().terminalReason())
+            .isEqualTo(ChatTerminalReason.POLICY_DENIED)
+        // 审计那一笔仍然要落下（T12），但这一轮没有生成
+        assertThat(routing.decisions).isEqualTo(1)
+
+        routing.target = InferenceTarget.LOCAL_ONLY
+        val second = loop.turn(request("turn-2", "第二句")).toList()
+        assertThat(second.terminalReason()).isEqualTo(ChatTerminalReason.COMPLETED)
+        assertThat(second.filterIsInstance<ChatEvent.AssistantDelta>()).isNotEmpty()
+    }
+
+    /** 路径 ④：轮次内部抛异常（`catch (t: Throwable)`）。它和三条 return 共用同一个 `finally`。 */
+    @Test
+    fun thrownFailureReleasesTheFlightMarker() = runBlocking {
+        val model = FakeModelPort()
+        model.throwOnGenerate = true
+        val loop = buildLoopWith(model)
+
+        assertThat(loop.turn(request("turn-1")).toList().terminalReason())
+            .isEqualTo(ChatTerminalReason.MODEL_FAILED)
+
+        model.throwOnGenerate = false
+        val second = loop.turn(request("turn-2", "第二句")).toList()
+        assertThat(second.terminalReason()).isEqualTo(ChatTerminalReason.COMPLETED)
+    }
+
+    /** 兜底性质：**连续**多次早退之后仍然可用（泄漏是累积的，一次干净不代表配对正确）。 */
+    @Test
+    fun repeatedEarlyReturnsNeverAccumulateIntoAPermanentBlock() = runBlocking<Unit> {
+        val loop = buildLoop()
+        repeat(5) { i ->
+            store.appendFails = true
+            assertThat(loop.turn(request("t-bad-$i")).toList().terminalReason())
+                .isEqualTo(ChatTerminalReason.STORE_FAILED)
+        }
+        store.appendFails = false
+        assertThat(loop.turn(request("t-good", "终于可以发了")).toList().terminalReason())
+            .isEqualTo(ChatTerminalReason.COMPLETED)
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // P0-3：落盘失败必须归因到 STORE_FAILED，而不是 MODEL_FAILED
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test
+    fun storeFailureIsStoreFailedNotModelFailed() = runBlocking {
+        val loop = buildLoop()
+        store.appendFails = true
+        val terminal = loop.turn(request()).toList().terminalReason()
+
+        assertThat(terminal).isEqualTo(ChatTerminalReason.STORE_FAILED)
+        // 这一条是本测试的重点：借 MODEL_FAILED 会让 UI 显示「模型出错了」，
+        // 而用户照着那条建议去换模型 / 清缓存，一次都不会有用。
+        assertThat(terminal).isNotEqualTo(ChatTerminalReason.MODEL_FAILED)
+    }
+
+    @Test
+    fun beginAssistantFailureIsAlsoStoreFailedAndSkipsGeneration() = runBlocking {
+        val loop = buildLoop()
+        store.beginFails = true
+        val events = loop.turn(request()).toList()
+
+        assertThat(events.terminalReason()).isEqualTo(ChatTerminalReason.STORE_FAILED)
+        // 占位行都建不出来 ⇒ 一个 delta 都不该发（否则 UI 会渲染一条永远收不了尾的气泡）
+        assertThat(events.filterIsInstance<ChatEvent.AssistantDelta>()).isEmpty()
+    }
+
+    @Test
+    fun commitFailureIsRetriedOnceThenReportedAsStoreFailed() = runBlocking {
+        val loop = buildLoop()
+        store.commitFails = true
+        val events = loop.turn(request()).toList()
+
+        // ① 同一轮内重试过一次「落盘」（不是重新生成）
+        assertThat(store.commitAttempts).isEqualTo(2)
+        // ② 模型那边的生成只跑了一次（重试的是 commit，不是整轮）
+        assertThat(events.filterIsInstance<ChatEvent.AssistantDelta>()).isNotEmpty()
+        // ③ 终态归因到存储
+        assertThat(events.terminalReason()).isEqualTo(ChatTerminalReason.STORE_FAILED)
+    }
+
+    /**
+     * 反向断言：**模型**失败仍然是 `MODEL_FAILED`。
+     *
+     * 没有这一条，把落盘失败改归 `STORE_FAILED` 这件事很容易被"顺手"做成
+     * 「凡是 Err 都是 STORE_FAILED」—— 那是同一个错误的反方向，只是换了一批用户被误导。
+     */
+    @Test
+    fun modelFailureIsStillModelFailed() = runBlocking {
+        val model = FakeModelPort()
+        val loop = buildLoopWith(model)
+
+        loop.turn(request("turn-1")).toList()
+        // 复用同一个会话 ⇒ 让它的下一次 generate 返回 Outcome.Err（不是抛异常）
+        model.lastSession!!.failGenerate = true
+
+        assertThat(loop.turn(request("turn-2", "第二句")).toList().terminalReason())
+            .isEqualTo(ChatTerminalReason.MODEL_FAILED)
+    }
+
     // ── 便捷构造（保持与 buildLoop 同一套依赖，只是把 model 暴露出来断言 opened 次数）
 
     private fun buildLoopWith(
@@ -343,4 +498,34 @@ class ChatLoopTest {
 
     /** 固定时间源的 router：`callId` 里不能出现随机 ULID，否则断言无法逐字节比对。 */
     private val SkillRouterForTest = com.ake.chat.skill.SkillRouter(nowMillis = { 1_000L })
+}
+
+/** 最后一个事件必须是 `Terminal`（契约：终结语在最后）。断错形态会立刻炸在这里。 */
+private fun List<ChatEvent>.terminalReason(): ChatTerminalReason =
+    (last() as ChatEvent.Terminal).reason
+
+/**
+ * 可切换裁决的路由端口。
+ *
+ * 生产里 `RoutingPort` 恒裁决 `LOCAL_ONLY`（MVP），所以「裁决不是 LOCAL_ONLY」这条
+ * 提前返回路径**无法用真实实现触发** —— 只能用这个假件。它是 P0-1 路径 ③ 的唯一入口。
+ */
+private class ToggleRouting(
+    private val clock: Clock,
+    var target: InferenceTarget = InferenceTarget.LOCAL_ONLY,
+) : RoutingPort {
+
+    var decisions: Int = 0
+        private set
+
+    override suspend fun decide(ctx: RouteContext): RoutingDecision {
+        decisions++
+        return RoutingDecision(
+            target = target,
+            reasonKey = "test_route",
+            allowedClasses = emptySet(),
+            redactionApplied = true,
+            decidedAt = clock.nowMillis(),
+        )
+    }
 }

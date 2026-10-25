@@ -17,7 +17,7 @@ import com.ake.ui.R
  *
  * ## 为什么用 `when` 穷尽而不查表
  *
- * `ChatTerminalReason` 是封闭枚举，`when` 无 `else` 分支 ⇒ 同事新增第 8 个终态时
+ * `ChatTerminalReason` 是封闭枚举，`when` 无 `else` 分支 ⇒ 同事新增第 9 个终态时
  * **本文件编译失败**，而不是静默落到"未知原因"。聊天页最不能忍的就是
  * "出错了"三个字 —— 用户既不知道发生了什么，也不知道下一步做什么。
  */
@@ -71,6 +71,31 @@ public fun chatTerminalCopyOf(reason: ChatTerminalReason): ChatTerminalCopy = wh
     ChatTerminalReason.MODEL_NOT_LOADED -> ChatTerminalCopy(
         titleRes = R.string.chat_term_model_not_loaded_title,
         nextRes = R.string.chat_term_model_not_loaded_next,
+        retryable = true,
+    )
+
+    /**
+     * ★ **模型答完了，但没存下来**（`core:ports` 的 `ChatTerminalReason.STORE_FAILED`）。
+     *
+     * ## 为什么这一档绝不能复用 `chat_term_model_failed_*`
+     *
+     * 那两句文案把用户引向「换模型 / 清缓存 / 重下权重」，而这一档的真实成因是
+     * 磁盘满、迁移失败、事务被打回 —— 用户按「模型坏了」去处理，做完全部动作
+     * 之后重试仍然失败，然后合理地认为这个 App 坏了。**归因错位的文案比没有文案更糟**：
+     * 它消耗掉用户对「重试」这个动作的信任。
+     *
+     * 所以这里的三句话各有分工：标题说「回答是好的」（保住用户已经看到的内容的价值），
+     * 正文把责任指到存储（腾空间才是对症的），并且明说重试会重新生成一遍
+     * （本枚举不携带文本，模型产出只活在那一轮的内存里 —— 见 `Chat.kt` 该值的注释）。
+     *
+     * ## 为什么 `retryable = true`
+     *
+     * 存储抖动是**瞬时**失败里最典型的一类，把整轮重发一次是有效的；
+     * 而 `clientRequestId` 保证 USER 消息不会重复落盘。
+     */
+    ChatTerminalReason.STORE_FAILED -> ChatTerminalCopy(
+        titleRes = R.string.chat_term_store_failed_title,
+        nextRes = R.string.chat_term_store_failed_next,
         retryable = true,
     )
 }

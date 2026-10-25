@@ -27,9 +27,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.ake.core.ports.AgentProfile
+import com.ake.core.ports.CapabilityRef
 import com.ake.core.ports.ProfileOrigin
 import com.ake.core.ports.TrustScanVerdict
 import com.ake.ui.R
@@ -39,12 +41,15 @@ import com.ake.ui.components.AlertBar
 import com.ake.ui.components.DangerButton
 import com.ake.ui.components.EmptyHint
 import com.ake.ui.components.FactRow
+import com.ake.ui.components.NoticeBar
 import com.ake.ui.components.SecondaryButton
 import com.ake.ui.components.SectionCard
 import com.ake.ui.components.SkeletonLine
 import com.ake.ui.components.Tag
 import com.ake.ui.components.TinyButton
+import com.ake.ui.components.kindLabelOf
 import com.ake.ui.components.relativeTimeLabel
+import com.ake.ui.model.CapabilityPresence
 import com.ake.ui.theme.AkeColors
 import com.ake.ui.util.collectAsStateWithLifecycle
 
@@ -107,6 +112,8 @@ public fun AgentDetailScreen(
 
             else -> ProfileBody(
                 profile = ui.profile!!,
+                capabilities = ui.capabilities,
+                capabilityPresence = ui.capabilityPresence,
                 nowMillis = viewModel.nowMillis(),
                 onClone = onClone,
                 onArchive = viewModel::archive,
@@ -143,6 +150,8 @@ public fun AgentDetailScreen(
 @Composable
 private fun ProfileBody(
     profile: AgentProfile,
+    capabilities: List<CapabilityRef>,
+    capabilityPresence: CapabilityPresence,
     nowMillis: Long,
     onClone: (String) -> Unit,
     onArchive: () -> Unit,
@@ -218,10 +227,49 @@ private fun ProfileBody(
         title = stringResource(R.string.agent_detail_capabilities),
         subtitle = stringResource(R.string.agent_detail_capabilities_hint),
     ) {
-        // 两个 Port 都还没接线，所以这里不画开关 —— 画了也只会是假开关
-        AlertBar(stringResource(R.string.agent_detail_cap_missing), color = AkeColors.RiskSensitive)
-        Spacer(Modifier.height(6.dp))
-        AlertBar(stringResource(R.string.agent_detail_grant_missing), color = AkeColors.RiskSensitive)
+        when (capabilityPresence) {
+            // ★ 零能力（P0-4）：说清后果 + 给出唯一真实存在的路径。
+            //   不写「去详情页添加」—— 这一页没有开关，那样写等于让用户在这里找按钮。
+            CapabilityPresence.NONE -> {
+                NoticeBar(stringResource(R.string.agent_detail_cap_empty))
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = stringResource(R.string.agent_detail_cap_empty_next),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            CapabilityPresence.GRANTED -> {
+                Text(
+                    text = stringResource(R.string.agent_detail_cap_present, capabilities.size),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(6.dp))
+                capabilities.forEach { ref ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Tag(kindLabelOf(ref.kind), MaterialTheme.colorScheme.outline)
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = ref.id,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+
+            // 读不到就说读不到。把 UNKNOWN 画成「暂无能力」是最坏的一种：
+            // 用户会去重配一遍已经配好的东西，然后认定配置不生效。
+            CapabilityPresence.UNKNOWN -> NoticeBar(stringResource(R.string.agent_detail_cap_unreadable))
+        }
+
         Spacer(Modifier.height(6.dp))
         Text(
             text = stringResource(R.string.agent_detail_cap_limit, profile.maxEnabledSkills),

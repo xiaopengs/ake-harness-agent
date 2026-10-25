@@ -203,8 +203,14 @@ private fun CapabilityRow(
     }
 }
 
+/**
+ * 能力来源 → 中文标签。
+ *
+ * 公开是为了让**只读**的能力清单（Agent 详情页）与这里的勾选列表用同一句话 ——
+ * 同一个 `BUILTIN` 在两处显示成「内置」和 `BUILTIN`，用户会以为是两种东西。
+ */
 @Composable
-private fun kindLabelOf(kind: CapabilityKind): String = when (kind) {
+public fun kindLabelOf(kind: CapabilityKind): String = when (kind) {
     CapabilityKind.BUILTIN -> stringResource(R.string.cap_kind_builtin)
     CapabilityKind.MCP_TOOL -> stringResource(R.string.cap_kind_mcp)
     CapabilityKind.PLUGIN -> stringResource(R.string.cap_kind_plugin)

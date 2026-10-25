@@ -226,10 +226,25 @@ dependencies {
     // McpHiltModule 显式用 OkHttp engine（Android 上默认 engine 有连接复用问题）。
     implementation(libs.ktor.client.okhttp)
 
-    // ★ `room-runtime` 已于本轮删除：它原本只为 `ModelDistributionModule` 里那行临时的
+    // ★ `room-runtime` 曾于上一轮删除：它原本只为 `ModelDistributionModule` 里那行临时的
     //   `provideModelAssetDao(db)` 服务。账本装配已搬进 `:data` 的 `PersistenceModule`
-    //   （`provideModelAssetLedger`），`:app` 现在只注入 `ModelAssetLedger` 本身，
-    //   一行 Room 都不碰。
+    //   （`provideModelAssetLedger`），`:app` 只注入 `ModelAssetLedger` 本身，不碰 Room。
+    //
+    // ★★ 2026-10 重新加回（关千锤 P0-2 的直接后果），理由与上一轮不同、也不冲突：
+    //   `TemplateBootstrap.bootstrap()` 的入参是三张表的 **Room DAO**
+    //   （`TemplateDao` / `AgentProfileDao` / `CapabilityGrantDao`），而
+    //   `:data` 的 `PersistenceModule` 只 `@Provides AkeDatabase`，**没有**把这三个 DAO
+    //   单独暴露成 Hilt 绑定。`:app` 要拿到 DAO，只能先拿到 `AkeDatabase`；
+    //   而要**引用** `AkeDatabase`（它继承 `androidx.room.RoomDatabase`），
+    //   编译期就必须能看见 `RoomDatabase` 这个父类型 —— 缺它时 Kotlin 报的是
+    //   「Cannot access 'androidx.room.RoomDatabase' which is a supertype of 'AkeDatabase'」。
+    //
+    //   ⇒ 这条依赖不是「又想在 :app 里写 SQL」，而是「组合根必须能拿到 :data 门户对象的类型」。
+    //     **纪律不变**：`:app` 依然不写任何 DAO 查询，只把三个 DAO 原样交给
+    //     `:data` 自己的 `TemplateBootstrap`（它是模板/授权的唯一写入口）。
+    //     真要彻底去掉这一行，得由 `:data` 把 `TemplateBootstrap` 包成一个
+    //     `@Inject` 门面（那属于宋砚秋的模块，本轮不动）。
+    implementation(libs.androidx.room.runtime)
 
     testImplementation(libs.bundles.testUnit)
 }

@@ -3,6 +3,7 @@ package com.ake.app
 import android.app.Application
 import android.content.ComponentCallbacks2
 import com.ake.app.di.MemoryReleaser
+import com.ake.app.startup.ColdStartCoordinator
 import com.ake.core.common.AkeLog
 import com.ake.core.common.StdoutLogSink
 import dagger.hilt.android.HiltAndroidApp
@@ -26,9 +27,27 @@ public class AkeApp : Application() {
     @Inject
     internal lateinit var memoryReleaser: Provider<MemoryReleaser>
 
+    /**
+     * 冷启动收尾（模板 bootstrap + `STREAMING` 收敛）。
+     *
+     * ★ 同样用 `Provider`，理由同上：这里只要求**它被创建**，不需要它的任何成员。
+     *   它的构造函数立刻返回（工作体在 `init` 里 `scope.launch` 出去，跑在 `:data`
+     *   的单线程 writer 上），所以这一行不阻塞冷启。
+     *
+     * ★ 为什么必须有这一行：`TemplateBootstrap.bootstrap()` 与 `ChatLoop.onColdStart()`
+     *   上一轮的**生产调用点为 0** —— 方法写得对、单测也过，但没人从启动路径上喊它们，
+     *   于是模板市场永久空白、存量人格永久哑、`STREAMING` 永不收敛。
+     *   单例的 `init` 自触发（与 `TaskStateWriter` 调 `TaskReconciler` 同款）保证了
+     *   「只要装配就一定跑」，`app/src/test/.../ColdStartWiringTest` 守着这条接线不被剪掉。
+     */
+    @Inject
+    internal lateinit var coldStart: Provider<ColdStartCoordinator>
+
     override fun onCreate() {
         super.onCreate()
         AkeLog.install(AndroidLogSink)
+        // 尽早触发：Activity / Compose 都还没起来，模板库与脏状态收敛走在 UI 第一次读表之前。
+        coldStart.get()
     }
 
     override fun onTrimMemory(level: Int) {

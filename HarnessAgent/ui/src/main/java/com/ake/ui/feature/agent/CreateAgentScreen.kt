@@ -30,6 +30,7 @@ import com.ake.ui.R
 import com.ake.ui.components.AlertBar
 import com.ake.ui.components.CapabilityPicker
 import com.ake.ui.components.LabeledField
+import com.ake.ui.components.NoticeBar
 import com.ake.ui.components.SectionCard
 import com.ake.ui.theme.AkeColors
 import com.ake.ui.util.collectAsStateWithLifecycle
@@ -176,6 +177,18 @@ public fun CreateAgentScreen(
                     null
                 },
             )
+
+            // ★ 零能力提示（P0-4）。三条设计约束：
+            //   ① **不禁用「创建」** —— 一个只会聊天的 Agent 是完全正当的用法，
+            //      拿按钮去挡等于替用户判断他不需要什么；
+            //   ② 说清**后果**（只会聊天、不会开网页、不会调工具），而不是说「建议配置」——
+            //      后者听起来像优化建议，用户会跳过；
+            //   ③ 给出**具体路径**（详情页 →「以它为模板新建」），因为详情页本轮是只读的，
+            //      写「去详情页添加」会让用户到了那里找不到任何开关。
+            if (ui.selected.isEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                NoticeBar(stringResource(R.string.create_no_capability_notice))
+            }
         }
 
         Spacer(Modifier.height(14.dp))

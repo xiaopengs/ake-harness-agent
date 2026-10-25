@@ -2,7 +2,11 @@
 
 > 验收人：关千锤（Gideon Anvil）· 上线交付验收专家 · Phase 4
 > 上游输入：`docs/01-architecture.md`（顾图南）、`docs/02-database.md`（宋砚秋）、`docs/03-build-and-deploy.md`（韩渡川）
-> 工程根：`HarnessAgent/` · 11 个 Gradle 模块 · 包名 `com.ake.*`
+> 工程根：`HarnessAgent/` · 12 个 Gradle 模块（第 3 轮新增 `:chat`）· 包名 `com.ake.*`
+
+> 📌 **阅读顺序提示（第 3 轮补）**：**最新裁定在 §9（第 3 轮复审）**。
+> 下方 §0–§8 是**第 2 轮的原始记录，按原样完整保留**，用于对照「哪些结论被改变了」。
+> 若两者冲突，以 §9 为准。
 
 > ---
 > **🔄 复审记录（第 2 轮 · 关千锤）**
@@ -1544,9 +1548,791 @@ Step 7 · 内部轨道 ≥1 周
 |---|---|---|---|---|
 | 第 1 轮 | Phase 4 | 🔴 NO-GO | ①从未出包 ②R8/AGP 从未执行 ③零测试 | — |
 | **第 2 轮** | 2026-10 复审 | 🔴 **NO-GO（维持）** | **①从未在任何真机运行**（唯一剩余）+ R-I(未签名) + R-H(无 manifest) + R-J(CI 未生效) | ①②③ 全部解除；R-G 降 P1；新增 §2.9 N 系列 9 项；新增 R-I / R-J 两条风险；新增 D8–D11 四条技术债 |
-| 第 3 轮（待触发） | — | 待定 | 需在 M3–M6 跑通后重新提交 | — |
+| 第 3 轮 | 2026-10 复审 | 🔴 **NO-GO（维持）** | **①仍零真机（R-A 未动）** + R-I(未签名) + R-H(无 manifest) + **🆕两条「已修复」是死代码** + **🆕会话级永久锁死** | 新增 §9：`:chat` 分层未被破坏（守卫经负向测试证明非永真）；迁移经**真实 SQLite 执行**验证结构全对、但安全性论证被证伪；新识别 5 条 P0 |
 
 ---
 
 *关千锤（Gideon Anvil）· 阿客实验室研发部 · 上线交付验收专家*
-*Phase 4 · 上线验收门禁 · **第 2 轮复审***
+*Phase 4 · 上线验收门禁 · **第 3 轮复审***
+
+---
+---
+
+# 第 3 轮复审（聊天对话 + 创建 Agent）
+
+> **🔄 复审记录（第 3 轮 · 关千锤）**
+>
+> | 项 | 内容 |
+> |---|---|
+> | 复审触发 | 主理人：第 3 轮新增「聊天对话 + 创建 Agent」整层（commit `97fd085`），第 2 轮 NO-GO 需重裁 |
+> | 本轮新增面 | 设计 `docs/05` / `docs/06`（4,662 行）· 新模块 `:chat`（3,363 行主 + 2,168 行测试）· `:data` Room v3（6 张新表 + `memory_card` 重建 + Migration 2→3）· `:ui` 23 文件 · `:llm` 分档夹紧 / 复水 / 真流式 |
+> | 本轮裁定 | **NO-GO（维持）** —— 见 §9.1 |
+> | 变化的部分 | 第 2 轮四条理由：**3 条维持原状，1 条（从未真机）不仅未动，其暴露面还扩大了一层**。新增 5 条 P0，其中 3 条是 `:chat` 层自己的缺陷，且**全部只有真机能暴露** |
+> | 证据获取方式 | 标注「🔬 实跑」的条目为本轮我在 `/workspace/HarnessAgent` 上实际执行的命令 / 产物核对 / **在真实 SQLite 上执行迁移**所得，不引用任何成员自述 |
+
+---
+
+## 9.1 结论摘要
+
+### 🔴 判定：**NO-GO —— 仍不可对外发布**
+
+| 项 | 结论 | 与第 2 轮对比 |
+|---|---|---|
+| 能否上架 / 对外分发 | **不能** | 未变 |
+| 能否进内部测试轨道 | **不能** | 未变（阻挡项从 3 条变 3+5） |
+| 能否侧载 debug 包做 M3–M6 | ✅ **仍可，且今天就该做** | 未变 |
+| 代码质量 | 设计与注释水准仍高，**但本轮首次出现「注释承诺 ≠ 代码事实」的成片区域** | **下降** |
+| 唯一剩余的充分理由 | **从未在任何真机上运行过一次** | **未变（第 3 轮了）** |
+
+### 一句话理由
+
+> 上一轮我写「它停在了打包层与 R8 符号层」。这一轮它**确实又前进了一层** —— `:chat` 没有破坏分层、没有重抄预算、迁移在真实 SQLite 上跑得通、533 个测试我自己跑也是全绿。
+>
+> **但它同时暴露出一种新的、比上一轮更危险的问题：三处「已修复」在代码里并不成立。**
+>
+> - 授权回填与模板引导**没有任何生产调用点**（只有测试调它）⇒ 存量人格仍然是哑的；
+> - 流式消息的 `STREAMING` 收敛入口 `onColdStart()` **同样没有调用点** ⇒ 进程被杀留下的消息永远不会变成「已中断」；
+> - 会话并发锁在三条提前返回路径上泄漏 ⇒ **写库失败一次，这个会话就永久发不出消息**，而 UI 显示的是「策略拒绝，不可重试」。
+>
+> 这三条的共同点是：**JVM 单测按结构就不可能发现**（测试自己调函数，测试永远看得见调用点）。一个 533 全绿的工程，可以同时存在「三个入口没人调」和「一个锁永远不释放」。这正是第 2 轮 §6 说的「静默」，本轮它以更具体的形式出现了。
+
+### 第 2 轮四条理由：逐条对账
+
+| # | 第 2 轮理由 | 本轮状态 | 依据 |
+|---|---|---|---|
+| 1 | ~~从未产出过可安装 APK~~ | ✅ **已解除（未变）** | debug 99,711,024 B / 95.09 MiB，含 v2 签名块 🔬 |
+| 2 | ~~R8 与 AGP 从未执行~~ | 🟡 **维持 P1（未变）** | 本轮**关闭构建缓存**重跑，R8 真实执行 3m10s；符号层继续存活 🔬。行为仍未知 |
+| 3 | ~~测试近乎为零~~ | ✅ **已解除（未变）** | **533 通过 / 0 失败 / 0 跳过**，我自己汇总 JUnit XML 🔬 |
+| 4 | **从未在任何真机上运行过一次** | 🔴 **仍然成立，且暴露面扩大** | `adb` 在 `/opt/android-sdk/platform-tools/adb` 存在但 `adb devices` **为空** 🔬；`androidTest` 目录数 **0** 🔬 |
+
+> **口径必须说清**：第 3 轮不是「变差」了。工程侧的绝对进度很大（新模块、新迁移、+147 个测试、真流式）。**变差的是「自述与事实的距离」** —— 上一轮团队说的每一条我复核后都成立；这一轮出现了三条不成立的，而它们恰好都出现在「上机前最后一道兜底」这个位置上。
+
+---
+
+## 9.2 我自己跑出来的数字（不引用任何汇报）
+
+| 命令 | 结果 | 备注 |
+|---|---|---|
+| `./gradlew test --no-daemon --rerun-tasks` | **BUILD SUCCESSFUL in 1m 40s**；**533 通过 / 0 失败 / 0 错误 / 0 跳过** 🔬 | 直接汇总 50 个 JUnit XML，非引用自述 |
+| `./gradlew checkModuleDependencies --no-daemon` | **OK — 12 个模块的依赖边均在白名单内** 🔬 | 另做**负向测试**，见 §9.3 |
+| `./gradlew :app:assembleRelease --no-daemon --no-parallel --no-build-cache` | **BUILD SUCCESSFUL in 3m 10s**，`minifyReleaseWithR8` **真实执行** 🔬 | 首次跑为 `UP-TO-DATE`、二次为 `FROM-CACHE`，**均不接受**，关缓存后才作数 |
+| release 产物 | `app-release-unsigned.apk` **63,566,731 B / 60.62 MiB** 🔬 | 与团队数字一致 |
+| debug 产物 | `app-debug.apk` **99,711,024 B / 95.09 MiB** 🔬 | |
+| `mapping.txt` | **80,588,932 B** 🔬 | 上轮 76,226,539 B |
+| 签名 | release **无 v1 / 无 v2-v3 签名块**；debug **有 v2** 🔬 | **R-I 未解除** |
+| 模型红线 | `src/main/assets` 仅 `dom-extract.js`；全仓无 `.litertlm/.task/.gguf/.safetensors` 🔬 | 通过 |
+
+**用例分布（🔬 逐模块汇总 JUnit XML）**
+
+| 模块 | 本轮 | 第 2 轮 | 变化 |
+|---|---:|---:|---|
+| `:data` | **205** | 188 | +17 |
+| **`:chat`** | **106** | — | 🆕 新模块 |
+| `:agent` | 78 | 78 | — |
+| `:mcp` | 69 | 69 | — |
+| `:llm` | **38** | 14 | +24 |
+| `:core:common` | 25 | 25 | — |
+| `:core:ports` | 12 | 12 | — |
+| **`:ui`** | **0** | 0 | ❌ **源码从 4,975 → 8,702 行，测试仍为 0** |
+| `:app` | 0 | 0 | ❌ 1,605 行 |
+| `:browser` | 0 | 0 | ❌ 1,255 行 |
+| `:core:contract` | 0 | 0 | ❌ 914 行 |
+| `:core:model-api` | 0 | 0 | ❌ 253 行 |
+| **合计** | **533** | 386 | **零测试面 8,702+1,605+1,255+914+253 = 12,729 行**（上轮记录 8,755 / 8,855 两处数字不一致，本轮以实测为准） |
+
+> **本轮最该被记住的一个数字不是 533，是 12,729。** 新增的 3,700 行 UI 一行测试都没有，而**聊天的全部失败态正是在这一层被渲染成用户能看到的那句话**。
+
+**R8 符号（🔬 逐条查 mapping.txt）**
+
+| 高危点 | 结果 |
+|---|---|
+| `@JavascriptInterface` `deliver` / `deliverError` | ✅ 原名保留（与 JS 侧字面量一致） |
+| Room `*_Impl` | ✅ **16 个**（上轮 10 个，新增聊天 DAO） |
+| `com.google.ai.edge.**` | ✅ 954 条保留 |
+| `com.ake.chat.**` | ✅ **76 个类真进了 release classpath**（`ChatLoop -> zb0:` 已混淆，属正常） |
+| Hilt `*_Factory` 被树摇 | ⚠️ **663 个** `R8$$REMOVED$$CLASS` —— **上轮的 N-5 仍未裁决** |
+
+---
+
+## 9.3 重点审查一：`:chat` 有没有破坏分层不变量？
+
+**结论：没有破坏。而且我没有只信守卫 —— 我做了负向测试证明守卫不是永真的。**
+
+### ① 反向 import 人眼抽查 🔬
+
+```
+grep -rn "import com\.ake\.(ui|data|mcp|browser)" chat/src/   ⇒ 零命中
+```
+
+`chat/build.gradle.kts` 只有一条向下的实现层边 `:chat → :agent`，其余全是 `:core:*`。全仓 `:chat` 3,363 行主源码里**没有任何一处**触碰 `:ui` / `:data` / `:mcp` / `:browser`。
+
+### ② 守卫是否永真？—— 我在临时副本里注入越层，看它会不会红 🔬
+
+第 2 轮的 N-7 指出「守卫缺负向测试」，本轮仍然缺。**我自己补了这一刀**（在 `/tmp/neg` 的副本上做，**没有改动仓库任何文件**）：
+
+```
+注入 :chat → :data（Gradle 边）
+⇒ checkModuleDependencies FAILED
+   ✗ :chat → :data【白名单未列】允许的上游只有 [:agent, :core:common, :core:contract, :core:model-api, :core:ports]
+
+还原后，注入 import com.ake.data.persist.db.AkeDatabase（源码边）
+⇒ checkModuleDependencies FAILED
+   ✗ :chat → com.ake.data.persist.db.【源码越层】  chat/src/.../ChatBudget.kt: import com.ake.data.persist.db.AkeDatabase
+```
+
+> **这解决了我上一轮最担心的「守卫可能是永真的绿灯」。它不是。两道断言都真的会红。**
+> **建议把这两条负向用例固化成脚本进 CI**（成本半小时，收益是守卫从「我相信」变成「我验证过」）。
+
+**残余缺口（P2）**：守卫只遍历 `archAllowedEdges` 里列出的模块。**磁盘上新增一个不在白名单里的模块时，它会被静默跳过。** 建议改成「以 `settings.gradle.kts` 的 include 清单为准，白名单缺项即报错」。
+
+### ③ 有没有在 `:chat` 里重抄一份预算算法？（§2.2 明令禁止项）
+
+**没有。这是本轮做得最好的一件事，我逐项核过：**
+
+| 关注点 | 复用情况 | 证据 |
+|---|---|---|
+| 上下文窗口 / 分段 cap | ✅ 用 `:agent` 的 `ContextBudget.forTier()` 与 `SegmentCaps` 数据类 | `ChatBudget.forTier` 里不含任何窗口字面量，全走 `forTier(tier)`；`ModeProfile` 复用 `SegmentCaps` 而非新造 cap 类型 |
+| 降级动刀顺序 | ✅ 复用 `SegmentId`；模式专属顺序是**新表**而**非新算法** | `ModeProfile.degradationOrder` 由构造期断言保证「SYSTEM 永不在列」 |
+| **九张 cap 表求和** | ✅ **构造期 `require` 强制等于 `usablePromptTokens`** | 我在 `ModeProfile.kt` 里逐张验算了 3 档 × 3 模式的 9 张表，**全部精确相等**（7296 / 3712 / 15360） |
+| Prompt 组装与降级阶梯 | ✅ 调 `:agent` 的 `ContextAssembler`，`FixedSystemCharter.EMPTY` | `ChatLoop.assemble()` 是唯一组装点 |
+| 注入隔离 | ✅ 同一个 `InjectionIsolator` | 技能返回走 `isolate(..., TOOL_RETURN, ...)`，与任务侧同一条闸 2 |
+| 压缩器 | ✅ 复用 `DeterministicCompactor` 的纪律；聊天侧只做「轮→行」投影 | `ChatHistoryCollector` 未自造装箱算法，注释显式对齐 `compactToBudget` 的「从 `asReversed()` 开始装」细节 |
+
+**唯一像「第二套」但实际不是的地方**：`TurnLedger.remainingPct()` 与任务的 `LoopBudget.remainingPct(UsageTotals)` 并存。二者语义不同（单轮 vs 累计），且 `TurnLedger` 的窗口来自同一个 `ContextBudget` 实例。**可接受。**
+
+**一个新发现（P2）**：`ChatBudget` 里 `maxTurnsPer24h`（120/240/400）与 `maxPrefillTokensPerDay`（200k/600k/1.5M）**全仓无任何读取点** 🔬 —— 声明了日限额但从未校验。也就是说「一天最多聊 120 轮」这条限制在代码里不存在。要么补实现，要么从数据结构里删掉：**留着一个永远为真的约束，比没有约束更坏**（它会让评审者以为有闸）。
+
+---
+
+## 9.4 重点审查二：Room v3 迁移在真机上跑会怎样？
+
+> 宋砚秋的判断是「测试写法改了，迁移本来是对的，需要在真机确认」。**我没有真机，但我有 SQLite。**
+> 我用 SDK 自带的 `sqlite3 3.50.6` 建了一个 v2 库（直接用 `2.json` 的 `createSql` 还原 43 条 DDL）、灌入合法种子数据，然后把 `ChatMigration2To3.STATEMENTS` **逐条在事务里执行**，再用 PRAGMA 反读结构。这是「能拿到的最接近真机的证据」。
+
+### ① 迁移能跑通吗？—— 能，且结构完全正确 🔬
+
+```
+PRAGMA foreign_keys=ON;  BEGIN;
+<40 条语句逐条执行>
+PRAGMA foreign_key_check;   ⇒ 0 行
+COMMIT;                     ⇒ 无错误
+```
+
+**用 PRAGMA 反读迁移后的库，与 `3.json` 逐表逐列比对（这正是 Room 打开库时会做的事）**：
+
+```
+校验表数：19
+✅ 列 / 类型 / NOT NULL / 主键 / 外键（含 ON DELETE / ON UPDATE）/ 索引（唯一性 + 列序）全部一致
+```
+
+**旧数据也保住了**：
+
+```
+m1|k1|agent_id=NULL|source_task_id=t1|title 保留
+m2|k2|agent_id=NULL|source_task_id=NULL|title 保留
+```
+
+> **所以「迁移本来是对的」这个判断，在结构层面成立，而且我现在有了比团队自己那条字符串测试硬得多的证据。** 这一点我要明确给宋砚秋记上。
+
+### ② 但那条「12 步安全重建」的安全性论证是错的 🔬
+
+`ChatMigration2To3` 的 KDoc 写着：
+
+> ① **先 `PRAGMA foreign_keys=OFF` 再动**……开着外键做 DROP TABLE 会让 CASCADE/SET NULL 真的执行 —— **那就不是重建，是删数据**。
+
+**实测**：在事务内执行 `PRAGMA foreign_keys = OFF` 之后立刻回读：
+
+```
+>>> AFTER stmt 29 (PRAGMA foreign_keys = OFF) foreign_keys = 1     ← 仍然开着
+>>> AFTER stmt 39 (PRAGMA foreign_keys = ON)  foreign_keys = 1
+```
+
+**SQLite 官方语义**：`foreign_keys` 是**事务内 no-op**——「may only be enabled or disabled when there is no pending BEGIN or SAVEPOINT」。而 Room 的 `Migration.migrate()` 本身就跑在一个事务里；`AkePragmaDriver` 每条连接都开了 `PRAGMA foreign_keys = ON`。
+
+**⇒ 那条「关外键」从未生效过，而这恰好是它自称要防的那件事的反面。**
+
+**为什么这次没出事**：我查了 `2.json` 的**全部 12 条外键，没有任何一条把 `memory_card` 当父表** 🔬。所以 `DROP TABLE memory_card` 的外键动作无从触发。**是运气，不是设计。**
+
+**风险不在今天，在下一步**：只要将来有人加一条 `chat_message → memory_card` 之类的外键，**同一段代码就会静默级联删数据**，而它上面还写着「已关外键，安全」。这正是第 2 轮 N-2 那类「构建成功但行为错误」的同构问题：**注释给人安全感，代码不给。**
+
+**建议（P1，成本低）**：既然关不掉，就把论证改成「本表无父表引用」并**加一条断言**——迁移后 `PRAGMA foreign_key_check` 已有了，再加一条「迁移前后 `memory_card` 行数相等」（这才是「不是删数据」的直接证据）。真正的关外键只能在 Room 事务之外做，那要换 `RoomDatabase.Callback` 或自管连接，**不建议现在动**。
+
+### ③ 「幂等」这条声明不成立，且引用了一个不存在的测试 🔬
+
+KDoc 写「幂等性有专门一条断言（`ChatMigrationTest.migrationIsIdempotent`）」。**全仓检索：`ChatMigrationTest` 只在一处注释里出现，没有任何这个文件** 🔬。`data/src/test/.../persist/db/` 下只有 `AkeMigrationSchemaTest.kt` 一个文件。
+
+实测重跑同一段迁移：
+
+```
+Parse error: duplicate column name: chat_session_id
+Parse error: duplicate column name: chat_message_id
+Parse error: duplicate column name: trigger_source
+… 共 8 条 duplicate column
+```
+
+**`ALTER TABLE ADD COLUMN` 没有 `IF NOT EXISTS`，结构性不幂等。** 而 `everyCreateIsIdempotent` 只检查 `CREATE` 语句带 `IF NOT EXISTS` —— **它给了一个「幂等已验证」的假信号**。
+
+**严重度校准（我不夸大）**：因为 Room 把迁移包在事务里，**失败会整体回滚**，所以「重跑到一半」这个场景实际不会发生。⇒ 这不是 P0，是**文档失真 + 引用幽灵测试**（P1）。但它和第 2 轮 N-6「CI 文件放在 GitHub 不读的位置」是同一类病：**用一份看起来很像证据的东西替换证据**。
+
+### ④ 迁移失败会怎样？有没有 fallback？—— **没有 fallback（对的），但也没有出口（错的）**
+
+| 问题 | 事实 |
+|---|---|
+| `fallbackToDestructiveMigration` 开了吗？ | **没有。全仓只在注释里出现一次** 🔬 ✅ **这是正确的决定**——开了就是「用户聊天记录静默清空」 |
+| 迁移抛异常时？ | `Migration.migrate()` 抛 ⇒ Room 打开库失败 ⇒ `IllegalStateException` |
+| 有迁移前备份吗？ | **没有** 🔬 没有 `db.copy()` / 没有 `.bak` |
+| 有失败后的降级吗（只读模式 / 导出 / 提示）？ | **没有** 🔬 |
+| 用户实际看到什么？ | Store 层用 `runCatching` 把异常收敛成 `Outcome.Err(CODE_IO)`；`ChatLoop` 把它映射成 **`STORE_FAILURE_REASON = MODEL_FAILED`** ⇒ UI 显示「模型出错了」，且 **`retryable = true`** ⇒ **用户会无限重试，永远失败** |
+
+> **这就是本轮我认为最需要修的一条链**：不是「迁移会失败」（它很可能不失败，我上面刚证明了结构全对），而是**万一失败，这个 App 会用一句错误的话把用户送进死循环，而且不留下任何可诊断的痕迹**。
+>
+> 而更糟的是——见下一节——**失败一次之后，那个会话连重试的机会都没有了。**
+
+---
+
+## 9.5 重点审查三：聊天的失败态是否可观测？
+
+**结论：不可观测。而且本轮新发现一个「失败一次就永久锁死」的缺陷，它让这个问题从「看不懂」升级成「救不回来」。**
+
+### ① 终态坍缩表：15+ 种根因被压进 7 个码
+
+`ChatTerminalReason` 只有 7 档，但 `ChatLoop` 往里压的是：
+
+| 终态 | 实际根因 | 用户看到 |
+|---|---|---|
+| `POLICY_DENIED` | ① 同会话并发（连点两次发送）② **会话不存在 / 人格不可读** ③ 路由裁决非 LOCAL | 「策略拒绝」**retryable=false** |
+| `MODEL_FAILED` | ① 任意未捕获异常 ② Router 生成失败 ③ Answer 生成失败 ④ 借焦点失败 ⑤ **落盘失败（含 DB 打不开/迁移失败）** | 「模型出错了」**retryable=true** |
+| `USER_ABORT` | ① 用户中止 ② **被别的会话抢占焦点** | 「你中止了本轮」 |
+| `BUDGET_EXHAUSTED` | prefill 超限 **或** 墙钟超限（**不区分**） | 「这一轮太长了」 |
+
+**UI 侧文案设计是好的**（`ChatCopy.kt` 每条都有 title + next + retryable，穷尽 `when` 无 `else`，新增第 8 档会编译失败——这个设计我认可）。**问题在源头的映射，不在渲染。**
+
+### ② 🔴 新识别 P0：`inFlightSession` 在三条提前返回路径上泄漏 ⇒ 会话永久锁死
+
+`ChatLoop.turn()` 的 `exitFlight(sid)` **只写在 `try/finally` 里**，而 `enterFlight(sid)` 之后有**三条 `return@channelFlow` 不走 try**：
+
+```kotlin
+if (!enterFlight(sid)) { ... return@channelFlow }        // ← 这里没进入，没问题
+val scope = resolveScope(sid)
+if (scope == null) { send(Terminal(POLICY_DENIED)); return@channelFlow }              // ❌ 泄漏
+val appended = store.append(...)
+if (appended is Outcome.Err) { send(Terminal(MODEL_FAILED)); return@channelFlow }     // ❌ 泄漏
+if (decision.target != LOCAL_ONLY) { send(Terminal(POLICY_DENIED)); return@channelFlow } // ❌ 泄漏
+val result = try { runTurn(...) } ... finally { exitFlight(sid) }   // ← 只有这条路径会释放
+```
+
+**后果**：`inFlightSession` 永远等于该 `sid`。此后**同一会话的每一次发送都会在 `enterFlight` 处被拒**，返回 `POLICY_DENIED`，而 UI 对 `POLICY_DENIED` 设的是 **`retryable = false`** —— 用户看到「策略拒绝」且**没有重试按钮**。
+
+**`ChatLoop` 是 `@Singleton`**（`:app` 的 `ChatServices` 单例投影）⇒ **只有杀进程才能恢复**。
+
+**触发条件有多普通**：
+
+| 触发 | 概率 |
+|---|---|
+| `store.append` 失败：DB 打不开（**迁移失败**）/ 磁盘满 / Keystore 故障 | **真实存在**，正是上一节那条链的下一步 |
+| `resolveScope` 返回 null：会话行缺失、人格被删、`sessions(...).first()` 收敛失败 | 真实存在（详情页删人格、并发删会话） |
+
+**为什么 106 个测试没抓住**：`appendFailureSurfacesAsTerminalInsteadOfSilentSwallow` 只断言**第一轮**的终态，**没有断言第二轮还能发** 🔬。而 `concurrentTurnOnTheSameSessionIsRejected...` 恰好把「被拒之后第一轮照常完成 ⇒ `inFlight` 被清了」这种情况覆盖掉了 —— 于是测试给了一个「锁机制是好的」的错觉。
+
+**修法（半天内可完成）**：把 `enterFlight/exitFlight` 收进一个 `suspend fun <T> withFlight(sid, block)`，`block` 覆盖**全部**返回路径；或最省事——把 `enterFlight` 之后的函数体整体包进 `try { ... } finally { exitFlight(sid) }`，提前 `return@channelFlow` 天然走 finally。**并补一条用例：落盘失败 ⇒ 修好 ⇒ 第二次发送必须成功。**
+
+### ③ 🔴 新识别 P0：两处「已修复」是死代码，全仓没有生产调用点
+
+| 声称已修 | 函数 | 生产调用点 🔬 |
+|---|---|---|
+| 模板预授权 + 存量授权回填 | `TemplateBootstrap.bootstrap()` | **0 个**（仅 `TemplateGrantBaselineTest` 调用） |
+| 进程被杀后的 `STREAMING` 收敛 | `ChatLoop.onColdStart()` | **0 个**（仅 `ChatLoopTest.coldStartSweepsStreamingRows` 调用） |
+
+我确认过**不存在别的启动引导**：`AkeApp.onCreate()` 只装 log filter；`MainActivity.onCreate()` 只申请通知权限；全仓 `coldStart / appStartup / Initializer / warmUp` 检索只命中这两个函数自身与其测试 🔬。
+
+**三个直接后果**：
+
+1. **`template_registry` 永远为空** ⇒ 模板市场永远空列表；「从模板创建 Agent」这条路走不通；
+2. **授权回填永不执行** ⇒ 存量人格永远没有授权 ⇒ **「聊天只回文字、永不派生任务」这个坑根本没被修**（宋砚秋修的是函数，不是接线）；
+3. **`sweepStreaming()` 永不执行** ⇒ 进程被杀时留下的 `STREAMING` 助手消息永远停在「正在输入」；这正是第 2 轮 D3 给任务侧修掉的「永久 RUNNING」在聊天侧的翻版，**而它的药已经写好，只是没喂进去**。
+
+**对照组**：任务侧的 `TaskReconciler` **是接了的**（`TaskStateWriter.init` 里自触发 `reconcile()`）🔬。⇒ 说明团队知道这个模式，只是聊天侧漏了同一个动作。这条对照可以写进团队复盘。
+
+### ④ 端侧到底留下了什么可诊断痕迹？
+
+| 通道 | 状态 |
+|---|---|
+| `AkeLog` → logcat | ✅ 有（`ChatLoop` 每个失败分支都打了 W）；**但只有接 adb 的开发者看得到**，release 用户侧无出口 |
+| 助手消息 `status=FAILED` | ✅ 有（`commitAssistant` 会落 FAILED 行）⇒ 用户能看到「这条失败了」 |
+| **失败原因落库** | ❌ **没有**。`ChatTerminalReason` 没有任何一列承载；`terminal` 只活在 ViewModel 内存里，重启即失 |
+| `policy_decision` 的聊天维度 | ⚠️ 迁移给 `policy_decision` 加了 `agent_id` / `chat_session_id` 两列 + `idx_pol_chat_session` 索引，**但写入路径恒填 NULL** 🔬（`EntityMappers.policyToEntity` 注释已自陈）。**⇒ 列在、索引在、永远没值，「按会话追溯策略决策」目前不可能** |
+| `route_decision` | ⚠️ MVP 恒 LOCAL_ONLY ⇒ 按 `shouldAudit()` 判据**永远不写行**。设计上说得通，但它意味着**「这轮为什么不出网」在库里查不到** |
+| 崩溃收集 / 符号化 | ❌ 无 SDK、无句柄 ⇒ `mapping.txt` 有 80MB，**没人收得到栈** |
+
+> **一句总结**：聊天跑挂了，**用户**看到一句错的话（而且可能永久锁死），**开发者**需要一台连着的电脑和 adb，**事后**什么都查不到。
+> 端侧没有后端日志，这不可改变；**但「把原因写进一行 SQLite」是本项目完全做得到却没做的事**。
+
+---
+
+## 9.6 本轮新识别的 P0（按严重度排序）
+
+| # | P0 | 性质 | 为什么是 P0 | Owner |
+|---|---|---|---|---|
+| **P0-1** | **`ChatLoop` 的 `inFlightSession` 在 3 条提前返回路径泄漏 ⇒ 会话永久锁死**，且 UI 报「策略拒绝 / 不可重试」，只有杀进程能恢复 | **代码 bug**（逻辑） | 触发条件是「写库失败一次」这种普通故障；症状永久、无自救、且错误归因。**修它只要半天** | 霍承钧 |
+| **P0-2** | **`TemplateBootstrap.bootstrap()` 与 `ChatLoop.onColdStart()` 零生产调用点** ⇒ 模板市场空、存量人格永久哑、`STREAMING` 永不收敛 | **代码 bug**（接线缺失） | 本轮宣称「已修」的两件事在运行时等于没做；且这直接决定新功能**能不能被用户用上** | 霍承钧 + 宋砚秋 |
+| **P0-3** | **迁移/DB 失败的出口是「模型出错了，可重试」** —— 无 `STORE_FAILED` 码、无迁移前备份、无降级/只读/导出路径 | **契约 + 产品缺陷** | 迁移失败是「用户数据在、App 不可用」的最坏形态；当前给的是一条**会把人送进死循环的错误指引**，且叠加 P0-1 变成「连重试都点不动」 | 宋砚秋（契约）+ 邝随行（`Chat.kt` 加档） |
+| **P0-4** | **空白创建的 Agent 默认零能力，且 UI 无一字提示** ⇒ 用户得到一只「只会说话、永不干活」的 Agent，界面不解释原因 | **产品缺陷** | 这正是宋砚秋列为本轮已修的那个体验坑的**另一半**（她只修了模板路径与存量回填，而回填还没接线，见 P0-2） | 苏映棠 |
+| **P0-5** | **仍然零真机执行（第 3 轮）** —— 且本轮新增的 5 条问题里，4 条只有真机能暴露 | **环境** | 与第 2 轮同一条；现在它多了一层含义：**新功能完全没有被任何设备执行过，连一次冷启都没有** | 韩渡川 / 主理人 |
+
+**P1（须在 GO 之前解决或有明确备案）**
+
+| # | 项 | 说明 |
+|---|---|---|
+| P1-1 | `PRAGMA foreign_keys=OFF` 在事务内是 no-op，12 步重建的①从未生效 | 安全性论证与事实相反；当前侥幸无害（无父表引用 `memory_card`）。**改注释 + 加「迁移前后行数相等」断言**即可 |
+| P1-2 | 「迁移幂等」声明不成立，且引用了不存在的 `ChatMigrationTest.migrationIsIdempotent` | 8 条 `duplicate column`；`everyCreateIsIdempotent` 给人假信号。**要么写那个测试，要么删掉这句话** |
+| P1-3 | `ChatBudget.maxTurnsPer24h` / `maxPrefillTokensPerDay` 声明但从未校验 | 「一天 120 轮」在代码里不存在；要么实现，要么删除 |
+| P1-4 | `policy_decision.agent_id` / `chat_session_id` 恒为 NULL | 团队已诚实登记；补齐 `PolicyDecisionRecord` 后 V3 审计才成立 |
+| P1-5 | `release` 包仍未签名（R-I，第 2 轮遗留） | 未变 |
+| P1-6 | 服务端签名 manifest 仍未产出（R-H，第 2 轮遗留） | 未变 ⇒ 真实新用户仍拿不到模型 |
+| P1-7 | 663 个 Hilt `*_Factory` 被 R8 树摇（N-5，第 2 轮遗留） | 仍未裁决；**M6 冷启必须优先验这条** |
+| P1-8 | 架构守卫缺负向测试、且会跳过未列入白名单的新模块（N-7 残余 + 新缺口） | 我已手工证明守卫非永真，但**它还没被自动化** |
+| P1-9 | MCP 未接进技能注册表（只注册了 `builtin.browser_task`）；`McpToolSkillAdapter` 未做 | 霍承钧自述；意味着 C5 用例当前不可达 |
+| P1-10 | `:ui` 零测试面从 4,975 → 8,702 行；无 `androidTest` | 聊天的**全部失败态渲染**都在这一层 |
+
+**P2**：编辑 Agent / 能力开关未做；会话删除入口未做；Agent 头像仅首字占位；`ChatCheckpoint` 仅接口；流式回调增量/累计判别不可证伪（`StreamingDeltaAssembler` 是启发式，若上游语义中途改变会静默串字）。
+
+---
+
+## 9.7 变成 GO 的最短路径
+
+> 排序原则：**先修「让用户用不上 / 救不回来」的，再修「查到查不到」的，最后才是上机。**
+> 注意：前三件事**互相独立、可并行**，都不需要设备。
+
+```
+════ 第 0 步 · 今天就能做，且不做完上机也白上（代码，合计约 2 天） ════
+
+[A] 【霍承钧 · 半天】修 P0-1：inFlight 泄漏
+    ├── enterFlight 之后的整个函数体包进 try/finally（或抽 withFlight 作用域函数）
+    ├── 补用例：append 失败 ⇒ 恢复 ⇒ 第二次发送必须 COMPLETED
+    └── 顺手：把 4 个 POLICY_DENIED 拆开（并发 / 会话缺失 / 路由），否则修好了也还是看不懂
+
+[B] 【霍承钧 + 宋砚秋 · 1 天】接 P0-2 的两根线
+    ├── App 启动跑一次 TemplateBootstrap.bootstrap()（幂等，已有自触发先例：TaskStateWriter.init）
+    ├── 同一次启动跑 ChatLoop.onColdStart()
+    ├── 用「一次性守卫 + 可失败重试」包住（启动期 DB 未就绪不能把冷启搞崩）
+    └── 补一条「调用点存在」的测试（ArchUnit 式断言或反射扫一遍 Hilt 图）——这条最重要，
+        因为它防的是「下次又忘了接」
+
+[C] 【宋砚秋 + 邝随行 · 1 天】P0-3：给失败一条真话
+    ├── ChatTerminalReason 加 STORE_FAILED（7 → 8 档，ChatCopy.kt 的 when 会编译失败，正是设计意图）
+    ├── 迁移前 db.copy() 一份，失败时保留并可导出（用户至少能带走聊天记录）
+    ├── 迁移失败 ⇒ 冷启自检 + 明确提示 + 只读/导出入口（不要只给「重试」）
+    └── 把 terminal reason 落一行到 chat_session 或 policy_decision（端侧唯一可事后归因的通道）
+
+[D] 【苏映棠 · 半天】P0-4：空白创建的能力提示
+    └── 创建页：未选任何能力时明确写「该 Agent 只能聊天，不能操作网页」+ 一键启用 browser_task
+
+════ 第 1 步 · 与第 0 步并行（文档，各半天） ════
+  [宋砚秋] P1-1 / P1-2：改掉「已关外键」与「幂等已验证」两句不成立的话，
+           或补上能支撑它们的断言（我本轮已验证迁移结构全对，可直接引用 §9.4）
+  [霍承钧] P1-3：删掉或实现两个日限额字段
+  [韩渡川] P1-8：把我做的那两条负向用例固化成脚本；守卫改为以 settings 的 include 清单为准
+
+════ 第 2 步 · 必须一台真机（环境，1 天，不需要 CDN / 不需要签名） ════
+  M3–M6（安装 / 冷启 / 建库 / 遍历页面）— 用现有 debug APK，95.09 MiB，已带 v2 签名
+  ★ 本轮新增必须一起跑的 4 项：
+     M22 · 迁移：装 v2 老包写数据 → 覆盖装新包 → 聊天记录/记忆是否还在
+     M23 · 冷启兜底：杀进程重进 ⇒ 模板列表非空、`STREAMING` 消息变「已中断」
+     M24 · 失败恢复：磁盘写满/DB 锁 构造写失败 ⇒ 同会话能否继续发（验 P0-1）
+     M25 · 无能力 Agent：空白创建 ⇒ 是否给出提示、是否真的不能派生任务
+
+════ 第 3 步 · 第 2 轮遗留的环境缺口（未变） ════
+  签名 release 包（否则 M11 无从谈起）· 最小 manifest 服务 + 4 个 Secret · M6 优先验 663 个被树摇的 Factory
+
+════ 第 4 步 · 内部轨道 ≥1 周无 P0 ⇒ 重新提交本门禁 ════
+```
+
+> **最短路径的真实估计：第 0 步 2 天（全员并行，不需要设备），第 2 步 1 天（需一台手机）。**
+> 也就是说：**如果今天开始，本周内就能第一次真正回答「这个 App 能不能跑」这个问题。**
+> 而如果先去做第 3 步（签名、CDN）再回头修 P0-1/P0-2，就是把「用户能不能用上」排在「包能不能装」后面 —— **顺序反了**。
+
+---
+
+## 9.8 本轮我要明确认账与不认账的地方
+
+**认账（团队做得对的，我逐条核过）**
+
+1. `:chat` **没有**破坏分层，也没有重抄预算 —— 这是本项目最容易出错的一步，走对了；`ModeProfileRegistry` 的九张表构造期断言是专业水准。
+2. **迁移结构完全正确**，我用真实 SQLite 验的，比团队自己的字符串测试强；`memory_card` 重建用显式列名 COPY、外键 SET NULL 语义正确。
+3. **`fallbackToDestructiveMigration` 没有开** —— 在「静默清空用户聊天记录」这个诱惑面前选对了。
+4. `EntityMappers` 里把「两列恒为 NULL」**写在了注释里**而不是装作没有；`STORE_FAILURE_REASON` 的语义错配也写了。**这种诚实是本项目最值钱的资产，请保持。**
+5. `ChatCopy.kt` 用穷尽 `when` 让新增终态编译失败 —— 对的设计。
+6. 真流式的线程纪律（`channelFlow` + `UNLIMITED` channel + 回调线程不碰上层）是对的。
+
+**不认账（本轮我明确驳回的说法）**
+
+| 说法 | 我的裁定 |
+|---|---|
+| 「模板预授权 + 旧数据回填已加」 | **函数加了，没接线。运行时等于 0。** |
+| 「`STREAMING` 由冷启收敛」 | **同上。** |
+| 「迁移本来是对的（只是测试写法问题）」 | **结构层面成立（我验了），但『关了外键再 DROP』这个安全论证不成立，且『幂等』不成立。** |
+| 「106 个 chat 测试覆盖了主循环」 | **覆盖了顺利路径；失败→恢复这条路径没有覆盖，而 P0-1 就藏在里面。** |
+| 「测试全绿 + release 构建通过」 | 与第 2 轮同答：**它证明代码被认真写了，不证明能跑。本轮更证明它连「接线」都证明不了。** |
+
+---
+
+## 9.9 验收人声明（第 3 轮）
+
+本轮所有标注基于我在 `/workspace/HarnessAgent` 上实际执行的命令、实际产物核对，以及**在真实 SQLite 3.50.6 上实际执行 `MIGRATION_2_3`** 的结果，**不引用任何成员自述，也不沿用第 2 轮结论**。
+
+实际执行并取证 🔬：
+
+| 动作 | 结果 |
+|---|---|
+| `./gradlew test --rerun-tasks` | BUILD SUCCESSFUL 1m40s；533 / 0 / 0 / 0 |
+| `./gradlew checkModuleDependencies` | OK，12 模块 |
+| **负向测试（在 `/tmp` 副本注入越层）** | Gradle 边与源码边**分别**红掉，守卫非永真 |
+| `./gradlew :app:assembleRelease --no-build-cache` | BUILD SUCCESSFUL 3m10s，`minifyReleaseWithR8` **真实执行** |
+| 产物度量 + 签名检测 | 60.62 MiB / 95.09 MiB；release 无签名、debug 有 v2 |
+| `mapping.txt` 符号核对 | `deliver`/`deliverError`、16 个 `_Impl`、954 条 LiteRT、76 个 `:chat` 类；663 个 Factory 被树摇 |
+| **真实 SQLite 执行 `MIGRATION_2_3`** | 40 条语句在事务内跑通；19 张表结构与 `3.json` **逐项一致**；`foreign_key_check` 干净；旧数据保留 |
+| **`PRAGMA foreign_keys=OFF` 行为实测** | 事务内**不生效**（回读仍为 1） |
+| **迁移重跑实测** | 8 条 `duplicate column` ⇒ 幂等声明不成立 |
+| **全仓调用点检索** | `TemplateBootstrap.bootstrap()` / `ChatLoop.onColdStart()` **生产调用点为 0** |
+| `adb devices` | **空**（`adb` 在 `/opt/android-sdk/platform-tools/`，设备列表为空） |
+
+**我没有修改任何一行业务源码**，本轮改动仅限本文档。所有注入式验证均在 `/tmp/neg` 的**副本**上进行，仓库工作区未被触碰。
+
+**两处边界必须交代**：
+1. **迁移验证用的是 x86_64 桌面版 SQLite 3.50.6，不是设备上的 `BundledSQLiteDriver`。** 二者语义一致（都来自 sqlite.org 同一份实现），且本项目选 bundled driver 正是为了消掉系统 SQLite 版本差异 —— **但「结构一致」不等于「在 ART 上、在真机 IO 下、在 `WRITE_AHEAD_LOGGING` 模式下也一致」**。这条仍需 M22 在真机闭环。
+2. **我没有覆盖 `getTokenCount()` 是否计入 `initialMessages`、8192 能否扛住 12 轮、流式回调是增量还是累计** —— 这三项（邝随行自己标注未实测）在桌面 JVM 上**无法验证**，我不做推测性判断。其中第三条我要补一句：`StreamingDeltaAssembler` 是**启发式判别**，一旦上游语义中途改变会静默串字，而它的症状是「回答里偶尔多几个字」—— 属于最难归因的一类，**M23 期间请专门用长回答观察首 2 个 chunk**。
+
+---
+
+**判定：NO-GO。**
+**第 3 轮与第 2 轮的区别不在于「结论一样」，而在于拦路的理由从「没跑过」变成了「跑过就会发现的三处断线」。前者只能靠设备消除，后者今天就能修。**
+
+---
+
+# 第 3 轮复审补记（P0 修复验证 · 第 4 次提交）
+
+> **🔄 复审记录（补记 · 关千锤）**
+>
+> | 项 | 内容 |
+> |---|---|
+> | 复审触发 | 团队称 §9.6 的 4 个 P0 已全部修完（霍承钧：P0-1 / P0-2 / P0-3 后端；苏映棠：P0-3 UI 分支 / P0-4 / 三项附带修复） |
+> | 复审方式 | **读代码 + 自己注入故障看测试红不红**。不采信任何自述数字；所有注入在 `/tmp/neg*` 副本上做，**仓库工作区未被触碰**（仅删除了 `:app` 的 R8 中间产物以强制重跑，见 §10.2） |
+> | 本轮裁定 | **NO-GO（维持）**，但**拦路的理由性质变了** —— 见 §10.7，这是本轮最需要主理人读到的一段 |
+> | 一句话 | **4 个 P0 的代码全部落地**，其中 3 个我做了负向验证确认真拦得住；但 **P0-3 只修了四分之一**，**两处守护测试是纸做的**（改坏照样全绿），且"修 P0-3"这件事**新引入**了一条重复消息问题 |
+
+---
+
+## 10.1 四个 P0 逐条验证
+
+| # | 声称 | 我的裁定 | 依据（我读的代码 / 我做的注入） |
+|---|---|---|---|
+| **P0-1** | `try/finally` 覆盖全部退出路径；单槽 → `MutableSet`；补 5 条测试 | ✅ **修了，且守得住** | 见 §10.1.1 与 §10.3 注入 A（摘掉复位 ⇒ **8 failed / 115**，与团队自述数字逐条吻合） |
+| **P0-1 附** | `InferenceFocusArbiter` 租约无持有者时不 close ⇒ `DERIVED_TASK` 永久 `FOCUS_BUSY` | 🟡 **代码修了，但没有任何测试能发现它被删** | 见 §10.3 注入 C（删掉 `releaseFocus(lease)` ⇒ **115 全绿**） |
+| **P0-2** | `ColdStartCoordinator` 自触发 + `AkeApp` 只做 `.get()`；4 条源码扫描测试 | 🟡 **接线是真的、R8 没剪**（我反汇编了 dex），**但守护测试是纸做的** | 见 §10.3 注入 B（把 `coldStart.get()` 注释掉 ⇒ **4 条全绿**）、§10.4（dex 反汇编证据） |
+| **P0-3** | 加 `STORE_FAILED`；`append`/`beginAssistant`/`commitAssistant` 全汇到它；同轮重试一次；UI 分支 + `retryable=true` | 🟠 **修了四分之一**（我上轮 [C] 列了 4 项，做了 1 项） | 见 §10.1.3。终态码与重试做了 ✅；**文案对 2/3 的路径是假话** ❌；**迁移前备份 / 降级出口 / 终态落库三项完全没动** ❌ |
+| **P0-4** | 三处提示 + 三态设计 | ✅ **修了（三处都在）** | 创建页 `CreateAgentScreen.kt:190`、聊天页输入框上方 `ChatScreen.kt:187`、详情页能力区 `AgentDetailScreen.kt:230-270`。三态 `CapabilityPresence` 的 `UNKNOWN` **类型上无法被当成 `NONE`** |
+| 苏·附带 1 | `ChatTurnFailure.of` 的 `else` 改为逐个列全 | ✅ **修了** | `SkillCardUi.kt:68-80` 现在 7 个失败终态全部逐条列出，新增第 9 档会在**两个**地方编译失败 |
+| 苏·附带 2 | 详情页"Port 还没接线"是错误信息，改为真实读授权表 | ✅ **界面修了**，⚠️ **但错误信息源头没删** | `AgentDetailViewModel.kt:108-126` 真读 `CapabilityGrantPort`（`:data` 的 `bindCapabilityGrants` 确实已绑定）。**但 `ChatWiringModule.kt:26` 的 KDoc 仍写着「`CapabilityGrantPort` 全工程无实现 ❌」** —— 那句假话就是当初 UI 文案的来源，它还在原地 |
+| 苏·附带 3 | `ChatViewModel` 的发送闸 + `turnToken` | ✅ **修了，且是对的** | `beginTurn/endTurn` 在 `send()` 第一行同步占位；`finally` 里 `if (token == turnToken)` 才收敛状态 —— 这正是"旧轮 finally 打新轮"的唯一正解 |
+
+### 10.1.1 P0-1：我自己把 `return` 数了一遍
+
+团队自述"四条提前 return"。**这个数字是错的，但结论不受影响**，理由如下：
+
+- `turn()` 里只有 **1 个** `return@channelFlow`（第 179 行，并发被拒那条，此时还没持锁，无需复位）；
+- 复位要覆盖的早退在 `admit()` 里，是 **3 条**（`resolveScope` 返 null / `append` 失败 / 路由非 LOCAL）；
+- 而 `runTurn()` + `answer()` 里还有 **12 条** `return`（借焦点失败、让出、预算超限、Router 失败、用户中止、`beginAssistant` 失败、`commit` 失败…）。
+
+**所以真实退出点是 15 个以上，不是 3 也不是 4。** 但这恰恰证明修法是对的：`try` 紧贴 `enterFlight` 成功之后、块内只有一个调用 `admit(req, sid, this)`，于是**数量再多也漏不掉**；`CancellationException` 与任意 `Throwable` 同样走 `finally`。**"不靠在每个 return 前手写一遍"这句注释是本次修复最有价值的部分** —— 请保留。
+
+**唯一要改的是那句注释里的"四条"**：写错的数字会让下一个人以为"只要数够四条就安全"。
+
+### 10.1.2 P0-1 附带：`MutableSet` 是否真的解决了跨会话覆写
+
+是的，而且我用代码把两种失效都推演过：
+
+- A 在跑时 B 起一轮 ⇒ 集合 `{A, B}`，B 不被拒（F3 的排队语义）；
+- A 结束后 `exitFlight(A)` 只删 A ⇒ 不会打空、**也不会误删 B**；
+- 第三轮打在 A 上 ⇒ `add(A)` 返回 false ⇒ 正确拒绝。
+
+单槽版本的第二个缺陷（A 的 `exitFlight` 打空 ⇒ 第三轮打在 A 上被放行 ⇒ native 串字）**确实被消除了**。
+
+### 10.1.3 P0-3：为什么我判"只修了四分之一"
+
+我上一轮 §9.7 的 [C] 列了四项。实际交付情况：
+
+| 子项 | 状态 | 证据 |
+|---|---|---|
+| ① `ChatTerminalReason` 加 `STORE_FAILED`（7→8 档） | ✅ **做了** | `core/ports/Chat.kt:738`；`:chat` 三处写失败全汇到 `STORE_FAILURE_REASON`；`ChatCopy.kt` 穷尽 `when` 编译期兜住 |
+| ② 同一轮内对 `commitAssistant` 重试一次 | ✅ **做了，且语义正确** | `ChatLoop.kt:714-718`，重试的是**落盘**不是重新生成（文本还在内存里）；测试断言 `commitAttempts == 2` 且 delta 只出一次 |
+| ③ **迁移前 `db.copy()` 备份 / 失败可导出** | ❌ **没做** | 全仓检索 `copyTo` / `.bak` / `backup`：`:data` 里只有 payload 与 agentasset 的临时文件拷贝，**数据库没有任何备份路径** |
+| ④ **迁移失败 ⇒ 冷启自检 + 只读/导出降级** | ❌ **没做** | 无 `openReadOnly`、无降级分支。`ColdStartCoordinator` 会把异常收进 `failures` 并**只打一行日志**，用户侧仍然是"模板空白 + 什么都没有" |
+| ⑤ 终态 reason 落一行到库 | ❌ **没做** | `chat_message` 无 `terminal` 列；`ChatMessageView` 无该字段 ⇒ 重启即失，事后归因仍不可能 |
+
+**并且新出现一处归因错误（方向反了的那种）**：
+
+`STORE_FAILED` 的枚举注释明确写着「本值**只**表示：推理链路跑通了、产物在内存里、持久化这一段失败」。但代码把 **`append(USER)` 失败**和 **`beginAssistant` 失败**也汇进了同一个码 —— 这两条路径**根本没有生成过任何回答**（`beginAssistantFailureIsAlsoStoreFailedAndSkipsGeneration` 自己就断言了 `AssistantDelta` 为空）。而 UI 那一档的文案是：
+
+```
+chat_term_store_failed_title = "回答生成好了，但没存下来"
+chat_term_store_failed_next  = "模型已经答完了，卡在写入存储这一步 —— …"
+```
+
+⇒ **对 3 条路径里的 2 条，这句标题是假的。** 用户在第一句消息就没写进去的时候，被告知"模型已经答完了"。这不是"又把用户送进死循环"（下一步建议『腾空间再重试』方向是对的），但它是**同一类病的较轻版本：归因错了**，而且它**违反了枚举自己写下的语义边界** —— 那条边界正是为了防止这个码变成垃圾桶。
+
+**最小修法（20 分钟）**：`append` / `beginAssistant` 走一个新的 `STORE_UNAVAILABLE`（或复用 `POLICY_DENIED` 之外的第三档），文案改成"这条消息没写进存储，本轮没能开始"；`commitAssistant` 保留现在的"回答生成好了"。
+
+### 10.1.4 P0-4：三处都在，但有一处与自述不符
+
+三处提示**都真实存在**（创建页 / 聊天页输入框上方 / 详情页能力区），并且**都没有挡住"创建"按钮**（一个只会聊天的 Agent 是正当用法）—— 这个判断我认同。
+
+`UNKNOWN` 的处理与自述有出入，但**是往更诚实的方向偏**：聊天页 `UNKNOWN` **保持沉默** ✅；详情页 `UNKNOWN` **不是沉默，而是明说"读不到这个 Agent 的授权表，无法判断它到底有没有能力"**。这比沉默更好（那一页有一个"扩展能力"分区，空着反而像"没有"），**我认可这个偏离**，只是把它记下来：自述说"读不到时保持沉默"，实际是"读不到时说读不到"。
+
+⚠️ 一处小瑕疵：创建页的零能力提示判据是 `ui.selected.isEmpty()`，**在"能力清单根本没读到"（`registryMissing`）时也会出现**，于是同一屏上会同时出现"读不到可用能力清单（技能注册表未接线）"和"当前一个能力都没勾"。前者现在还是**过期文案**（注册表已绑定），建议一并改掉。
+
+---
+
+## 10.2 我自己跑出来的数字（不引用任何汇报）
+
+| 命令 | 结果 | 备注 |
+|---|---|---|
+| `./gradlew test --no-daemon --rerun-tasks` | **BUILD SUCCESSFUL in 2m 6s**；**546 通过 / 0 失败 / 0 错误 / 0 跳过** 🔬 | 直接汇总 JUnit XML（上轮 533，本轮 +13） |
+| `./gradlew checkModuleDependencies --no-daemon` | **OK — 12 个模块的依赖边均在白名单内** 🔬 | `:chat` 仍未出现反向 import |
+| `./gradlew :app:assembleRelease --no-daemon --no-parallel --no-build-cache` | 首次结果为 **UP-TO-DATE（313 tasks up-to-date，R8 未执行）⇒ 不接受** 🔬 | 与上轮同一条纪律：UP-TO-DATE 不算数 |
+| 强制重跑（删 `:app` 的 R8 中间产物后） | **BUILD SUCCESSFUL in 3m 7s**，`Task :app:minifyReleaseWithR8` **真实执行** 🔬 | `--rerun-tasks` 连续 3 次触发 Gradle daemon 被 OOM 杀掉（容器 cgroup 8 GiB，`org.gradle.jvmargs=-Xmx3072m` + 残留 Kotlin daemon 2.1 GiB）；改为**只删 R8 产物**后成功。**这是环境限制，不是工程缺陷**，但 CI 若内存更小会遇到同一个坑 |
+| release 产物 | `app-release-unsigned.apk` **63,586,615 B / 60.62 MiB** 🔬 | 与上轮同尺寸 |
+| 签名 | **无 v1 / 无 v2-v3**（`APK Sig Block 42` 计数 0）🔬 | **R-I 未解除（第 3 次）** |
+| `mapping.txt` | **80,752,684 B** 🔬 | 上轮 80,588,932 B |
+| 被 R8 树摇的 Hilt `*_Factory` | **663 个** 🔬 | **与上轮一字不差** ⇒ P1-7 / N-5 仍未裁决 |
+
+**用例分布（🔬 逐模块汇总）**
+
+| 模块 | 本轮 | 上轮 | 变化 |
+|---|---:|---:|---|
+| `:data` | 205 | 205 | — |
+| **`:chat`** | **115** | 106 | **+9**（P0-1 五条 + P0-3 四条） |
+| `:agent` | 78 | 78 | — |
+| `:mcp` | 69 | 69 | — |
+| `:llm` | 38 | 38 | — |
+| `:core:common` | 25 | 25 | — |
+| `:core:ports` | 12 | 12 | — |
+| **`:app`** | **4** | 0 | **+4，全部是源码字符串扫描**（不是行为测试） |
+| **`:ui`** | **0** | 0 | ❌ **源码 9,052 行（上轮 8,702）** |
+| `:browser` / `:core:contract` / `:core:model-api` | 0 | 0 | ❌ |
+| **合计** | **546** | 533 | **零测试面仍达 9,052 + 1,795 + 1,255 + 914 + 253** |
+
+> **P0-3 的修复有一半落在 `:ui`（文案 + `retryable`），而 `:ui` 依然是 0 条测试。** 也就是说：**"用一句真话替代一句假话"这件事，目前没有任何自动化手段能保证它不被下次重构改回去** —— 除了 `chatTerminalCopyOf` 的穷尽 `when`（它只保证"有分支"，不保证"文案对"）。
+
+---
+
+## 10.3 负向验证：改坏之后测试会不会红（本轮最硬的证据）
+
+三份**独立副本**（`/tmp/negA` / `negB` / `negC`，`tar` 复制，排除 `build`），每份只改一处，仓库一行未动。
+
+### 注入 A · 把 P0-1 的复位摘掉（等价于修复前的实现）
+
+```kotlin
+// negA: ChatLoop.turn()
+-        try {
+-            admit(req, sid, this)
+-        } finally {
+-            exitFlight(sid)
+-        }
++        admit(req, sid, this)
+```
+
+```
+> ChatLoopTest > secondTurnReusesTheSameConversation FAILED
+> ChatLoopTest > personaChangeRebuildsTheSessionAndKeepsTheFocus FAILED
+> ChatLoopTest > modelFailureIsStillModelFailed FAILED
+> ChatLoopTest > unknownSessionReleasesTheFlightMarkerAfterItFails FAILED
+> ChatLoopTest > appendFailureReleasesTheFlightMarker FAILED
+> ChatLoopTest > egressRejectionReleasesTheFlightMarker FAILED
+> ChatLoopTest > thrownFailureReleasesTheFlightMarker FAILED
+> ChatLoopTest > repeatedEarlyReturnsNeverAccumulateIntoAPermanentBlock FAILED
+
+115 tests completed, 8 failed
+BUILD FAILED
+```
+
+**⇒ 8 failed = 5 条新的 flight 用例 + 3 条多轮用例，与霍承钧自述的"8 failed / 20"逐条对上（`ChatLoopTest` 正好 20 条）。这个数字是他自己报的，我又独立跑出来一遍，两者一致。** P0-1 的测试**真拦得住**。
+
+> 顺带确认上轮我的判断：`concurrentTurnOnTheSameSessionIsRejected...` **仍然绿**（因为它只测"被拒后第一轮照常完成"，那正好是单槽版本也能过的场景）。这个盲区还在，但已不影响结论。
+
+### 注入 B · 把 P0-2 的接线注释掉
+
+```kotlin
+// negB: AkeApp.onCreate()
+-        coldStart.get()
++        // coldStart.get()
+```
+
+```
+> Task :app:testDebugUnitTest
+BUILD SUCCESSFUL in 3m 42s
+```
+
+**⇒ 4 条 `ColdStartWiringTest` 全绿。** 原因很直白：那 4 条断言的是**源码里有没有这段字符串**，而注释掉的代码**字符串还在**。
+
+**这不是"测试写得不好"，是这类守护的固有上限。** 我上一轮就说过"源码扫描是唯一能做的手段"，现在我把它推进一步：**字符串扫描挡不住"注释掉"和"条件化"（`if (false) coldStart.get()`）这两种最可能的回归形态**。要么补一条真正的行为测试（起一个 Hilt 单例图，断言 `ColdStartCoordinator` 被构造后 `awaitReady()` 能返回报告），要么在 CI 里加 `git diff` 检查（改了这一行必须有对应的行为测试）。**我建议前者**，`:app` 已经有 Hilt 测试基础设施（这 4 条就跑在里面）。
+
+### 注入 C · 把"建会话失败时释放租约"删掉
+
+```kotlin
+// negC: ChatLoop.runTurn()
+-                releaseFocus(lease)
+                 return TurnResult(null, ChatTerminalReason.MODEL_NOT_LOADED)
+```
+
+```
+> Task :chat:testDebugUnitTest
+BUILD SUCCESSFUL in 3m 10s
+```
+
+**⇒ 115 条全绿，一条都没红。**
+
+**这是本轮我最不满意的一处**：霍承钧说自己"顺带修了 `InferenceFocusArbiter` 的租约泄漏"，代码确实改了（`ChatLoop.kt:285`），注释也把后果写得很清楚（`DERIVED_TASK` 永远拿到 `FOCUS_BUSY`）—— **但没有任何测试覆盖它**。删掉这一行，CI 依然全绿。**在我这里，"修了但没测"和"没修"的风险等级是一样的**：下一个人重构 `runTurn` 时，这一行会被当成"看起来多余的 close"删掉，而症状（某个派生任务起不来）要等到 M6 之后才会出现。
+
+**补法（半小时）**：`FakeModelPort` 加一个 `failOpen: Boolean`，让 `openSession` 返回 `Err`；用例：① 起一轮 ⇒ `MODEL_NOT_LOADED`；② 同一 `InferenceFocus` 上用 `FocusHolder.Task(...)/DERIVED_TASK` 再 `acquire` ⇒ **必须是 `Ok`**，而不是 `FOCUS_BUSY`。
+
+---
+
+## 10.4 R8 专项：`coldStart.get()` 会不会被当成"无副作用"裁掉？
+
+这是主理人点名要我查的、**本项目踩过的坑**（`-assumenosideeffects` 误伤 `equals/hashCode`，见 `proguard-rules.pro` §9 的注记）。我不猜，我**反汇编了 release dex**。
+
+`unzip` 出 `classes.dex` → `dexdump -d` → 找 `Lcom/ake/app/AkeApp;`：
+
+```
+Instance fields:
+  #0  name: 'coldStart'      type: 'Ljavax/inject/Provider;'   access: PUBLIC
+  #1  name: 'memoryReleaser' type: 'Ljavax/inject/Provider;'   access: PUBLIC
+
+name: 'onCreate'   type: '()V'
+54bc18: invoke-super   {v2}, Lr52;.onCreate:()V
+54bc2a: invoke-virtual {v1, v0}, Ljava/util/concurrent/CopyOnWriteArrayList;.add:(Ljava/lang/Object;)Z   // AkeLog.install
+54bc30: invoke-virtual {v2}, Lcom/ake/app/AkeApp;.getColdStart$app:()Ljavax/inject/Provider;
+54bc36: move-result-object v2
+54bc38: invoke-interface {v2}, Ljavax/inject/Provider;.get:()Ljava/lang/Object;
+54bc3e: return-void
+```
+
+**三条结论：**
+
+1. **调用没被裁掉。** `getColdStart$app()` → `Provider.get()` 两条指令**都在**。R8 只做了它该做的：把**没人用的返回值**丢掉（`invoke-interface` 之后没有 `move-result-object`，直接 `return-void`），**没有**把整个调用判成无副作用删掉。原因也清楚：`Provider.get()` 是**接口调用**，R8 无法证明它无副作用，而 `AkeApp` 被 `-keep class com.ake.app.AkeApp { *; }` 整体保留。
+2. **被构造的类还在。** `mapping.txt` 里 `com.ake.app.startup.ColdStartCoordinator -> xj0:`，其 `run()`（`access$run`）与 `invokeSuspend` 都在；`xj0.<init>` 在 Hilt 组件的装配方法里被 `invoke-direct` 调用（`dex 偏移 282d8a`）；日志字面量 `"cold start done: templates="` 也保留在 dex 里。
+3. **但静态证据到此为止。** 我**无法**从 dex 静态排除"Dagger 的 `DoubleCheck` 被内联成一条直通/短路"这种形态 —— 那需要真机跑一次、看 logcat 里有没有那一行 `cold start done:`。**这一条我明确欠着，交给 M23。**
+
+> **记一笔给团队**：`ColdStartCoordinator` 的 `init` 自触发是**对的模式**（与 `TaskStateWriter → TaskReconciler` 同款），但它有一个我没见过先例的**硬依赖**：`-keep class com.ake.app.AkeApp { *; }` 必须一直在。**如果有人为了让包更小而收窄这条 keep，本次接线会在静默中失效**，而那 4 条源码扫描测试**依然全绿**（它们只读源码）。建议在 `proguard-rules.pro` 那条 keep 旁边加一行注释，指向本节。
+
+---
+
+## 10.5 本轮新发现
+
+| # | 问题 | 级别 | 性质 | 证据 |
+|---|---|---|---|---|
+| **N-1** | **重试会重复落一条 USER 消息** | **P1** | 代码（由 P0-3 的"整轮重发"语义引入） | `ChatViewModel.startTurn()` 每次 `clientRequestId = UUID.randomUUID()`；而 `append` 的幂等**只**靠 `idx_chat_msg_request` 的 UNIQUE。重试 ⇒ 新 UUID ⇒ 不冲突 ⇒ 第二条同文 USER 行。**枚举注释写着"`clientRequestId` 保证 USER 消息不会重复落盘"——这句话在重试路径上不成立** |
+| **N-2** | 读路径的存储失败仍归 `MODEL_FAILED` | P2 | 代码 | `ChatLoop.runTurn():290` 的 `store.messages(...).first()` 若抛异常 ⇒ 被 `catch (t: Throwable)` 收成 `MODEL_FAILED`。`STORE_FAILED` 只覆盖了**写**路径 |
+| **N-3** | `ColdStartWiringTest` 可被注释/条件化绕过 | P1 | 测试有效性 | §10.3 注入 B：注释掉照样 4 绿 |
+| **N-4** | `releaseFocus(lease)` 修复无测试 | P1 | 测试有效性 | §10.3 注入 C：删掉照样 115 绿 |
+| **N-5** | `ChatWiringModule.kt:26` 仍写「`CapabilityGrantPort` 全工程无实现 ❌」 | P2 | 文档失真 | 实际已在 `:data` 的 `PersistenceModule.kt:205`（`bindCapabilityGrants`）绑定。**这正是详情页那句假话的源头**，界面改了、源头没改，下一个作者会照它再写一遍 |
+| **N-6** | 创建页零能力提示在"清单读不到"时也出现 | P2 | 产品细节 | `CreateAgentScreen.kt` 判据是 `selected.isEmpty()`，与 `registryMissing` 无关 |
+| **N-7** | 注释里的"四条提前 return"是错的 | P3 | 注释 | 实际 `admit()` 内 3 条、调用树内 15+ 个 return 点（§10.1.1） |
+| **N-8** | 迁移无备份、无降级出口、终态不落库 | P1（上轮 P0-3 的三分之一，未动） | 产品 + 数据安全 | §10.1.3 表 ③④⑤ |
+
+---
+
+## 10.6 认账 / 不认账
+
+**认账（本轮做得对的，我逐条核过）**
+
+1. **P0-1 的修法是"教科书式"的**：`try` 紧贴 `enterFlight`，块内只有一个调用，`finally` 里**不做 send**（避免取消风暴里二次抛出掩盖真实终态）—— 这三条细节说明修的人想清楚了，不是照着我的建议抄。
+2. **单槽 → 集合**顺手把"跨会话覆写"这个我上轮没写进 P0 的隐患一起消了，并且注释把两种失效都写明白。
+3. **P0-3 的同轮重试边界选得准**：重试 `commitAssistant`（UPDATE by messageId，幂等）而**不是**重新生成 —— 这是"只重试落盘"唯一真正可实现的形态，理由（文本没有第二个持有者）也写在注释里了。
+4. **`SkillCardUi` 的 `else` → 逐条列全**：接受了我"保护点太少就靠运气"的意见，并且把"为什么列全"的理由写进去了。
+5. **详情页从"错误信息"改成"真实读取 + 三态"**：`UNKNOWN` 在类型上无法折叠成 `NONE`，这个设计比我要求的更硬。
+6. **`turnToken`**：用的是"只让最新一轮有权收敛状态"这条最省事且正确的路线，而不是加锁或 `cancelAndJoin`。
+7. **`ChatLoop.onColdStart()` 的 KDoc 现在指名了调用点**，并且指出了对照先例（`TaskStateWriter`）。**这种"把线画在地图上"的习惯值得保留**。
+
+**不认账**
+
+| 说法 | 我的裁定 |
+|---|---|
+| "P0-3 已修" | **四分之一。** 终态码与重试 ✅；备份 / 降级 / 落库 ❌；且新增一条归因错误（§10.1.3） |
+| "补了 4 条源码扫描测试守住冷启接线" | **守不住。** 注释掉照样 4 绿（§10.3 注入 B） |
+| "顺带修了 `InferenceFocusArbiter` 的租约泄漏" | **代码在，无测试。** 删掉照样 115 绿（§10.3 注入 C） |
+| "读不到授权表时保持沉默" | 聊天页 ✅；**详情页是"明说读不到"，不是沉默**。我认可这个偏离，但它不是自述的那件事 |
+| "4 个 P0 都修了" | **3 个修了、1 个修了四分之一。** 但请一并读 §10.7 —— **"没修完"不等于"还是 4 个 P0"** |
+
+---
+
+## 10.7 裁决：NO-GO，但拦路的**只剩一条半**，且性质必须说清
+
+### 判定：**NO-GO（维持）**
+
+### 但理由的构成变了 —— 这是本轮唯一需要主理人做决策的地方
+
+| 类别 | 上一轮（§9.6） | 本轮 |
+|---|---|---|
+| **代码缺陷（P0 级）** | **4 条** | **0 条** |
+| 代码缺陷（P1/P2 级） | 10 条 | **5 条**（N-1 / N-3 / N-4 / N-8 / N-2），**全部不需要设备，合计约 1 天** |
+| **环境（零真机执行）** | 1 条（P0-5） | **1 条，且现在是唯一 P0 级理由** |
+
+**所以：如果只看代码，这份提交已经不具备"拦得住"的东西了。** 4 个 P0 里 3 个我做了负向验证（改坏真的红），第 4 个（P0-3）剩下的是一句文案和三个未做的子项，**没有一条会让用户"救不回来"**。
+
+**那为什么我还是 NO-GO？** 只有一个理由，且它是环境不是代码：
+
+> **这个 App 仍然从未在任何真机上运行过一次（第 4 次提交）。**
+> 而本轮新增的 9,052 行 `:ui` 里，**P0-3 与 P0-4 的全部修复都住在其中**，`:ui` 的测试数是 **0**，`androidTest` 目录数是 **0**，`adb devices` 是**空**。
+> **我可以用 dex 反汇编证明"调用没被 R8 删掉"，但我无法证明"那一行日志真的打出来了"。**
+
+**这两件事的性质完全不同，主理人据此可以走两条路：**
+
+- **路线 A（推荐）**：**再花半天把 5 条 P1/P2 改完**（N-1 重试重复、N-3/N-4 补两条真正的测试、N-8 至少加"迁移前后行数相等"断言 + 一句诚实文案），**然后立刻上机**（M3–M6 + M22–M25，1 天）。这样交付的是"代码干净 + 有真机证据"。
+- **路线 B（若时间极紧）**：**接受 5 条 P1/P2，直接上机**。我依然会签"代码侧无 P0"，但我**不会**签 NO-GO 的解除 —— 因为解除条件从未变过：**跑一次**。
+
+**反过来，如果只修 P1 不上机（路线 C），那是把顺序做反了**：第 2 轮起我就说过，**"没跑过"只能靠设备消除，而 P1 可以随时修**。现在 P0 已经清空，**上机的边际收益第一次超过了继续读代码的边际收益**。
+
+### 最短路径（相对上轮的最小改动）
+
+```
+════ 今天，代码（约 1 天，全员并行，不需要设备） ════
+[N-1 · 霍承钧 1h]   ChatViewModel.retry() 复用上一轮的 clientRequestId
+                    （把 clientRequestId 存进 lastRequest，send() 才新建）
+[N-3 · 霍承钧 2h]   ColdStartWiringTest 换成行为测试：构造 Hilt 单例 → awaitReady() → 断言
+                    Report.templatesWritten ≥ 0 且 failures 为空
+[N-4 · 霍承钧 0.5h] FakeModelPort.failOpen ⇒ 断言租约被释放（DERIVED_TASK 仍能 acquire）
+[N-8 · 宋砚秋 2h]   ① STORE_FAILED 文案按路径拆开（append/begin 用"本轮没能开始"）
+                    ② 迁移前后 `memory_card` 行数相等断言
+                    ③ 迁移 KDoc 里"已关外键"改成"本表无父表引用"（上轮 P1-1，仍未动）
+[N-5 · 苏映棠 10m]  删掉 ChatWiringModule.kt:26 那句「全 grant Port 无实现」
+
+════ 明天，真机（1 天，用现成 debug APK，95.09 MiB，已带 v2 签名） ════
+M3–M6（装/冷启/建库/遍历）+ 上轮列的 M22–M25（迁移 / 冷启兜底 / 写失败恢复 / 无能力 Agent）
+★ 新增必跑两条：
+  M26 · 冷启日志：logcat 里必须出现 `cold start done: templates=… grants=… swept=…`
+        （这是 §10.4 那条静态证据的唯一闭环手段）
+  M27 · 重试：制造一次 commit 失败 ⇒ 点「重试」⇒ 确认**没有**出现两条相同的用户消息
+```
+
+---
+
+## 10.8 验收人声明（第 3 轮补记）
+
+本轮所有标 🔬 的结论，来自我在 `/workspace/HarnessAgent` 上实际执行的命令、实际反汇编的 release dex、以及**在三份 `/tmp` 副本上实际注入故障**的结果。**没有引用任何成员自述的数字**；霍承钧自述的"8 failed / 20"是我**先跑出 8 failed 之后**才去核对的，不是照抄。
+
+**我没有修改任何一行业务源码**，本轮改动仅限本文档。仓库内唯一的破坏性动作是**删除 `:app` 的 R8 中间产物**（`minifyReleaseWithR8` 的输出与 APK）以强制 R8 真实执行 —— 这些是构建产物，可随时重建。
+
+**三处边界必须交代**：
+
+1. **§10.4 是静态证据，不是运行时证据。** 我能证明"`Provider.get()` 那条指令在 dex 里"，不能证明"它真的构造了对象并跑完了 `run()`"。**M26 之前，P0-2 只能算"静态成立"。**
+2. **注入 A 证明的是"测试能抓住 'finally 整体消失'"，不能证明"测试能抓住 'finally 里少了一条路径'"。** 对后者，这个结构（单一 `try` 包裹单一调用）在语法上已经排除了可能性，所以我没再构造那条注入。
+3. **我依然没有覆盖真机专属项**：`BundledSQLiteDriver` 在 ART 上的迁移行为、`STREAMING` 收敛在真实进程被杀后的效果、`WorkManager`/前台服务与冷启的时序竞争。**这三项我不做推测性判断**，只标注为 M22/M23/M24 的验收点。
+
+---
+
+**判定：NO-GO（维持）。**
+
+**但请注意本轮的结论形态与上一轮完全不同：上一轮拦在"三处断线，跑起来就会踩"；这一轮拦在"从没跑过"。**
+**前者是代码问题，今天就能修完（§10.7 第一段，约 1 天）；后者只能靠一台手机（§10.7 第二段，1 天）。**
+**我的专业判断是：这两件事现在可以并行，且应该今天就开始 —— 因为代码侧已经没有需要"再想一层"的东西了。**

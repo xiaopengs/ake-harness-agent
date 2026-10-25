@@ -142,9 +142,21 @@ public class ChatLoop(
      * 版本不变），于是两个轮次都认为自己拥有那条 Conversation —— 然后同时往同一个 native
      * session 里灌 prompt。那不会报错，只会串字。UI 上「连点两次发送」就够触发。
      * **只拦会话相同的并发**：会话不同的第二个轮次应该抢占（F3 的排队语义），不是被拒。
+     *
+     * ★ 2026-10 修正（关千锤 P0-1）：这里原本是**单个** `String?` 槽。单槽有两个独立的
+     *   缺陷，且它们的表现都是「这个会话再也发不出消息」：
+     *
+     *   ① **早退泄漏**：进入时置位，只有正常路径复位 —— 三条提前 `return` 全都漏。
+     *      写库失败一次 ⇒ 会话被永久标记成「正在生成中」⇒ 之后所有消息都被拦，
+     *      而 `ChatLoop` 是单例 ⇒ **只有杀进程能恢复**。
+     *   ② **跨会话覆写**：槽里只装得下一个会话 id。会话 A 在跑时 B 起一轮 ⇒ 槽变成 B，
+     *      于是 A 的 `exitFlight(A)` 打空（守卫是 `== sid`），而**第三轮打在 A 上会被放行**
+     *      ⇒ 又回到「同会话并发」这个本源上。
+     *
+     *   所以改成集合：置位/复位天然配对，且互不干扰。复位由 [turn] 里**唯一**的
+     *   `try/finally` 负责，**不靠在每个 return 前手写一遍** —— 那种写法迟早漏第四条。
      */
-    @Volatile
-    private var inFlightSession: String? = null
+    private val inFlightSessions: MutableSet<String> = mutableSetOf()
 
     /**
      * 模式控制器**不放在会话槽里**。
@@ -166,6 +178,27 @@ public class ChatLoop(
             send(ChatEvent.Terminal(sid, null, ChatTerminalReason.POLICY_DENIED))
             return@channelFlow
         }
+        // ★★ P0-1：`try` 紧贴 `enterFlight` 成功之后，`finally` 覆盖本块内的**全部**退出路径：
+        //   四条提前 return（并发被拒之外的三条 + 早退）、正常结束、`CancellationException`、
+        //   任意 `Throwable`。这是「复位」这件事**唯一**的写法 —— 在每条 return 前手写
+        //   `exitFlight` 才是上次泄漏的成因（漏了第四条，而且永远会漏）。
+        //   注意 `finally` 里**不做 send**：取消风暴里 send 会二次抛出，掩盖真实终态。
+        try {
+            admit(req, sid, this)
+        } finally {
+            exitFlight(sid)
+        }
+    }
+
+    /**
+     * 准入之后的全部工作。抽成独立函数是为了让 [turn] 里只剩「置位 → try → 复位」三行：
+     * 只要这个函数里的任何一条 `return` 生效，`turn` 的 `finally` 都必然执行。
+     */
+    private suspend fun admit(
+        req: ChatTurnRequest,
+        sid: String,
+        out: ProducerScope<ChatEvent>,
+    ) {
         val budget = ChatBudget.forTier(health.memoryTier())
         val ledger = TurnLedger(budget)
         ledger.startTurn(clock.nowMillis())
@@ -174,8 +207,8 @@ public class ChatLoop(
         val scope = resolveScope(sid)
         if (scope == null) {
             AkeLog.w(TAG, "turn rejected: session=$sid 不存在或人格不可读")
-            send(ChatEvent.Terminal(sid, null, ChatTerminalReason.POLICY_DENIED))
-            return@channelFlow
+            out.send(ChatEvent.Terminal(sid, null, ChatTerminalReason.POLICY_DENIED))
+            return
         }
 
         // ── ① 落用户消息（不可丢泳道）。失败 ⇒ 这一轮不能开始，且必须让用户看见。
@@ -194,8 +227,9 @@ public class ChatLoop(
         )
         if (appended is Outcome.Err) {
             AkeLog.w(TAG, "user message append failed: ${appended.error.code}")
-            send(ChatEvent.Terminal(sid, null, STORE_FAILURE_REASON))
-            return@channelFlow
+            // ★ P0-3：落盘失败**不是**模型失败。借 MODEL_FAILED 会把用户送去换模型。
+            out.send(ChatEvent.Terminal(sid, null, STORE_FAILURE_REASON))
+            return
         }
 
         // ── ② 出云裁决：MVP 恒 LOCAL_ONLY，但审计这一笔必须落下（T12）。
@@ -203,12 +237,12 @@ public class ChatLoop(
         if (decision.target != InferenceTarget.LOCAL_ONLY) {
             // 本轮没有云端实现 ⇒ 明确拒绝，而不是「先允许再在一半失败」。
             AkeLog.w(TAG, "routing=${decision.target} 但本模块没有云端实现，拒绝")
-            send(ChatEvent.Terminal(sid, null, ChatTerminalReason.POLICY_DENIED))
-            return@channelFlow
+            out.send(ChatEvent.Terminal(sid, null, ChatTerminalReason.POLICY_DENIED))
+            return
         }
 
         val result = try {
-            runTurn(req, scope, budget, ledger, this)
+            runTurn(req, scope, budget, ledger, out)
         } catch (ce: CancellationException) {
             closeConversation("cancelled")
             throw ce
@@ -216,12 +250,10 @@ public class ChatLoop(
             AkeLog.e(TAG, "turn failed: ${t.message}", t)
             closeConversation("error")
             TurnResult(null, ChatTerminalReason.MODEL_FAILED)
-        } finally {
-            exitFlight(sid)
         }
         // 正常结束**不**释放焦点：会话留在 cache 里供下一轮复用（§3.5 的 L1 层）。
         // 释放只发生在「被抢占 / 紧凑 / 中止 / 出错」四条路径上。
-        send(ChatEvent.Terminal(sid, result.messageId, result.terminal))
+        out.send(ChatEvent.Terminal(sid, result.messageId, result.terminal))
     }
 
     // ══════════════════════════════════════════════════════════════════ 一轮
@@ -243,7 +275,16 @@ public class ChatLoop(
         // ── ③ 焦点 + 会话（复用 or 复水）
         val lease = borrowFocus(sid, agentId) ?: return TurnResult(null, ChatTerminalReason.MODEL_FAILED)
         val conversation = ensureConversation(sid, profile, enabledSkills, budget, lease, mode, out)
-            ?: return TurnResult(null, ChatTerminalReason.MODEL_NOT_LOADED)
+            ?: run {
+                // ★ P0-1 附注（关千锤点名要查的同款问题）：`ensureConversation` 失败时
+                //   会话槽已被 `closeConversation("rebuild", keepLease = lease)` 清空，
+                //   这条租约**没有任何地方持有**了 —— 不 close 它就等于仲裁器里永远留着
+                //   一个 `Chat(sid)` 的 owner。`FOREGROUND_USER` 之间还能互相抢占所以看不出来，
+                //   但 `DERIVED_TASK` 会永远拿到 `FOCUS_BUSY` ⇒ 「任务一次都起不来」。
+                //   `close()` 内部的 version 守卫保证：这条租约若已被抢占，这里是纯 no-op。
+                releaseFocus(lease)
+                return TurnResult(null, ChatTerminalReason.MODEL_NOT_LOADED)
+            }
 
         // 本轮历史读一次：Router 与 Answer 两次组装共用（一轮内消息不再变化）。
         val views = store.messages(sid, limit = HISTORY_READ_LIMIT).first()
@@ -484,6 +525,21 @@ public class ChatLoop(
         AkeLog.i(TAG, "conversation closed ($reason): session=$sid kv=$kv")
     }
 
+    /**
+     * 释放一条**本模块已经不再持有**的租约（会话建不起来时用）。
+     *
+     * 与 [closeConversation] 的分工：那条处理「会话还在槽里」的情形（先快照 KV、记账、再关），
+     * 本函数只处理「槽已经被清掉、租约只剩局部变量引用」的漏口 —— 这条漏口正是
+     * `InferenceFocusArbiter.owner` 变成永久脏值的原因。
+     */
+    private fun releaseFocus(lease: FocusLease) {
+        synchronized(slotLock) {
+            if (slot.lease === lease) slot = slot.copy(lease = null)
+        }
+        runCatching { lease.close() }
+            .onFailure { AkeLog.w(TAG, "lease.close failed: ${it.message}") }
+    }
+
     /** 被抢占：**不 close** 别人的资源，只丢掉自己那份句柄（并记账）。 */
     private suspend fun yielded(sid: String, out: ProducerScope<ChatEvent>): TurnResult {
         AkeLog.i(TAG, "focus yielded away from session=$sid")
@@ -651,16 +707,15 @@ public class ChatLoop(
         val stats = (result as? Outcome.Ok)?.value?.stats
         val kv = runCatching { conversation.currentCacheTokens() }.getOrDefault(0)
         val full = buffer.toString()
-        val committed = store.commitAssistant(
-            messageId = messageId,
-            status = status,
-            text = full,
-            promptTokens = stats?.prefillTokens ?: 0,
-            decodeTokens = stats?.decodeTokens ?: 0,
-            kvCacheTokensAfter = kv,
-            redactionCount = redactionGate.scrub(full).redactionCount,
-        )
-        if (committed is Outcome.Err) AkeLog.w(TAG, "commitAssistant failed: ${committed.error.code}")
+        // ★ P0-3：**同一轮内**重试一次。这里重试的是「落盘」而不是「重新生成」——
+        //   文本还在 `full` 里，`commitAssistant` 是按 messageId 的 UPDATE（幂等），
+        //   所以一次重试既不会重复写入，也不需要用户重发。这才是「只重试落盘」唯一
+        //   真正可实现的形态：一旦放弃，那段文本就没有第二个持有者了。
+        var committed = commitAssistant(messageId, status, full, stats, kv)
+        if (committed is Outcome.Err) {
+            AkeLog.w(TAG, "commitAssistant failed (${committed.error.code})；同一轮内重试一次")
+            committed = commitAssistant(messageId, status, full, stats, kv)
+        }
 
         // ── ⑦ 回到 REPLY：任务已经在 Answer Turn 里被复述完，本轮到此结束。
         //   这次切换是**显式记账**的 —— 退出任务模式同样要重排一次 prompt。
@@ -669,8 +724,36 @@ public class ChatLoop(
         }
 
         maybeCompact(sid, conversation, budget, out)
+
+        if (committed is Outcome.Err) {
+            AkeLog.w(TAG, "commitAssistant failed after retry: ${committed.error.code}")
+            // ★ P0-3：模型答完了、但没存下来 ⇒ STORE_FAILED，不是 MODEL_FAILED。
+            //   只在「本轮本来算成功」时改写终态：模型自己失败（MODEL_FAILED）或用户中止
+            //   （USER_ABORT）的归因比存储失败更上游，抢走它会变成第二种误归因。
+            return TurnResult(
+                messageId,
+                if (terminal == ChatTerminalReason.COMPLETED) STORE_FAILURE_REASON else terminal,
+            )
+        }
         return TurnResult(messageId, terminal)
     }
+
+    private suspend fun commitAssistant(
+        messageId: String,
+        status: MessageStatus,
+        text: String,
+        stats: com.ake.core.modelapi.InferenceStats?,
+        kv: Int,
+    ): Outcome<Unit> =
+        store.commitAssistant(
+            messageId = messageId,
+            status = status,
+            text = text,
+            promptTokens = stats?.prefillTokens ?: 0,
+            decodeTokens = stats?.decodeTokens ?: 0,
+            kvCacheTokensAfter = kv,
+            redactionCount = redactionGate.scrub(text).redactionCount,
+        )
 
     /**
      * 紧凑判据（§3.5 + 既有 §4.3）：KV 超过可用窗口 85%，且距上次紧凑 ≥6 轮。
@@ -865,15 +948,13 @@ public class ChatLoop(
     }
 
     private fun enterFlight(sid: String): Boolean = synchronized(slotLock) {
-        if (inFlightSession == sid) return false
-        inFlightSession = sid
-        true
+        // ★ `add` 返回 false ⟺ 已在集合里 ⟺ 同会话确实有一轮在跑。置位与判定是同一次操作，
+        //   不存在「查一下再设」之间被插队的窗口。
+        inFlightSessions.add(sid)
     }
 
     private fun exitFlight(sid: String) {
-        synchronized(slotLock) {
-            if (inFlightSession == sid) inFlightSession = null
-        }
+        synchronized(slotLock) { inFlightSessions.remove(sid) }
     }
 
     private fun routeContext(req: ChatTurnRequest, agentId: String, budget: ChatBudget): RouteContext =
@@ -896,7 +977,16 @@ public class ChatLoop(
             "$k=${redactionGate.scrub(v).text.take(40)}"
         }
 
-    /** 冷启动时收敛卡在 `STREAMING` 的助手消息（§2.5 纪律 2）。`:app` 建图后调一次。 */
+    /**
+     * 冷启动时收敛卡在 `STREAMING` 的助手消息（§2.5 纪律 2）。
+     *
+     * ★ 2026-10（关千锤 P0-2）：**生产调用点**是 `:app` 的
+     *   `startup/ColdStartCoordinator`（`init { scope.launch { … } }` 自触发，
+     *   与 `:data` 的 `TaskStateWriter.init` 调 `TaskReconciler.sweep()` 同一手法）。
+     *   在这之前它是 0 调用 —— 于是「进程被杀留下的 STREAMING 脏行永不收敛」
+     *   这条后果一直成立，而方法本身看起来是好的。
+     *   `app/src/test/.../ColdStartWiringTest` 会用源码扫描守住这条线。
+     */
     public suspend fun onColdStart(): Int = store.sweepStreaming()
 
     private data class Scope(val summary: ChatSessionSummary, val profile: AgentProfile)
@@ -948,13 +1038,17 @@ public class ChatLoop(
         public const val SKILL_RESULT_TAG: String = "skill_result"
 
         /**
-         * ★ 落盘失败时的终态。
+         * ★ 落盘失败的终态 = [ChatTerminalReason.STORE_FAILED]。
          *
-         * `ChatTerminalReason` 是本轮**冻结**的契约，里面没有 `STORE_FAILED`，
-         * 所以这里只能借 `MODEL_FAILED`。**这是一个已知的语义错配**：UI 会把它显示成
-         * 「模型出错了」，而真实原因是数据库写失败。要修只能给枚举加一档 ——
-         * 那是契约层的 line-level 变更，需主子拍板，本模块不擅自改（详见交付报告）。
+         * 2026-10 修正（关千锤 P0-3）：这里原本是 `MODEL_FAILED` 的**别名**，理由是
+         * 「契约枚举里没有 `STORE_FAILED`，本模块不擅自改契约」。那个理由当时是成立的，
+         * 代价却由用户承担 —— 落盘失败被显示成「模型出错了」，而 UI 那一档 `retryable = true`，
+         * 于是用户会去换模型、清缓存，全都对着空气使劲。
+         *
+         * 现在枚举有这一档了（见 `core:ports/Chat.kt`），本模块**所有**落盘失败路径
+         * （`append(USER)` / `beginAssistant` / 重试后的 `commitAssistant`）都必须汇到这一个常量，
+         * 不允许任何一处再写 `MODEL_FAILED`：归因错误的终态比没有终态更糟。
          */
-        public val STORE_FAILURE_REASON: ChatTerminalReason = ChatTerminalReason.MODEL_FAILED
+        public val STORE_FAILURE_REASON: ChatTerminalReason = ChatTerminalReason.STORE_FAILED
     }
 }
