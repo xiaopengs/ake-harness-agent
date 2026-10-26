@@ -7,6 +7,7 @@ import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import com.ake.core.common.Clock
 import com.ake.core.common.FieldCipher
 import androidx.room.withTransaction
+import com.ake.data.BuildConfig
 import com.ake.core.ports.AgentProfileStorePort
 import com.ake.core.ports.CapabilityGrantPort
 import com.ake.core.ports.CheckpointStorePort
@@ -34,6 +35,7 @@ import com.ake.data.persist.modeldist.ManifestTransports
 import com.ake.data.persist.modeldist.ManifestTrustStore
 import com.ake.data.persist.modeldist.ModelAssetLedger
 import com.ake.data.persist.modeldist.ModelManifestConfig
+import com.ake.data.persist.modeldist.ModelManifestConfigFactory
 import com.ake.data.persist.modeldist.ModelManifestParser
 import com.ake.data.persist.modeldist.ModelManifestSource
 import com.ake.data.persist.payload.PayloadStore
@@ -478,17 +480,40 @@ public abstract class PersistenceBindingsModule {
             ModelAssetLedger(dao = db.modelAssetDao(), clock = clock)
 
         /**
-         * manifest 配置。
+         * manifest 配置。**整条分发链路的开关与信任锚都在这一个对象里。**
          *
-         * ⚠ 默认 [ModelManifestConfig.UNCONFIGURED]（未配置 URL / 未钉公钥）—— 这是
-         * **当前的真实状态**，运维还没产出签名 manifest。此时 `ModelManifestSource`
-         * 一律返回 `MANIFEST_NOT_CONFIGURED`，调用方沿用 APK 内烧录的目录项。
-         * 上线前由运维给出 URL 与 `pinnedKeys`，改的是这一个对象。
+         * ## 两个值来自两个不同地方 —— 这不是随意的，见各自的类注释
+         *
+         *  | 值             | 来源                                            | 改它需要做什么 |
+         *  |----------------|-------------------------------------------------|----------------|
+         *  | `manifestUrl`  | 构建期注入（`data/build.gradle.kts` → `BuildConfig.MODEL_MANIFEST_URL`） | 改构建环境的一行（换 CDN / 分环境） |
+         *  | `pinnedKeys`   | 源码钉死（`ModelManifestPins.ALL`）              | 改代码 + 发版（换签名钥匙） |
+         *
+         * 判据是「谁有权决定端侧信任什么」：CDN 地址是**部署目标**，可以让部署者改；
+         * 公钥是**信任锚本身**，只能随包走（`ModelManifestPins` 类注释写了两条理由）。
+         *
+         * ## ★★ 注入缺失 / 不可用时的行为：落到 [ModelManifestConfig.UNCONFIGURED]，不崩
+         *
+         * [ModelManifestConfigFactory] 会对注入值做三道校验（空 / 非 https / 公钥串不可用），
+         * 任何一道不过都返回同一个未配置对象 ⇒ [ModelManifestSource] 报
+         * `MANIFEST_NOT_CONFIGURED` ⇒ `:llm` 的 `ensureCurrent` 原样上抛 ⇒
+         * **连一个 HTTP 请求都不会发出**（`ModelManifestConfigTest` 与 `:llm` 的
+         * `ManifestFailClosedTest` 都断言了「传输从未被调用」）。
+         *
+         * 这条 fail-closed 语义是刻意保留的：它同时也是默认构建（没人注入 URL 时）
+         * 的行为 —— **没有可信 manifest 就不下载**，而不是「退去寻找下一个来源」，
+         * 也不会因为一次配错就让 App 起不来。
+         *
+         * ## ⚠ 私钥在哪
+         *
+         * 不在这个仓库里，也不在构建环境里：签名钥匙的另一半只存在于运维的密钥管理
+         * 服务。这里只有**公钥**（公开信息）。构建时需要注入的只有 manifest 地址。
          */
         @Provides
         @Singleton
         @JvmStatic
-        public fun provideModelManifestConfig(): ModelManifestConfig = ModelManifestConfig.UNCONFIGURED
+        public fun provideModelManifestConfig(): ModelManifestConfig =
+            ModelManifestConfigFactory.build(manifestUrl = BuildConfig.MODEL_MANIFEST_URL)
 
         @Provides
         @Singleton

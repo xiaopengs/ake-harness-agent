@@ -78,4 +78,41 @@ dependencies {
     ksp(libs.hilt.android.compiler)
 
     debugImplementation(libs.compose.ui.tooling)
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 【本轮 · 苏映棠】`:ui` 的第一批测试依赖（此前 `:ui` 是 0 测试）。
+    //
+    // 选缺点：**只用版本目录里既有的别名，不新增坐标、不改版本号**。
+    //  · `testUnit` = junit + truth + turbine —— 全仓每个模块的测试都用它，保持一致；
+    //  · `coroutines.test` —— `viewModelScope` 跑在 `Dispatchers.Main` 上，纯 JVM 单测里
+    //    没有 Android 的 Main 实现，`Dispatchers.setMain(TestDispatcher)` 必须由它提供。
+    //    这条别的模块用不上（它们的 ViewModel 不多或已被 Robolectric 覆盖），所以没进 bundle。
+    //
+    // ⚠ 刻意**不引** Robolectric / `compose-ui-test-junit4`：那会新增 catalog 条目
+    //   （邝随行的地盘），而且本项目没有 androidTest 基础设施。这里的测试一律绕开 Compose
+    //   渲染，只测**行为**：文案映射、状态归约、选择器闸门 —— 像素与布局不在 C 位。
+    // ─────────────────────────────────────────────────────────────────────────
+    testImplementation(libs.bundles.testUnit)
+    testImplementation(libs.coroutines.test)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 【本轮 · 苏映棠】把 `strings.xml` 声明成 `:ui` 测试任务的**输入文件**。
+//
+// 为什么非加不可：`ChatCopyTest` 的禁词断言直接读 `src/main/res/values/strings.xml`
+// （见 `testsupport/UiStrings.kt`）。而 Gradle 的单元测试任务只知道自己 classpath
+// 上的东西 —— 它没有理由知道某条用例会去读一份源码里的 XML。实测后果是：
+//
+//     改了 strings.xml → ./gradlew :ui:testDebugUnitTest → FROM-CACHE  → BUILD SUCCESSFUL
+//
+// 也就是说，「把「失败 / 安全」写进 IN_FLIGHT 文案」这个改动，在增量构建下**一次都不会红**。
+// 这不是理论风险：上面那一行是实测出来的。
+//
+// 加了这条声明后，改任何一个字都会让测试任务重新执行。
+// ⚠ 若日后有人把 `UiStrings` 换成别的读法，这里要跟着改 —— 否则又回到绿着通过。
+// ─────────────────────────────────────────────────────────────────────────────
+tasks.withType<Test>().configureEach {
+    inputs.file(file("src/main/res/values/strings.xml"))
+        .withPropertyName("akeUiStringsSource")
+        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
 }

@@ -1,3 +1,6 @@
+import java.util.Base64
+import java.util.Properties
+
 // =============================================================================
 // :app —— 组合根。Hilt 装配、前台服务、下载服务、入口。
 //
@@ -31,21 +34,121 @@ val appVersionName: String =
         ?: "0.1.0-dev"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// release 签名凭据：**只**从环境变量读取，仓库内不得出现任何密钥或路径。
-// 四个变量齐备才算「可签名」；缺任意一个就不挂签名配置 ——
-// 这样 PR/CI 在无 Secret 的环境下仍能出包（未签名），而 release 工作流里
-// 有 apksigner 校验步骤兜底，签不上会直接红，不会静默发出 debug 签名的包。
+// release 签名凭据
+//
+// ★★ 四个 Secret 的名字是**对外契约** —— CI Secret 与 docs/03-build-and-deploy.md
+//    必须用同一组名字，改一处要改三处：
+//
+//      ANDROID_KEYSTORE_BASE64     keystore 文件本体（标准 base64，单行，无换行）
+//      ANDROID_KEYSTORE_PASSWORD   keystore 密码
+//      ANDROID_KEY_ALIAS           key alias
+//      ANDROID_KEY_PASSWORD        key 密码
+//
+//    为什么 keystore 走 **base64 而不是文件路径**：CI runner 的临时目录每次都变，
+//    而 Secret 只能存字符串。用 base64 意味着「Secret 即文件」，不需要再挂 volume
+//    或写一步 `download-artifact`。代价只是构建时解码一次（几 KB，可忽略）。
+//
+// 取值顺序：**环境变量 > local.properties**。
+//   - 环境变量：CI 用（GitHub Actions `secrets.*` → `env:`）
+//   - local.properties：本地开发用（已在 .gitignore，见仓库根）。
+//     额外支持 `ANDROID_KEYSTORE_FILE=<路径>` —— 本地有现成 keystore 文件时不
+//     必每次 base64 一遍。**这一项只在 local.properties 里认**，不作为 CI Secret。
+//
+// 仓库内**不得**出现任何密钥、密码或 keystore 文件。.gitignore 是最后一道兜底，
+// 真正的安全边界是「凭据只在构建时从外部注入」—— 文件在盘上也进不了 APK。
+//
+// ★★ 降级策略：fail-safe，不是 fail-fast
+//   PR 构建与「刚 clone 下来」的本地构建都**没有**这几个 Secret，而这两种场景
+//   占绝大多数。让 `assembleRelease` 在这种时候崩掉是错的：
+//     - 崩掉 ⇒ 没人能在本地验 release 的 R8 / Lint / 资源裁剪，问题全堆到发版那天；
+//     - 出 unsigned ⇒ 装不上，但 release 工作流末尾的 `apksigner verify` 会直接红，
+//       不会静默发出一个「看起来是 release 其实是 debug 签名」的包。
+//   所以：缺凭据 ⇒ 出未签名包 + 一条推到日志顶部的醒目 warning。
 // ─────────────────────────────────────────────────────────────────────────────
-val releaseKeystorePath = System.getenv("AKE_KEYSTORE_PATH")
-val releaseKeystorePassword = System.getenv("AKE_KEYSTORE_PASSWORD")
-val releaseKeyAlias = System.getenv("AKE_KEY_ALIAS")
-val releaseKeyPassword = System.getenv("AKE_KEY_PASSWORD")
-val canSignRelease: Boolean = listOf(
-    releaseKeystorePath,
-    releaseKeystorePassword,
-    releaseKeyAlias,
-    releaseKeyPassword,
-).all { !it.isNullOrBlank() }
+val localProps: Properties = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.isFile) f.inputStream().use { load(it) }
+}
+
+/** 环境变量优先，其次 local.properties；空串与纯空白一律视为「没配」。 */
+fun credential(envName: String): String? =
+    System.getenv(envName)?.trim()?.takeIf { it.isNotEmpty() }
+        ?: localProps.getProperty(envName)?.trim()?.takeIf { it.isNotEmpty() }
+
+val releaseKeystoreBase64: String? = credential("ANDROID_KEYSTORE_BASE64")
+val releaseKeystorePassword: String? = credential("ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyAlias: String? = credential("ANDROID_KEY_ALIAS")
+val releaseKeyPassword: String? = credential("ANDROID_KEY_PASSWORD")
+
+/** 仅 local.properties 认的便利项：直接指向盘上的 keystore 文件。 */
+val releaseKeystoreFileOverride: String? =
+    localProps.getProperty("ANDROID_KEYSTORE_FILE")?.trim()?.takeIf { it.isNotEmpty() }
+
+/**
+ * 把凭据落成磁盘上真实的文件。
+ *  base64 ⇒ 解码到 `build/keystore/`（该目录随 clean 一起消失，且本就在 .gitignore 里）；
+ *  文件覆盖 ⇒ 原样使用。**路径缺失 / 文件不存在一律当「没配」**，不抛异常。
+ */
+val releaseKeystoreFile: File? = run {
+    val b64 = releaseKeystoreBase64
+    when {
+        b64 != null -> {
+            val decoded = runCatching { Base64.getDecoder().decode(b64) }.getOrNull()
+            if (decoded == null) {
+                logger.warn("ANDROID_KEYSTORE_BASE64 不是合法 base64 ⇒ 本次 release 不签名")
+                null
+            } else {
+                val out = File(
+                    layout.buildDirectory.get().asFile,
+                    "keystore/release-from-env.jks",
+                )
+                out.parentFile.mkdirs()
+                out.writeBytes(decoded)
+                out
+            }
+        }
+        releaseKeystoreFileOverride != null -> {
+            val f = File(releaseKeystoreFileOverride!!)
+            if (f.isFile) f else {
+                logger.warn("ANDROID_KEYSTORE_FILE 指向的文件不存在：${f.absolutePath}")
+                null
+            }
+        }
+        else -> null
+    }
+}
+
+/** 缺了哪几项 —— 用于把 warning 说清楚，而不是笼统一句「签名未配置」。 */
+val releaseCredentialGaps: List<String> = buildList {
+    if (releaseKeystoreFile == null) {
+        add("ANDROID_KEYSTORE_BASE64（或 local.properties 的 ANDROID_KEYSTORE_FILE）")
+    }
+    if (releaseKeystorePassword == null) add("ANDROID_KEYSTORE_PASSWORD")
+    if (releaseKeyAlias == null) add("ANDROID_KEY_ALIAS")
+    if (releaseKeyPassword == null) add("ANDROID_KEY_PASSWORD")
+}
+
+val canSignRelease: Boolean = releaseCredentialGaps.isEmpty()
+
+if (!canSignRelease) {
+    logger.warn(
+        """
+        |
+        |${"=".repeat(78)}
+        |  ⚠  RELEASE 不会签名 —— 本次产物是 **app-release-unsigned.apk**，
+        |     `adb install` 会直接失败（INSTALL_FAILED_NO_MATCHING_SIGNATURES / 无签名块）。
+        |
+        |  缺少的凭据：${releaseCredentialGaps.joinToString("、")}
+        |
+        |  这是**预期内的降级**，不是构建错误：没有 Secret 时 `assembleRelease`
+        |  仍应成功出包（否则本地与 PR 构建都没法验 R8 / Lint）。
+        |  要产出可安装的 release 包，见 docs/03-build-and-deploy.md §签名：
+        |     export ANDROID_KEYSTORE_BASE64=$(base64 -w0 <release.jks>)
+        |     export ANDROID_KEYSTORE_PASSWORD=... ANDROID_KEY_ALIAS=... ANDROID_KEY_PASSWORD=...
+        |${"=".repeat(78)}
+        """.trimMargin(),
+    )
+}
 
 // ABI 分包开关：默认关（出 universal APK，便于本地与 CI 定位产物），
 // 发布时显式传 -Pake.abiSplit=true。见 docs/03-build-and-deploy.md §3.4
@@ -113,11 +216,32 @@ android {
     signingConfigs {
         // debug 沿用 AGP 自动生成的 ~/.android/debug.keystore（不入版本库）
         create("release") {
-            if (canSignRelease) {
-                storeFile = file(releaseKeystorePath!!)
+            if (canSignRelease && releaseKeystoreFile != null) {
+                storeFile = releaseKeystoreFile
                 storePassword = releaseKeystorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword
+
+                // ── 签名方案矩阵（AGP 9.4.1）
+                //   v1（JAR 签名）：minSdk 28 及以下的旧设备只认它；不带 v1 的包在
+                //     Android 6 及更早（本工程 minSdk 28 ⇒ 严格说用不到）装不上。
+                //     留着的真实理由是**第三方渠道与侧载工具的兼容性**：
+                //     部分分发平台与「APK 加固/二次打包」流水线只解析 v1。
+                //   v2（APK 签名方案 v2，Android 7.0+）：**必须开**。不开 v2 的包在
+                //     Android 7+ 上会被 PackageManager 直接拒（v1 只校验 ZIP 条目）。
+                //   v3（Android 9+，minSdk 28 ✓）：**必须开**。它的价值是**密钥轮换** ——
+                //     带 v3 的包可以在不重新打签名块的前提下证明「新密钥经旧密钥授权」，
+                //     将来换签名密钥时老用户能无感升级。这是本项目迟早要做的事
+                //     （keystore validity 10000 天，但**密钥泄露**没有到期日）。
+                //   v4（Android 11+，fs-verity）：给 `adb install --incremental` 与
+                //     Play 的增量下发用，**必须依赖 v2 或 v3**。它对安装成功与否没有影响，
+                //     但能让 2.6 GB 模型的 APK 侧载与调试迭代快一个量级。
+                //     实测：AGP 9.4.1 支持该开关；若将来 AGP 升级移除它，构建会在
+                //     配置期直接报 unresolved reference，不会静默退化。
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
             }
         }
     }
@@ -135,7 +259,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // ★ 凭据缺失时不挂签名 ⇒ 产出未签名包，由 CI 的 apksigner 步骤拦下
+            // ★ 凭据缺失时不挂签名 ⇒ 产出 `app-release-unsigned.apk`，
+            //   由 release 工作流末尾的 apksigner 步骤拦下（见 docs/03-build-and-deploy.md）
             if (canSignRelease) {
                 signingConfig = signingConfigs.getByName("release")
             }

@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.androidLibrary)
     alias(libs.plugins.ksp)
@@ -27,10 +29,91 @@ plugins {
  *     成本是一次 `--offline` 失效条件下的三方改动，比长期挂着不敢删要健康。
  */
 
+// =============================================================================
+// ★ 模型分发 manifest 的地址（构建期注入 · 宋砚秋）
+//
+// ★★ 为什么 URL 不能写死在 Kotlin 里：它是**部署目标**，不是代码事实。
+//   换 CDN、加镜像、给 staging 指向另一套桶 ⇒ 都只该改构建环境的一行，
+//   而不是去动 `modeldist/` 下那份会审过的源码。
+//
+// ★★ 为什么也不能反过来把它做成「用户设置」或「远程下发」：
+//   它决定端侧**信任谁**。可写的配置意味着一条 adb / 一份备份就能把全网的
+//   模型来源换掉（docs/03 §2.4：一次 302 都能把信任边界带到另一个域，
+//   所以连重定向都不跟）。它是全链路里最不可变的东西 ⇒ **只能编译期钉进 APK**。
+//
+//   ⇒ 结论：**三级注入**（优先级从高到低）
+//       1. `-Pake.modelManifestUrl=…`   命令行（临时指向另一套 CDN 试试）
+//       2. `AKE_MODEL_MANIFEST_URL=…`   环境变量（CI Secret，与 ANDROID_KEYSTORE_* 同规格）
+//       3. `local.properties` 的同名键     本地开发（本文件已在 .gitignore）
+//
+//   三者都没有 ⇒ **空串**，即「本次构建不接分发链路」：产物的行为与今天一样，
+//   `ensureCurrent` 恒返回 MANIFEST_NOT_CONFIGURED（fail-closed，不下载也不崩），
+//   并且构建时打一条醒目 warning —— 与 `app/build.gradle.kts` 里 release 签名凭据
+//   缺配时的降级风格一致（出包 + 把问题喊出来，而不是让要发布那天才发现）。
+//
+// ⚠ 与之相反：**公钥不走这条链路**，它钉在源码的 `ModelManifestPins.kt` 里。
+//   理由是「谁有权决定端侧信任什么」——见那个文件的类注释。
+// =============================================================================
+val localProps: Properties = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.isFile) f.inputStream().use { load(it) }
+}
+
+fun trimmedOrNull(raw: String?): String? = raw?.trim()?.takeIf { it.isNotEmpty() }
+
+/**
+ * manifest 地址。空串 = 未配置 ⇒ 运行时 MANIFEST_NOT_CONFIGURED（fail-closed）。
+ *
+ * URL 里不会合法出现 `"` 与 `\`，转义只做「注入值意外带了它们时不把 BuildConfig 编译崩」
+ * 这一层兜底 —— 真带上这种字符时，交给 `ModelManifestConfigFactory` 判非法并降级。
+ */
+val modelManifestUrl: String =
+    trimmedOrNull(project.findProperty("ake.modelManifestUrl") as String?)
+        ?: trimmedOrNull(System.getenv("AKE_MODEL_MANIFEST_URL"))
+        ?: trimmedOrNull(localProps.getProperty("AKE_MODEL_MANIFEST_URL"))
+        ?: ""
+
+if (modelManifestUrl.isEmpty()) {
+    logger.warn(
+        """
+        |
+        |${"=".repeat(78)}
+        |  ⚠  模型分发链路**未配置** —— 本次产物拿不到服务端 manifest，
+        |     首次启动的用户只能走到 `MANIFEST_NOT_CONFIGURED`（fail-closed：不下载、不崩）。
+        |
+        |  注入方式（三选一，缺一不可）：
+        |      ./gradlew … -Pake.modelManifestUrl=https://<cdn>/ake/manifest.json
+        |      export AKE_MODEL_MANIFEST_URL=https://<cdn>/ake/manifest.json   # CI 走这条
+        |      local.properties: AKE_MODEL_MANIFEST_URL=https://<cdn>/ake/manifest.json
+        |
+        |  注意 URL 必须是 https 的**最终地址**（客户端不跟随重定向）。
+        |  验签公钥不在这里配 —— 它钉在源码 `ModelManifestPins.kt`，改它要发版（这是刻意的）。
+        |${"=".repeat(78)}
+        |
+        """.trimMargin(),
+    )
+} else if (!modelManifestUrl.startsWith("https://") || modelManifestUrl.any { it.isWhitespace() }) {
+    logger.warn("AKE_MODEL_MANIFEST_URL 看着不像一个合法的最终地址：$modelManifestUrl ⇒ 运行时会拒绝启用")
+}
+
 android {
     namespace = "com.ake.data"
     compileSdk = 36
-    defaultConfig { minSdk = 28 }
+
+    // ModelManifestConfig 要在装配期读到注入值 ⇒ 本模块必须生成 BuildConfig。
+    // 全仓默认 false（根 gradle.properties 的 android.defaults.buildfeatures.buildconfig），
+    // 只在真正需要的模块打开。
+    buildFeatures { buildConfig = true }
+
+    defaultConfig {
+        minSdk = 28
+        // 值来自上面的三级注入；URL 里合法字符不含引号与反斜杠，转义只为兜住手误。
+        buildConfigField(
+            "String",
+            "MODEL_MANIFEST_URL",
+            "\"${modelManifestUrl.replace("\\", "\\\\").replace("\"", "\\\"")}\"",
+        )
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

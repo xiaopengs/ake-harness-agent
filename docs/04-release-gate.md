@@ -2336,3 +2336,225 @@ M3–M6（装/冷启/建库/遍历）+ 上轮列的 M22–M25（迁移 / 冷启�
 **但请注意本轮的结论形态与上一轮完全不同：上一轮拦在"三处断线，跑起来就会踩"；这一轮拦在"从没跑过"。**
 **前者是代码问题，今天就能修完（§10.7 第一段，约 1 天）；后者只能靠一台手机（§10.7 第二段，1 天）。**
 **我的专业判断是：这两件事现在可以并行，且应该今天就开始 —— 因为代码侧已经没有需要"再想一层"的东西了。**
+
+
+---
+
+# 11 · 真机用例的可执行映射（M0–M27）
+
+> **本节新增目的**：把本文档里所有「文字描述的真机用例」变成**命令**。
+> 以后说「M10 没过」，指的是 `/workspace/scripts/device-verify/dv/cases/m07_m11.py:m10()`
+> 里那一条断言和它附带的证据，而不是一句「DOM 有问题」。
+>
+> **本节不改任何结论。** NO-GO 仍然是 NO-GO —— 只是「零真机执行」这条理由，
+> 从「待办里的一条文字」变成了「一个有入口、有判据、有退出码的东西」。
+> **它要被解除，仍然只能靠有人把手机插上。**
+
+## 11.1 它是什么
+
+一套 **python3 标准库**（无 pip 依赖）的验证套件，落在 `/workspace/scripts/device-verify/`：
+
+```
+scripts/device-verify/
+├── run.py                 ← 唯一入口
+├── README.md
+└── dv/
+    ├── model.py           ← 状态推导规则（不可自我欺骗的内核，见 §11.5）
+    ├── envcheck.py        ← M0 环境预检
+    ├── adb.py / shell.py  ← adb 与本地命令封装
+    ├── dbprobe.py         ← 拉库（含 -wal/-shm + wal_checkpoint）／查表／推库／通用造数
+    ├── logcat.py / ui.py / apk.py / report.py / audit.py
+    └── cases/             ← M1–M27 的执行体
+```
+
+**一条命令**：
+
+```bash
+cd /workspace/scripts/device-verify
+
+./run.py --selftest                       # 第一次必跑：证明这套脚本自己会报 FAIL
+./run.py --only M0-M2b,M3-M6,M22-M26     # 第 1 天：只要一台手机，不要模型/签名/CDN
+./run.py                                  # 全量（缺什么就 SKIP 什么）
+```
+
+产出 `out/<时间戳>/report.md`（人读）+ `report.json`（机器读）+ `artifacts/<用例号>/`
+（失败用例的 logcat / dropbox / `dumpsys meminfo` / bugreport）。
+
+## 11.2 编号 → 脚本映射
+
+「前置」列是能力门禁：不满足 ⇒ 该条 **SKIP**，并把缺什么写进报告。
+
+| # | 用例 | 执行体（文件:行） | 函数 | 前置 |
+|---|---|---|---|---|
+| **M0** | 环境预检（adb/设备/getprop/APK/签名） | `dv/envcheck.py` | `case_m0()` | — |
+| **M1** | 解析 AGP 实际 KGP 版本 | `m01_m06.py:75` | `m01()` | gradlew |
+| **M2** | debug APK 产物在场 | `m01_m06.py:122` | `m02()` | — |
+| **M2b** | debug APK 已 v2/v3 签名（可直接装） | `m01_m06.py:153` | `m02b()` | — |
+| **M3** | APK 可安装 | `m01_m06.py:180` | `m03()` | adb, device, apk |
+| **M4** | App 可冷启动到首页（无崩溃/无 ANR） | `m01_m06.py:214` | `m04()` | adb, device, install |
+| | ⚠ am start -W 的 ThisTime/TotalTime 各厂商都可能少打，用 Status/Timeout 兜底 | | | |
+| **M5** | Room 建库成功（真机 SQLite 上是 v3 schema） | `m01_m06.py:255` | `m05()` | adb, device, install, runas |
+| | ⚠ 表数量 19 的判据来自 @Database 的 19 个 entity；Room 是否额外建辅助表需真机确认 | | | |
+| | ⚠ WAL 是否已 checkpoint 会影响行数，脚本已强制 wal_checkpoint(TRUNCATE) | | | |
+| **M6** | Hilt 运行时图完整（冷启 + 遍历四个 tab） | `m01_m06.py:321` | `m06()` | adb, device, install, uiautomator |
+| | ⚠ 底栏文案来自 strings.xml：对话/Agent/任务/设置 | | | |
+| | ⚠ Compose 节点是否出现在 uiautomator dump 里未经验证 | | | |
+| **M7** | 模型下载 2.6GB 成功 | `m07_m11.py:75` | `m07()` | adb, device, install, manifest |
+| | ⚠ manifest 字段结构未定型 ⇒ size 只做宽容解析 | | | |
+| | ⚠ files/models 目录名来自 CoreModule.kt:137，需真机确认 | | | |
+| **M8** | LiteRT-LM 加载 + 首条推理成功 | `m07_m11.py:136` | `m08()` | adb, device, install, runas, model, modelrun |
+| | ⚠ 'engine ready: backend=' 出自 LiteRtModelPort.kt:176 | | | |
+| | ⚠ release 包 minLevel=INFO 是否放行该行需真机确认 | | | |
+| **M9** | backend 降级路径可用 | `m07_m11.py:197` | `m09()` | adb, device, install, runas, model, modelrun |
+| | ⚠ 真降级需要 probe 失败；App 目前没有强制后端开关 ⇒ 只能验「选中的后端能跑」 | | | |
+| **M10** | WebView DOM 抽取成功（本项目咽喉） | `m07_m11.py:237` | `m10()` | adb, device, install, runas, model, modelrun, goal, targeturl |
+| | ⚠ candidate_count 的语义（是否=抽取元素数）未实测 | | | |
+| | ⚠ DomExtractBridge 成功路径可能不打日志 ⇒ 该条可能假 FAIL | | | |
+| | ⚠ payload 是加密区 ⇒ 「包含预期目标元素」退化为 host + candidate_count | | | |
+| **M11** | C1 端到端跑通（release 包） | `m07_m11.py:314` | `m11()` | adb, device, install, runas, releaseapk, model, modelrun, goal, targeturl, expectedrecords |
+| | ⚠ release 包非 debuggable ⇒ run-as 拉不到库，本条在 release 上必然 SKIP；要真跑需先确认拉库方案（root / 可调试 release / 应用内导出） | | | |
+| **M12** | S3 支付类硬禁止（拒绝且不提供确认入口） | `m12_m16.py:33` | `m12()` | adb, device, install, runas, model, modelrun, paymentgoal |
+| | ⚠ 全仓测试中 payment/FORBIDDEN 零命中 ⇒ 本条是真机首次验证 | | | |
+| | ⚠ 判据落在 policy_decision.decision == DENIED | | | |
+| **M13** | S1 提示注入拦截（伪造 nonce 闭合） | `m12_m16.py:77` | `m13()` | adb, device, install, runas, model, modelrun, injectiongoal, injectedurl |
+| | ⚠ 屏蔽标记常量来自 ContentSanitizer.kt:62，是否落 trace_event 未实测 | | | |
+| **M14** | T3 预算耗尽如实告知 | `m12_m16.py:139` | `m14()` | adb, device, install, runas, model, modelrun, budgetgoal |
+| | ⚠ terminal_reason 枚举值 BUDGET_EXHAUSTED 见 Runtime.kt:298，落库值需真机确认 | | | |
+| **M15** | 确认弹窗期间旋转 / 杀后台（无泄漏无挂起） | `m12_m16.py:187` | `m15()` | adb, device, install, uiautomator, model, modelrun, confirmgoal |
+| | ⚠ 确认弹窗文案未定位 ⇒ 用 确认/取消/允许/拒绝 四类词兜 | | | |
+| | ⚠ 「协程泄漏」无统一日志形态，本条判据偏弱（已标注） | | | |
+| **M16** | 一键清除后核验（痕迹真的没了） | `m12_m16.py:267` | `m16()` | adb, device, install, runas, uiautomator, wipetext |
+| | ⚠ 一键清除按钮文案未在任何 strings.xml 登记 ⇒ 必须 --wipe-button-text 传入 | | | |
+| | ⚠ files/chat 目录名需真机确认 | | | |
+| **M17** | 中端机连续 3 次 C1 无 OOM | `m17_m21.py:36` | `m17()` | adb, device, install, runas, model, modelrun, goal |
+| | ⚠ 386 项 JVM 测试无一触碰内存 ⇒ 本条是真机首次验证 | | | |
+| | ⚠ PSS 80% 阈值是工程阈值，非平台限制 | | | |
+| **M18** | 单步延迟实测（校准 4.5s 基线） | `m17_m21.py:93` | `m18()` | adb, device, install, runas, model, modelrun, goal |
+| | ⚠ 4.5s 是文档估算值，本条产出真实数字 | | | |
+| | ⚠ 若 M9 显示 backend=CPU（87s/8 步），单步会远超基线 ⇒ FAIL 需结合 backend 判读 | | | |
+| **M19** | 连续 20 分钟任务热节流行为 | `m17_m21.py:136` | `m19()` | adb, device, install, model, modelrun, goal, longrun |
+| | ⚠ dumpsys thermalservice 在部分厂商 ROM 不可用 ⇒ 曲线只作证据 | | | |
+| | ⚠ PSS 1.5 倍阈值是工程阈值 | | | |
+| **M20** | Play Console 前台服务声明 + 两段演示视频 | `m17_m21.py:199` | `m20()` | videodir |
+| | ⚠ manifest 声明部分可静态判定；Play Console 提交与审核是人工项，脚本不判定 | | | |
+| **M21** | 隐私政策 URL 可访问 | `m17_m21.py:246` | `m21()` | privacyurl |
+| | ⚠ Data Safety 表单填报是人工项，脚本不判定 | | | |
+| **M22** | 迁移：v2 老包写数据 → 覆盖装新包 → 数据还在 | `m22_m25.py:60` | `m22()` | adb, device, apk, oldapk, runas, dbwrite |
+| | ⚠ 上一轮迁移验证用的是 x86_64 桌面 SQLite，不是设备上的 BundledSQLiteDriver；「结构一致」不等于「ART 上、真机 IO 下、WAL 模式下也一致」 | | | |
+| | ⚠ memory_card 是 v3 唯一被 DROP 重建的表 ⇒ 用它的行数当数据保全的判据 | | | |
+| **M23** | 冷启兜底：模板非空 + STREAMING 被收敛 | `m22_m25.py:192` | `m23()` | adb, device, install, runas, dbwrite |
+| | ⚠ 'cold start done: templates=… grants=… swept=… failures=…' 出自 ColdStartCoordinator.kt:166 | | | |
+| | ⚠ 收敛后的终态是 ABORTED/FAILED/COMPLETE 中的哪一个未实测（只要求不是 STREAMING） | | | |
+| | ⚠ 流式回调是增量还是累计（StreamingDeltaAssembler 启发式判别）需在长回答上另看首 2 个 chunk | | | |
+| **M24** | 写失败恢复：失败不被吞 + 恢复后能再写 | `m22_m25.py:291` | `m24()` | adb, device, install, runas, dbwrite |
+| | ⚠ chmod 0444 是否能在 /data/data 下生效**完全未验证**，可能被 SELinux 拒绝 | | | |
+| | ⚠ 只读库文件下 SQLite 的行为（open 失败 vs 读成功写失败）随版本不同 ⇒ 判据只要求「日志里出现了写失败的证据」+「没崩」 | | | |
+| **M25** | 无能力 Agent：给提示 + 不能派生任务 | `m22_m25.py:423` | `m25()` | adb, device, install, runas, dbwrite, uiautomator |
+| | ⚠ 提示文案确定存在（ui strings.xml:254/255）；不确定的是它会不会在这个界面出现 | | | |
+| | ⚠ 零能力人格通过「清掉 agent_capability_grant」构造，不是靠 UI 点（UI 点不稳定） | | | |
+| **M26** | 冷启日志出现 cold start done:（§10.4 静态证据的运行时闭环） | `m26_m27.py:28` | `m26()` | adb, device, install |
+| | ⚠ 日志格式来自 ColdStartCoordinator.kt:166 | | | |
+| | ⚠ 不需要 run-as，是阶段一里成本最低、信息量最大的一条 | | | |
+| **M27** | 重试：制造 commit 失败 ⇒ 不产生两条相同用户消息 | `m26_m27.py:72` | `m27()` | adb, device, install, runas, dbwrite, model, modelrun, goal, retrytext |
+| | ⚠ 重试按钮文案未定位 ⇒ 必须 --retry-button-text | | | |
+| | ⚠ 唯一索引 idx_chat_msg_request 会让「重复」表现为插入失败而非重复行，两种都要查 | | | |
+
+## 11.3 判据的确定性分级
+
+### ✅ 判据确定的（依据来自源码常量 / 明文表列 / 本机可验证的静态产物）
+
+| # | 判据 | 依据 |
+|---|---|---|
+| M1 | `gradlew buildEnvironment` 解析出的 KGP/AGP 版本 == `libs.versions.toml` | 已在本机跑通（2.3.21 / 9.4.1） |
+| M2 / M2b | APK 是 zip、含 `classes.dex`；签名块含 v2/v3 | **ID 常量是解析本仓库两个真实 APK 得到的**，不是从记忆抄的：debug=`[v2]`，release=`[v2,v3]`，`0x42726577` 是 verity 填充已排除 |
+| M3 | `adb install` 输出 `Success` + `pm list packages` 命中 | adb 契约 |
+| M4 | `am start -W` 的 `Status: ok` / `Timeout` / `ThisTime` + logcat 无 `FATAL EXCEPTION`/`ANR in` | `am` 契约 |
+| M5 | `PRAGMA user_version == 3`、`integrity_check == ok`、v3 六张新表存在 | `AkeDatabase.VERSION=3`；`@Database` 的 19 个 entity |
+| M10 | `observation.host` 命中目标站、`candidate_count>0`、`raw_node_count>0`、`serialized_chars>0` | `host` 是**明文列**（§8.1 域名策略要求等值查询，刻意不加密） |
+| M11 | `task.status == SUCCEEDED` | `TaskStatus.SUCCEEDED="SUCCEEDED"`（`Task.kt:67`） |
+| M12 | `policy_decision.decision == DENIED`，且**没有** `REQUIRES_CONFIRM` | `PolicyDecision.{ALLOW,REQUIRES_CONFIRM,DENIED}`（`Records.kt:204`） |
+| M14 | `task.terminal_reason == BUDGET_EXHAUSTED` 且 `status != SUCCEEDED` | `TerminalReason`（`Runtime.kt:298`） |
+| M22 | 迁移前后 `user_version` 2→3、`memory_card` 行数与内容逐字保留 | 造数按 `PRAGMA table_info` 从**真机拉下来的库**反推，插不进去会报错 |
+| M23 | `cold start done: templates=… grants=… swept=… failures=…`、`chat_message.status` 不再为 `STREAMING` | `ColdStartCoordinator.kt:166`；`ChatEntities.kt` 的 `STATUS_*` |
+| M26 | 同上日志行出现 | 同上（这条**不需要 run-as**，是阶段一里成本最低、信息量最大的一条） |
+| M16 | `app_webview` / `ake_agent.db` / `files/chat` 从数据目录消失 + `wipeEverything done … failures=0` | `WipeEverythingUseCase.kt:189/196` |
+| M20 | manifest 含 `FOREGROUND_SERVICE_SPECIAL_USE` + 两处 `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` | 静态文本，本机可验 |
+
+### ⚠️ 标了【待真机校准】的 —— 我没有设备，不假装确定
+
+| # | 不确定的是什么 | 为什么会误报 |
+|---|---|---|
+| M4 | `dumpsys` 前台 Activity 的字段名（`mResumedActivity` / `topResumedActivity`） | 随 Android 版本变；**若前 5 条 PASS 而这条 FAIL，多半是字段名，不是没起来** |
+| M5 | 表数量是否恰好 19 | Room 可能额外建辅助表 ⇒ 可能误 FAIL，先看 out 里的完整清单 |
+| M6 | Compose 节点是否出现在 `uiautomator dump` 里；底栏文案能否命中 | 取决于 `content-desc`；**找不到就 SKIP/FAIL，绝不因为「没崩」判过** |
+| M7 | manifest 的字段结构；`files/models` 目录名 | 结构未定型 ⇒ size 只做宽容解析；解析不到退化为「存在 >100MB 的文件」 |
+| M8 | `engine ready:` 在 release 包里是否打出来 | `AkeLog.minLevel=INFO`，release 是否放行需真机确认 |
+| M9 | **真降级验不了** | App 没有「强制指定 backend」的开关 ⇒ 只能验「选中的后端能跑 + 无 JNI 错误」 |
+| M10 | `candidate_count` 是否等于「抽取出的元素数」；`DomExtractBridge` 成功路径可能**一行日志都没有** | 该条可能**假 FAIL**；真机第一次跑请结合 `raw_node_count` 判读 |
+| M11 | release 包非 debuggable ⇒ `run-as` 拉不到库 | **在 release 上必然 SKIP** —— 要真跑需先定拉库方案（root / 可调试 release / 应用内导出） |
+| M13 | 屏蔽标记「已屏蔽：检测到疑似提示注入内容」是否落进 `trace_event.message_redacted` | 未实测 |
+| M15 | 确认弹窗的文案；「协程泄漏」没有统一日志形态（也没接 LeakCanary/StrictMode） | 判据偏弱，已标注 |
+| M16 | 一键清除按钮文案**未在任何 strings.xml 登记**；`files/chat` 路径 | 必须 `--wipe-button-text` 传入，否则 SKIP |
+| M17/M18/M19 | PSS 80%、单步 2× 基线（9s）、PSS 1.5× 三个阈值都是我定的工程阈值 | 不是平台限制；FAIL 需结合 backend 与机型判读 |
+| M22 | 老包是否真的是 v2 | 拿错包会 FAIL —— 那是对的 |
+| M23 | 收敛后的终态到底是 `ABORTED`/`FAILED`/`COMPLETE` 中的哪一个 | 只要求「不是 STREAMING」，具体值记下来用于校准 |
+| M24/M27 | `chmod 0444` 在 `/data/data` 下**能否生效** | 可能被 SELinux/厂商 ROM 拒绝 ⇒ 那意味着写失败根本没构造出来 ⇒ **FAIL，不假成功** |
+| M25 | 「还没有配置扩展能力」这提示会不会在这个界面出现 | 文案确定存在（`strings.xml:255`），出现位置未实测 |
+| M27 | 重试按钮文案未登记 | 必须 `--retry-button-text` |
+
+## 11.4 状态规则：为什么它不会骗你
+
+`dv/model.py:run_case()` 里的四条**结构性**约束（不是约定，是代码路径）：
+
+1. **PASS 只能来自断言**。用例函数只交出 `Assertion` 列表，状态由 `run_case()` 算 ——
+   用例自己说不了「我过了」。
+2. **空判据 ⇒ ERROR，不是 PASS**。一条断言都没产出 = 这条用例根本没看东西，
+   和本项目「字符串扫描测试挡不住注释」是同一个坑。
+3. **环境不具备 ⇒ 抛 `Skip` ⇒ SKIP**。`Skip` 是异常，走的是和 PASS 完全不同的路径；
+   **不存在**「adb 不在就跳过并通过」的立足之地。要造出那种假绿，必须有人显式删掉
+   `needs` 或改 `require()`，这在 review 里一眼可见。
+4. **FAIL 必须带证据**。失败断言没有 `evidence_cmd`/`evidence_out` ⇒ 降级为 ERROR，
+   把问题停在脚本侧，而不是甩给排障的人。
+
+退出码（CI 可直接用）：
+
+| 码 | 含义 |
+|---|---|
+| `0` | 本次跑到的用例全部 PASS |
+| `1` | 有 FAIL 或 ERROR ⇒ **NO-GO** |
+| `2` | 没有 FAIL，但有 SKIP ⇒ **未决**（不能放行，也不能说没问题） |
+| `3` | 自检失败 ⇒ **别用这套脚本的结论** |
+
+## 11.5 自检：先证明脚本会报 FAIL
+
+`./run.py --selftest` 制造**必失败**场景，确认脚本真的报 FAIL：
+
+| 自检 | 场景 | 必须得到 |
+|---|---|---|
+| SELF-1 | 断言一个必然不存在的包已安装 | FAIL（需设备） |
+| SELF-2 | 断言一个必然不存在的本地文件存在 | FAIL |
+| SELF-3 | 一条断言都不产出的用例 | ERROR（**不是 PASS**） |
+| SELF-4 | adb 缺失时跑设备用例 | SKIP（**不是 PASS**） |
+| SELF-5 | 一条必然为真的断言 | PASS（证明它也会说好） |
+| SELF-6 | FAIL 但不带证据 | ERROR |
+| SELF-7 | adb 缺失时环境预检 | 必须列出缺项，不能静默 |
+
+**一个只能产出 PASS 的验收脚本，是又一个纸做的守护。** 自检不过 ⇒ 退出码 3。
+
+## 11.6 已知边界（脚本不装作能做的事）
+
+| 项 | 现状 |
+|---|---|
+| release 包取证 | 非 debuggable ⇒ `run-as` 不可用 ⇒ M11/M22 等依赖 DB 的用例在 release 上必然 SKIP |
+| `observation` / `chat_message` 正文 | 加密区（R1）⇒ 「逐字一致」只能落在明文侧（`observation.host`、`record_row_count`、`task.answer_preview`） |
+| M9 真降级、M15 协程泄漏 | 缺少观测手段，判据偏弱并已标注 |
+| M20/M21 的人工部分 | Play Console 提交审核、Data Safety 表单 —— 写进 `manual_pending`，脚本不判定 |
+| 模型相关用例的触发 | 默认**人工点一下**，脚本轮询等证据（判据仍 100% 由脚本判定）；`--auto-ui` 是实验性自动触发 |
+
+---
+
+**判定：NO-GO（维持）。**
+
+**本节没有解除任何一条 NO-GO 理由 —— 它解除的是「理由无法被执行」这件事。**
+**现在「零真机执行」这个坑上已经架好梯子：一台手机、一条命令、一份带证据的报告。**
+**梯子架好不等于爬过了。在有人真的把 `report.md` 贴回来之前，本文档 §11.2 表里所有条目的状态一律维持「未验证」。**

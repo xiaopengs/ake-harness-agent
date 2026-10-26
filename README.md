@@ -219,7 +219,7 @@ cd HarnessAgent
 **已完成并通过真机级编译验证**
 
 - **全部 12 个模块 `compileDebugKotlin` / `compileKotlin` 均 BUILD SUCCESSFUL**（含 Hilt KSP 与 Room KSP）
-- **`./gradlew test`：555 通过 / 0 失败**（立项时全工程仅 4 个单测；第 3 轮新增 169 例）
+- **`./gradlew test`：629 通过 / 0 失败**（立项时全工程仅 4 个单测；第 3–4 轮新增 243 例）
 - **`checkModuleDependencies`：OK** —— 12 个模块的依赖边均在白名单内，`:ui` 对 `:chat`/`:agent`/`:mcp`/`:data` 的 import 为 0
 - `:app` —— Dagger 依赖图贯通，MissingBinding 清零；`ChatRunnerPort`/`SkillRegistryPort`/`CapabilityGrantPort` 均已真绑定（生成代码里是 `Optional.of(...)` 而非 `Optional.empty()`）
 - 依赖红线已排除：`ktor-client-plugins-sse` 该坐标在任何版本都不存在（SSE 已收进 `ktor-client-core`），已从 catalog 移除
@@ -242,9 +242,11 @@ cd HarnessAgent
 | 产物 | 体积 | 说明 |
 |---|---|---|
 | `app/build/outputs/apk/debug/app-debug.apk` | 95.62 MB | arm64-v8a + x86_64，**v2 签名，`apksigner verify` 通过** |
-| `app/build/outputs/apk/release/app-release-unsigned.apk` | 60.64 MB | **R8 已执行**（mapping.txt 73MB）；未签名 |
+| `app/build/outputs/apk/release/app-release.apk` | 60.68 MB | **R8 已执行 + v1/v2/v3/v4 签名**，`apksigner verify` 通过（工程验证密钥，非正式发布密钥）|
 
-debug → release 缩减 **34.47MB（-36.2%）**。第 3 轮新增 `:chat` + 23 个 UI 文件后，debug 从 93.70 → 95.09MB（+1.39MB），release 从 60.04 → 60.62MB（+0.58MB）——**增量主要是 dex，`.so` 体积不变**（native 不受 R8 管）。
+debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 个 UI 文件后，debug 从 93.70 → 95.62MB（+1.92MB），release 从 60.04 → 60.68MB（+0.64MB）——**增量主要是 dex，`.so` 体积不变**（native 不受 R8 管）。
+
+> ⚠️ `apksigner verify` **不带 `--min-sdk-version 21` 时会输出 v1:false / v2:false / v3:true** —— 那不是没签，是 apksigner 按 minSdk 28 裁剪了检查项。**CI 验收必须显式带该参数**，否则 v1/v2 被关掉也不会红。
 
 > **构建注意（两个都会崩在打包阶段，且报错极具误导性）**：
 > 1. Gradle daemon 会崩 → 需 `--no-daemon`
@@ -272,7 +274,7 @@ debug → release 缩减 **34.47MB（-36.2%）**。第 3 轮新增 `:chat` + 23 
 |---|---|
 | 从未产出过 APK | ✅ **已解除** —— debug 93.70MB + release 60.04MB |
 | AGP 与 R8 从未执行 | ✅ **已解除** —— `assembleRelease` 跑通，R8 真实执行 |
-| 七个模块零测试 | ✅ **已解除** —— 4 → **555 通过** |
+| 七个模块零测试 | ✅ **已解除** —— 4 → **629 通过** |
 | **从未在任何真机上运行过一次** | ❌ **仍然成立 —— 这是现在唯一充分的一条** |
 
 复审新识别的 P0：
@@ -294,7 +296,7 @@ debug → release 缩减 **34.47MB（-36.2%）**。第 3 轮新增 `:chat` + 23 
 
 合计约 **0%，宽口径 ≤5%**。放宽到相邻纯逻辑（如模型分发状态机）有 30–45%，但那不是风险本体。
 
-**555 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
+**629 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
 
 > **禁令**（验收文档已写死）：不得把 `assembleRelease` 成功表述为"release 验证通过"。
 > 它能证明：编译/KSP/资源与 manifest 合并跑通、R8 真执行、高危符号存活、`.so` 入双 ABI、可复现。
@@ -304,16 +306,39 @@ debug → release 缩减 **34.47MB（-36.2%）**。第 3 轮新增 `:chat` + 23 
 
 ### 已知待办
 
-- **P0**：`adb` 不可用，真机验证 M1–M21 全部待跑（M10 WebView DOM 抽取为咽喉项）
-- **P0**：release 包未签名（需四个签名 Secret 或 apksigner）
-- **P0**：运维侧签名 manifest 与 CDN 未产出（客户端已就绪，默认 fail-closed）
+**第 4 轮已解除**
+
+| 原待办 | 现状 |
+|---|---|
+| **P0** release 包未签名 | ✅ 已解除 —— 生成工程验证 keystore，`apksigner` 实测 **v1/v2/v3/v4 全通过**。正式发布需替换密钥并配四个 CI Secret |
+| **P0** 运维侧签名 manifest 未产出 | ✅ 已解除 —— schema/规范化字节/RSA-SHA256 验签/公钥钉定全部接通，`ManifestFailClosedTest` 12 例证明"签名不对 ⇒ 从不下载" |
+| **P3** `:ui` 零测试 | ✅ 已解除 —— 0 → **49 例**，重点守终态文案不互串、禁词表、发送闸 |
+| 真机验证只是"文字描述" | ✅ 已解除 —— `scripts/device-verify/run.py`，**M0–M27** 可执行，含自检 |
+
+**仍待办**
+
+- **P0**：`adb` 不可用，真机验证 M0–M27 **一条都没跑过**（脚本就绪，设备未至）。M10 WebView DOM 抽取为咽喉项
 - **P1**：安全护栏未实测（支付硬禁止 / 提示注入拦截 / 预算告知）
 - **P1**：端侧 OOM / 延迟 / SoC 矩阵 / GPU 降级 —— 全部需真机
-- **P1**：`androidTest` 完全不存在
+- **P1**：`androidTest` 完全不存在（Composable 置灰/横幅/脚注等无法自动化验证）
+- **P1**：手动导入本地模型未做（首次启动 + 无网络 ⇒ 拿不到模型。内置兜底 manifest 无用——模型本体 2.6GB 不随包）
 - **P2**：归档清理（`retentionPlan`）已实现但无调用方，等产品策略
 - **P2**：隐私政策与 Data Safety 未备（需如实申报以登录态访问第三方网站）；两个 `specialUse` 前台服务各需演示视频
-- **P3**：`TaskStateWriter` 端到端、两条新 SQL 与 rename 顺序未经真机 SQLite 验证
-- **P3**：`:browser`/`:ui`/`:app` 仍零测试（`testImplementation` 已配好）
+- **P3**：`:browser` 仍零测试；`TaskStateWriter` 端到端、两条新 SQL 与 rename 顺序未经真机 SQLite 验证
+
+### 真机验证怎么用
+
+```bash
+cd scripts/device-verify
+./run.py            # 跑全部 M0–M27
+./run.py --only M23 # 只跑一条
+./run.py --selftest # 先自检脚本本身（必失败场景必须报 FAIL）
+./run.py --map      # 打印 M 号 → 脚本文件:行号的映射
+```
+
+报告落在 `out/<时间戳>/`：`report.md` + `report.json` + `artifacts/<失败用例>/{logcat,dropbox,meminfo,bugreport}`。
+
+脚本有 17 处判据标了【待真机校准】，报告里会逐条列出——**不确定的地方它说不确定，不会假装通过**。第一次跑建议直奔 **M23/M26**（冷启兜底是否真的接线，历史上这里生产调用点为 0），成本低、信息量大。
 
 ### 下一步：最小真机验证集
 

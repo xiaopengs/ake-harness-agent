@@ -195,6 +195,8 @@ CI 是**严格门禁**（Lint `abortOnError = true`）。若首次运行因存�
 
 ## 4. 签名与发布
 
+> **本轮实测结果（含 keystore 生成、四个 Secret、v1–v4 全开、apksigner 真实输出）见 §12.1。**
+
 ### 4.1 设计原则
 
 - **release 凭据只走环境变量 / GitHub Secret，仓库内一个字节的密钥都没有**
@@ -259,6 +261,8 @@ base64 -w0 ake-release.jks > ake-release.jks.b64   # 内容贴进 Secret
 ---
 
 ## 5. 端侧模型分发策略
+
+> **本轮实测结果（客户端期望的 manifest 格式、规范化字节、RSA-256 验签、fail-closed 验证）见 §12.2。**
 
 > 本节是本项目与常规 Android App 最大的差异点：**2.6GB 的 Gemma 4 E2B 不随 APK 分发**。
 > `.gitignore` 已排除 `*.task` `*.litertlm` `*.tflite` `*.bin` `*.gguf`。
@@ -521,3 +525,383 @@ feat(ui): ...      fix(agent,data): ...      build: ...      docs: ...      chor
 | `docs/03-build-and-deploy.md` | 新增 · 本文档 |
 
 **未改动**：`core/` `llm/` `browser/` `agent/` `mcp/` `data/` `ui/` 的任何 Kotlin 源码。
+
+---
+
+> 维护：韩渡川（DevOps）
+> 范围：release 签名（可安装性）· 模型分发 manifest（可用性）
+>
+> ★ 本文件里凡是标注「**以代码为准**」的部分，都是从 `data/.../modeldist/` 的
+>   **客户端实现里读出来的**，不是设计出来的。改格式前先改客户端，否则产出的
+>   manifest 客户端解析不了 —— 那等于没做。
+
+---
+
+## 12. 本轮实测补记：release 签名与模型 manifest
+
+### 12.0. 三十秒速查
+
+```bash
+# 出可安装的 release 包（CI 形态：凭据走环境变量）
+export ANDROID_KEYSTORE_BASE64=$(base64 -w0 < release.jks)
+export ANDROID_KEYSTORE_PASSWORD=...   ANDROID_KEY_ALIAS=ake-release
+export ANDROID_KEY_PASSWORD=...
+./gradlew assembleRelease --no-daemon --no-parallel --no-build-cache
+$ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs \
+    app/build/outputs/apk/release/app-release.apk
+
+# 出模型分发 manifest
+./scripts/model_manifest.py keygen --out-dir .local --key-id model-ca-2026
+./scripts/model_manifest.py manifest --file <模型文件> --manifest-version 7 \
+    --url https://cdn.ake.cn/models/... --signing-key .local/manifest-signing-private.pem \
+    --key-id model-ca-2026 --out dist/model-manifest.json
+./scripts/model_manifest.py verify --manifest dist/model-manifest.json \
+    --public-key .local/manifest-signing-public.pem
+./scripts/model_manifest.py self-test      # fail-closed 的离线证明
+```
+
+---
+
+### 12.1 release 签名
+
+#### 12.1.1 ⚠ 仓库里这把 keystore 是什么
+
+`.local/release.jks` 是**工程验证用的自签名 keystore**，生成命令：
+
+```bash
+keytool -genkeypair -v -keystore .local/release.jks -storetype PKCS12 \
+  -alias ake-release -keyalg RSA -keysize 2048 -sigalg SHA256withRSA \
+  -validity 10000 \
+  -dname "CN=Ake Harness Agent (ENG VERIFICATION ONLY), OU=Engineering, O=AkeLab, L=Shenzhen, ST=Guangdong, C=CN" \
+  -storepass "$ANDROID_KEYSTORE_PASSWORD" -keypass "$ANDROID_KEY_PASSWORD"
+```
+
+- **它的 CN 里就写着 `ENG VERIFICATION ONLY`** —— 就是为了让任何人在
+  `apksigner verify --print-certs` 输出里一眼看见这四个字。
+- **它不得用于任何对外发布**：不是 Play 上架密钥，不是渠道包密钥，
+  没有做密钥托管/备份/轮换，密码就躺在 `.local/release-credentials.env` 里。
+- 正式发布密钥由发布负责人另行生成，走密钥管理服务保管，只以
+  `ANDROID_KEYSTORE_BASE64` 的形式进 CI Secret。
+- 换密钥时利用 **APK 签名方案 v3 的密钥轮换**（见 §1.5），老用户可无感升级。
+
+#### 12.1.2 凭据怎么传：四个 Secret
+
+| Secret 名 | 含义 | 形态 |
+|---|---|---|
+| `ANDROID_KEYSTORE_BASE64` | keystore 文件本体 | 标准 base64，单行，**无换行** |
+| `ANDROID_KEYSTORE_PASSWORD` | keystore 密码 | 字符串 |
+| `ANDROID_KEY_ALIAS` | key alias | 字符串（本仓库 `ake-release`） |
+| `ANDROID_KEY_PASSWORD` | key 密码 | 字符串 |
+
+取值顺序（`app/build.gradle.kts`）：**环境变量 > `local.properties`**。
+
+- **环境变量**：CI / 生产发布唯一途径。
+  GitHub Actions 里 `${{ secrets.ANDROID_KEYSTORE_BASE64 }}` → `env:`。
+  为什么 keystore 走 **base64 而不是文件路径**：CI runner 的临时目录每次都变，
+  Secret 只能存字符串；base64 意味着「Secret 即文件」，不用挂 volume 也不用到处传 artifact。
+- **`local.properties`**：本地开发。它已在 `.gitignore`（该文件上一版**根本不存在**，
+  本轮补的）。额外支持 `ANDROID_KEYSTORE_FILE=<绝对路径>` ——
+  本地有现成 keystore 时不必每次 base64 一遍。**这一项只在 `local.properties` 里认**，
+  不作为 CI Secret。
+
+> ⚠ **PKCS12 的坑**：`keytool` 会忽略 `-keypass`（"Different store and key passwords
+> not supported for PKCS12"）。所以对本仓库这把 PKCS12 keystore，
+> `ANDROID_KEY_PASSWORD` **必须等于** `ANDROID_KEYSTORE_PASSWORD`。
+> 构建脚本仍然按四个独立变量读取 —— 换 JKS / PKCS#11 时两者可以不同，不必改脚本。
+
+#### 12.1.3 没 Secret 时的降级行为（fail-safe）
+
+**构建照常成功，产出 `app-release-unsigned.apk`，并打一条醒目 warning。**
+
+这是刻意的：
+
+- 崩掉 ⇒ 没人能在本地验 release 的 R8 / 资源裁剪 / Lint，问题全堆到发版那天；
+- 出 unsigned ⇒ `adb install` 必失败，而 release 工作流末尾的
+  `apksigner verify` 会直接红 —— **不会静默发出一个「看着是 release 其实是 debug 签名」的包**。
+
+warning 长这样（配置期打印，推到日志顶部）：
+
+```
+==============================================================================
+  ⚠  RELEASE 不会签名 —— 本次产物是 **app-release-unsigned.apk**，
+     `adb install` 会直接失败（INSTALL_FAILED_NO_MATCHING_SIGNATURES / 无签名块）。
+
+  缺少的凭据：ANDROID_KEYSTORE_BASE64（或 local.properties 的 ANDROID_KEYSTORE_FILE）、…
+```
+
+实测（本轮）：无凭据 `assembleRelease` → `BUILD SUCCESSFUL` + `app-release-unsigned.apk`。
+
+#### 12.1.4 产物命名
+
+| 状态 | 产物 |
+|---|---|
+| 已签名 | `app/build/outputs/apk/release/app-release.apk`（+ `.idsig`） |
+| 未签名 | `app/build/outputs/apk/release/app-release-unsigned.apk` |
+
+AGP 自己在 `packageRelease` 阶段按「有没有挂 signingConfig」决定后缀，
+**不需要**在 `build.gradle.kts` 里手写 `archivesBaseName` 或改 `outputFileName`。
+
+#### 12.1.5 签名方案：v1 + v2 + v3 + v4 全开
+
+AGP 9.4.1 四个开关都可用（`SigningConfig.enableV1Signing/…/enableV4Signing`），全部 `true`。
+
+| 方案 | 为什么开 |
+|---|---|
+| v1 (JAR) | 侧载渠道与「加固/二次打包」流水线只解析 v1；也是老设备唯一认的方案 |
+| v2 | Android 7+ 的硬要求，不开会被 PackageManager 直接拒 |
+| v3 | **密钥轮换**：minSdk 28 ✓。将来换签名密钥时老用户可无感升级 |
+| v4 | fs-verity，供 `adb install --incremental`；依赖 v2/v3 |
+
+#### 12.1.6 `apksigner verify` 的真实输出（本轮实测）
+
+```
+$ apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk
+Signer #1 certificate DN: CN=Ake Harness Agent (ENG VERIFICATION ONLY), OU=Engineering,
+                          O=AkeLab, L=Shenzhen, ST=Guangdong, C=CN
+Signer #1 certificate SHA-256 digest: 9da5a19f47fb8d36f453ad828a775fc01e8caa265e82c7850bf2eb9ac9690c30
+Signer #1 certificate SHA-1 digest:   2bca65593de0bad7a7a8c7fe96b918c05c9079d7
+
+$ apksigner verify --verbose --min-sdk-version 21 \
+      --v4-signature-file app-release.apk.idsig app-release.apk
+Verifies
+Verified using v1 scheme (JAR signing): true
+Verified using v2 scheme (APK Signature Scheme v2): true
+Verified using v3 scheme (APK Signature Scheme v3): true
+Verified using v3.1 scheme (APK Signature Scheme v3.1): false
+Verified using v4 scheme (APK Signature Scheme v4): true
+```
+
+> ★★ **一个会把人带沟里的坑（本轮实测确认）**
+>
+> 不指定 `--min-sdk-version` 时，apksigner 取 APK 自己的 `minSdkVersion`（本项目 **28**），
+> 于是输出变成 `v1: false / v2: false / v3: true` —— **看起来像没签 v1/v2**。
+>
+> 那不是没签，是 apksigner 按 minSdk 裁剪了**检查项**（API 28+ 只需 v3）。
+> 证据：
+>  - APK 里 `META-INF/CERT.SF` `CERT.RSA` `MANIFEST.MF` 都在（v1）；
+>  - APK Signing Block 里 `0x7109871a`(v2)、`0xf05368c0`(v3)、`0x42726577`(v4) 三块都在；
+>  - 强制 `--min-sdk-version 21` 后 v1/v2/v3 全 `true`。
+>
+> ⇒ **CI 的验收命令必须显式带 `--min-sdk-version 21`**，否则这条检查什么都验不出来
+> （只验 v3 时，v1/v2 被意外关掉也不会红）。v4 还要额外传 `--v4-signature-file`。
+
+---
+
+### 12.2 模型分发 manifest（运维侧）
+
+#### 12.2.1 客户端到底期望什么 —— **以代码为准**
+
+出处：`data/src/main/java/com/ake/data/persist/modeldist/`
+（`ModelManifest.kt` / `ManifestParser.kt` / `ManifestCanonicalForm.kt` /
+`ManifestTrust.kt` / `StrictJson.kt` / `ManifestTransport.kt`）。
+
+#### 根对象
+
+```jsonc
+{
+  "schema_version": 1,              // 必填，必须 == 1（ManifestSchema.CURRENT）
+  "manifest_version": 7,            // 必填 Long >= 1 ★永远单调递增，回滚也要 +1
+  "generated_at": 1700000000000,    // 可选，默认 0
+  "models": [ /* 非空数组 */ ],
+  "signature": {                    // ★ 必填：缺失 ⇒ MANIFEST_SIGNATURE_MISSING
+    "alg": "RSA-SHA256",            // 只认这一个（ManifestTrust.ALG_RSA_SHA256）
+    "key_id": "model-ca-2026",      // 必须在 pinnedKeys 里登记过
+    "value": "<标准 base64 的签名>"  // 覆盖的是“规范化字节”，不是传输字节
+  }
+}
+```
+
+#### `models[]` 条目
+
+| 字段 | 类型 | 约束 |
+|---|---|---|
+| `model_id` | string | 非空 |
+| `variant` | string | 非空 |
+| `revision` | long | >= 0；同 (model_id, variant) 内单调递增，**回滚就是把它指回更小值** |
+| `version` | string | 人类可读（`2026.10.5`），**只用于 UI，不参与任何比较** |
+| `url` | string | **必须 `https://`**（http 会被客户端硬拒） |
+| `size_bytes` | long | > 0 |
+| `sha256` | string | **64 位小写 hex**；它是「这份内容」的唯一身份 |
+| `min_app_version_code` | int | >= 1 |
+| `max_app_version_code` | int \| null | 可缺（缺 == null）；不得小于 min |
+| `context_window` | int | > 0 |
+| `min_ram_gb` | int | 可选，默认 0，>= 0 |
+| `capabilities` | string[] | 可选，默认 `[]` |
+| `state` | enum | 可选，默认 `ACTIVE`；`ACTIVE` / `DEPRECATED` / `REVOKED` |
+
+- 同一 `(model_id, variant)` 出现两次 ⇒ `MANIFEST_DUPLICATE_VARIANT`。
+- 未知字段**允许**且会被丢弃（不进签名）⇒ 服务端加字段不会打断老客户端。
+  反过来：**安全语义不能藏在新字段里**，老客户端不执行。
+- JSON 必须是**严格** JSON：无尾逗号、无注释、无重复 key、无 `NaN`/`+1`/`01`
+  （`StrictJson.kt`）；重复 key 直接报错。
+
+#### 签名覆盖的「规范化字节」（`ManifestCanonicalForm`）
+
+签名**不**覆盖传输字节，覆盖的是双方各自重新序列化的结果：
+
+```
+{"schema_version":1,"manifest_version":7,"generated_at":1700000000000,"models":[{
+ "model_id":"…","variant":"…","revision":5,"version":"…","url":"…","size_bytes":…,
+ "sha256":"…","min_app_version_code":1,"max_app_version_code":null,
+ "context_window":8192,"min_ram_gb":6,"capabilities":["TEXT","TOOLS"],"state":"ACTIVE"}]}
+```
+
+规则：**不含** `signature` · 键顺序固定（**不是**字典序）· `models` 按
+`(model_id, variant)` 升序 · 缺 `max` 与显式 `null` 等价 · `/` **不转义** · 输出 UTF-8。
+
+> 空格 / 缩进 / 键顺序 / CDN 压缩重写 **都不影响验签** —— 这正是规范化方案的目的。
+> 代价是服务端必须实现同一套规范化（≈40 行，见 `scripts/model_manifest.py`）。
+
+#### 12.2.2 生成脚本
+
+`scripts/model_manifest.py`（零 pip 依赖，只需 `python3` + `openssl`）：
+
+| 子命令 | 作用 |
+|---|---|
+| `keygen` | 生成 RSA-2048 密钥对，打印**要钉进 APK 的公钥串** |
+| `manifest` | 由模型文件算 SHA-256 + 大小 ⇒ 规范化 ⇒ 签名 ⇒ 输出 JSON |
+| `verify` | 上线前验签（含 alg / 字段检查） |
+| `self-test` | 离线自检：**含 fail-closed 负向用例** |
+
+上线前会拦住的客户端硬拒绝项：非 https 的 url、非 hex 的 sha256、
+`size_bytes <= 0`、`max < min`、重复 `(model_id, variant)`、未知 `state`。
+
+#### 12.2.3 签名方案：RSA-2048 / SHA-256
+
+- **算法**：`RSA-SHA256`（Java `SHA256withRSA`，PKCS#1 v1.5 over SHA-256）。
+- **为什么不是 Ed25519**（`ManifestTrust.kt` 里已论证）：
+  `Signature("Ed25519")` 在 Android 上要 **API 31** 才有，而本项目 `minSdk = 28` ——
+  用了它，API 28~30 的机器在 `Signature.getInstance` 上抛
+  `NoSuchAlgorithmException`，即**老机器永远装不上模型**。minSdk 抬到 31 再换是一行改动。
+- **公钥怎么进 APK**：X.509 **SubjectPublicKeyInfo** 的 DER（标准 base64），
+  钉在 `ModelManifestConfig.pinnedKeys` 的 `keyId -> spki` 映射里。
+  格式错了（比如给裸 modulus / PKCS#1）会让 `X509EncodedKeySpec` **静默失败**，
+  真机表现为「所有 manifest 都验签失败」，排查成本极高。
+  取串命令：`openssl rsa -in priv.pem -pubout -outform DER | base64 -w0`
+  （脚本 `keygen` 直接打印）。
+- **私钥怎么保管**：运维侧的密钥管理服务（Vault / KMS / Secrets Manager）。
+  **绝不进仓库** —— `.gitignore` 对 `.local/`、`*.pem`、`*.key`、`*secret*` 有四条独立兜底。
+- **轮换**：`pinnedKeys` 支持多把钥匙。先同时钉新旧两把 ⇒ 服务端切到新 key 下发 ⇒
+  下个版本摘掉旧 key。只钉一把的话，换钥匙必须所有端都升完级才能切。
+
+#### 12.2.4 CDN
+
+**manifest 侧**（客户端行为见 `ManifestTransport.kt`）：
+
+- URL 由代码钉死（`ModelManifestConfig.manifestUrl`），**不**走用户设置、
+  不走远程配置 —— 它决定端侧信任什么，必须是全链路最不可变的东西。
+- **不接受重定向**（`instanceFollowRedirects = false`）：一次 302 就能把信任边界
+  带到另一个域。3xx 会被当失败处理 ⇒ **运维必须把 URL 配成最终地址**。
+- 必须 `https://`、`HTTP 200`；`304` 会被当成 `MANIFEST_NOT_MODIFIED`（失败）。
+- 响应体上限 **1 MiB**（安全边界，不是优化）。
+- 客户端发 `Cache-Control: no-cache`；CDN 侧**不要**给 manifest 设长 TTL ——
+  TTL 一拉长，服务端紧急回滚就到不了端上。
+- `Content-Type: application/json`。
+
+**模型文件侧**（客户端行为见 `ModelDownloader.kt`）：
+
+- **没有目录结构要求**：`url` 对客户端是不透明字符串，从 manifest 里原样取。
+  唯一的硬性要求是 `https://`。建议 `…/<model_id>/<variant>/r<revision>.litertlm`。
+- **必须支持 HTTP Range**：客户端断点续传发 `Range: bytes=N-`，
+  期望 `206 Partial Content`。返回 `200` 会被理解为「服务端不支持续传」⇒ **从头重下 2.6 GB**。
+- 文件内容必须与 manifest 的 `sha256` 逐字节一致；不符 ⇒ `CHECKSUM_MISMATCH`，
+  客户端丢弃 `.part` 且**不在本地重试**（由账本裁决，有重试预算）。
+- 客户端下载前要求 `size * 1.15` 的可用空间。
+
+#### 12.2.5 fail-closed 的验证
+
+#### ① JVM 单测（**用真实生产代码**，不是重实现）
+
+`llm/src/test/java/com/ake/llm/ManifestFailClosedTest.kt` —— 12 个用例全绿
+（`./gradlew :llm:test`，本模块共 50 个用例 0 失败）。
+
+密钥是**运行时现生成的真 RSA-2048 密钥对**；解析走 `ModelManifestParser`、
+验签走 `ManifestTrust.rsaSha256Verifier`、规范化走 `ManifestCanonicalForm.render`、
+入口走 `ModelDistributionSync.ensureCurrent`（`:app` 的 `ModelDownloadService` 唯一入口）。
+
+核心两条（成对存在，缺一就是假绿）：
+
+| 用例 | 断言 |
+|---|---|
+| `manifest 签名不对时 不下载任何字节` | Err(`MANIFEST_SIGNATURE_INVALID`)、**`transfer` 从未被调用**、模型目录为空、账本未被开过 |
+| `manifest 签名合法时 才会真正下载` | Ok、且 `transfer` **确实被调用** |
+
+其余：内容被篡改 / 签名值坏一个字节 / 未登记 key_id / 未知 alg / 无 signature 块
+⇒ 全部拒绝；未配置 ⇒ `MANIFEST_NOT_CONFIGURED` 且不下载。
+
+> 判据取「`transfer` 没被调用」而不是「返回了 Err」：后者在「验签其实恒真、
+> 但后面某处也失败了」的情况下也会绿 —— 那是假绿。
+
+#### ② 客户端 ↔ 运维脚本的字节级对齐
+
+两侧（Kotlin `ManifestCanonicalForm.render` 与 Python `render_canonical`）**断言同一串
+golden 字节**。它们分别写在
+`ManifestFailClosedTest.GOLDEN_CANONICAL` 与 `scripts/model_manifest.py:GOLDEN_CANONICAL`。
+任一侧渲染规则漂移 ⇒ 两边各红一次，**不会等到「全网用户同一时刻拉不到模型」才发现**。
+
+#### ③ 脚本侧自检
+
+`./scripts/model_manifest.py self-test`：规范化性质、字段校验、
+「有效签名通过 / 篡改被拒 / 换钥匙被拒 / 签名坏一字节被拒」。
+
+---
+
+### 12.3 密钥与凭据的存放（硬约束核对）
+
+| 材料 | 位置 | 是否入库 |
+|---|---|---|
+| release keystore | `.local/release.jks` | ❌（`.local/`、`*.jks` 双保险） |
+| keystore 密码 | `.local/release-credentials.env` / CI Secret | ❌ |
+| manifest **私钥** | `.local/manifest-signing-private.pem` / 运维 KMS | ❌（`.local/`、`*.pem`、`*.key` 三保险） |
+| manifest **公钥** | 钉进 `ModelManifestConfig.pinnedKeys` | ✅ 公开信息，本就该入库 |
+| `local.properties` | 仓库根 | ❌ |
+
+> 本轮开工时仓库里**没有 `.gitignore`** —— `local.properties`、keystore、私钥全部处于
+> 「可以被 `git add`」的状态。已补（分层：构建产物 / 本地环境 / 密钥材料）。
+> 但 `.gitignore` 只是兜底；真正的安全边界是**凭据只在构建时从外部注入**。
+
+---
+
+### 12.4 已知缺口（如实列出，未自行绕过）
+
+1. ★★ **`ModelManifestConfig` 的绑定在 `:data` 里，本轮没改**（硬约束：不动 `:core:*` / `:data`）。
+   `data/.../di/PersistenceModule.kt` 的 `provideModelManifestConfig()` 目前返回
+   `ModelManifestConfig.UNCONFIGURED`（空 URL、零公钥），
+   即**默认链路仍是关闭的**，`ensureCurrent` 恒返回 `MANIFEST_NOT_CONFIGURED`。
+   接线已全部就绪（`:app` 的 `ModelDownloadService` 已在调 `sync.ensureCurrent()`），
+   **真正上线前需要宋砚秋在那一个函数里把 `manifestUrl` 与 `pinnedKeys` 填成真值**。
+   Hilt 不能从 `:app` 覆盖同一个 `@Provides`（重复绑定）⇒ 我在 `:app` 侧无法代劳。
+2. **`ProfileOrigin.SIGNED` 不存在**。实际枚举是
+   `{ USER_DIRECT, TEMPLATE_BUILTIN, TEMPLATE_MARKET }`（`core/ports/Chat.kt`）。
+   `TrustTier` 也没有 `SIGNED`（是 `USER_AUTHORED / BUILTIN / MARKET_VERIFIED /
+   MARKET_QUARANTINED`）。这两个是**人格/模板的信任分级**，与模型分发 manifest
+   不是同一条链路 —— 任务描述里的这组关键词对不上代码，按实际代码处理。
+3. **没有内置兜底 manifest**：`bundledManifest = null`。首次启动 + 断网 = 没有 manifest
+   = 拿不到模型。建议上线前用 `keygen` 的钥匙签一份兜底 manifest 内置进 APK
+   （兜底同样必须验签，见 `ModelManifestSource.current()`）。
+4. **`docs/` 目录原本不存在**，本文件是新建的（`01` / `02` 等编号文件缺失）。
+
+---
+
+### 12.5 CI 建议（release 工作流）
+
+```yaml
+env:
+  ANDROID_KEYSTORE_BASE64:     ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+  ANDROID_KEYSTORE_PASSWORD:   ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+  ANDROID_KEY_ALIAS:           ${{ secrets.ANDROID_KEY_ALIAS }}
+  ANDROID_KEY_PASSWORD:        ${{ secrets.ANDROID_KEY_PASSWORD }}
+steps:
+  - run: ./gradlew assembleRelease --no-daemon --no-parallel --no-build-cache
+  # ★ --min-sdk-version 21 必带：否则 apksigner 只验 v3，v1/v2 被关掉也不会红
+  - run: |
+      $ANDROID_HOME/build-tools/36.0.0/apksigner verify --verbose \
+        --min-sdk-version 21 \
+        --v4-signature-file app/build/outputs/apk/release/app-release.apk.idsig \
+        app/build/outputs/apk/release/app-release.apk
+  # ★ 产物名断言：出成 app-release-unsigned.apk 说明 Secret 没配，直接红
+  - run: test -f app/build/outputs/apk/release/app-release.apk
+```
+
+PR 构建（`pull_request` 事件拿不到 Secret）会走 §1.3 的降级路径出未签名包 ——
+这是预期行为，PR 阶段的目的是验编译 / R8 / Lint，不是出可安装包。
