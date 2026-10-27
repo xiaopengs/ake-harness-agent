@@ -258,4 +258,73 @@
     <string name="agent_detail_cap_present">已授予 %1$d 项扩展能力（列在下面）。本轮还没有修改授权的入口 —— 要调整，同样走「以它为模板新建」重选一次。</string>
     <string name="agent_detail_cap_unreadable">读不到这个 Agent 的授权表，无法判断它到底有没有能力。</string>
 
+    <!--
+      ── 离线导入模型（模型管理页下半张卡片）──────────────────────
+
+      首次启动 + 无网络 ⇒ 用户手上一个模型都没有，App 是个空壳。这条 road 让用户
+      自己把两样东西送进来：manifest.json + 模型本体文件。
+
+      ★ 这块文案的硬要求：**每一句失败都要讲清楚下一步做什么**。
+        一句「导入失败」会把本可以一次做对的事变成掷骰子 —— 尤其两条 mismatch，
+        它们一个是「这份文件是残的」，一个是「这份文件是错的」，补救动作正好相反。
+    -->
+    <string name="model_import_title">从本地导入</string>
+    <string name="model_import_subtitle">没有网络时，把模型文件和配套的 manifest.json 传进来</string>
+    <string name="model_import_step1_body">需要提供两样东西：模型文件本身，和一份配套的 manifest.json —— 它记录了这个模型应该有多大、摘要应该是多少，没有它就无法确认传进来的文件对不对。请找模型提供方索取这两样。</string>
+    <string name="model_import_step1_action">选择 manifest.json</string>
+    <string name="model_import_manifest_ok">manifest 校验通过</string>
+    <string name="model_import_manifest_version">版本 v%1$d</string>
+    <string name="model_import_step2_body">这份 manifest 里有下面几个模型。挑一个，然后在下一步里选中它的文件。</string>
+    <string name="model_import_step2_action">选择模型文件</string>
+    <string name="model_import_no_candidate">这份 manifest 里没有任何模型条目 —— 换一份试试。</string>
+    <string name="model_import_restart">换个 manifest 重来</string>
+    <string name="model_import_candidate_meta">版本 %1$s · 第 %2$d 版</string>
+    <string name="model_import_context_window">上下文 %1$d token</string>
+    <string name="model_import_already_on_device">已在设备上</string>
+
+    <string name="model_availability_active">可安装</string>
+    <string name="model_availability_deprecated">已过时，仍可用</string>
+    <string name="model_availability_revoked">已下线，不可导入</string>
+
+    <!-- 拷贝进行中。 ★ 百分比必须是真的：这些数字来自实际读到的字节数。 -->
+    <string name="model_import_percent">%1$d%%</string>
+    <string name="model_import_bytes">已拷 %1$s / %2$s</string>
+    <string name="model_import_speed">速度 %1$s/s</string>
+    <string name="model_import_eta">预计剩余 %1$s</string>
+    <string name="model_import_measuring">正在测算剩余时间…</string>
+    <string name="model_import_starting">正在打开文件…</string>
+    <string name="model_import_verifying_existing">设备上已经有一份同名的文件，正在逐字节重算摘要确认它是否完好 —— 这一步没有百分比可读。</string>
+    <string name="model_import_do_not_close">导入过程中请勿关闭这个页面或让 App 退到后台被系统回收。中断不会损坏已有文件，但要从头再来。</string>
+
+    <string name="model_import_done_tag">导入完成</string>
+    <string name="model_import_done_copied">已经拷好并通过校验。</string>
+    <string name="model_import_done_already">设备上本来就有这一份，已确认完好，没有重复拷贝。</string>
+    <string name="model_import_done_id">模型</string>
+    <string name="model_import_done_size">大小</string>
+    <string name="model_import_done_sha">SHA-256</string>
+    <string name="model_import_done_next">回到页面顶部的「下载并加载」，引擎会直接用这一份。</string>
+
+    <!--
+      五个文件侧错误码。每一句都必须以「你下一步该做什么」收尾。
+
+      ★ SIZE_MISMATCH 与 CHECKSUM_MISMATCH 必须一眼看得出不是同一件事：
+        前者是文件没传完（去重传），后者是传错了版本（重传没用，要去找另一份）。
+        把它们写成同一句，用户会在摘要不符时反复重传同一个错误的文件。
+    -->
+    <string name="err_model_import_no_space">存储空间不足，一个字节都没写。拷完之后源文件和模型会同时在盘上，所以要按两份算 —— 请先腾出至少 %1$s 再试。</string>
+    <string name="err_model_import_size_mismatch">文件大小对不上（应该是 %1$s）。这说明这份文件本身是不完整的，多半是传输中途断了：拷贝没走完，或者网盘没下载完。请完整地重新传一次，不要接着断点继续。</string>
+    <string name="err_model_import_checksum_mismatch">文件大小刚刚好，但内容对不上 —— 不是缺字节，是这份文件根本不是这一版模型。通常是版本拿混了（拿到了别的型号或别的一版）。重新拷贝没有用，请找到与这份 manifest 配套的那一版再导入。</string>
+    <string name="err_model_import_io_failed">读取过程中断了。可能是源文件正被别的应用占用，或者这种打开方式读不出来。建议先把它拷进手机存储再重新选择。</string>
+    <string name="err_model_import_source_missing">读不到你刚选的那个文件 —— 它可能已经被移动或删掉了。请重新选一次。</string>
+    <string name="err_model_import_unknown">导入没有成功，原因不明（code=%1$s）。请重新选择文件再试一次。</string>
+
+    <!--
+      两个 manifest 侧错误码。
+
+      ★ DOWNGRADE 走拒绝（不是「允许但警告」），理由见 ModelImportViewModel 末尾裁决二。
+        重点在于句尾要给出路：想装旧版模型不需要旧 manifest，拿最新的那份即可。
+    -->
+    <string name="err_manifest_import_invalid">这份 manifest 校验没通过：它要么不是官方签发的，要么格式不对。请向模型提供方索取配套的 manifest.json —— 没有它，客户端无从确认该期待一份什么样的文件。</string>
+    <string name="err_manifest_import_downgrade">这份 manifest 比机器里已有的那份旧，已经拦下了。旧版本有可能指向一个已经被停用的模型。想装旧版模型不需要旧的 manifest —— 请拿最新的一份，它里面本来就带着历史版本。</string>
+
 </resources>

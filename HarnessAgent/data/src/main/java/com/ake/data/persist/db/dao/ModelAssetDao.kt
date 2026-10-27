@@ -75,6 +75,38 @@ interface ModelAssetDao {
     @Query("SELECT temp_file FROM model_asset WHERE temp_file IS NOT NULL AND state <> 'READY'")
     suspend fun pendingTempFiles(): List<String>
 
+    // ──────────────────────────────────────────────────────────────────────
+    // 归档清理扫描（`ArchiveRetentionSweep`）用的两条
+    // ──────────────────────────────────────────────────────────────────────
+
+    /** 按 modelId 取仅供排重的 modelId 全集（扫描粒度，`ArchiveRetentionSweep` 用）。 */
+    @Query("SELECT DISTINCT model_id FROM model_asset")
+    suspend fun distinctModelIds(): List<String>
+
+    /**
+     * 摘掉一行上的 `.part` 指针。**带 CAS 守卫**（`AND temp_file = :name`）。
+     *
+     * @return 实际更新的行数。`0` = 这一行在「扫描」与「动手」之间已被别的写者改过
+     *   （一次并发 `beginOrResume` 换了新名字 / 已经自己清掉了）⇒ 调用方必须放弃本次动作，
+     *   否则会把别人刚写的临时文件当成旧垃圾删掉。
+     *   这与 `TaskReconciler` 那两条 `UPDATE … AND status = ?` 是同一套幂等手法。
+     */
+    @Query("UPDATE model_asset SET temp_file = NULL WHERE id = :id AND temp_file = :name")
+    suspend fun clearTempFile(id: String, name: String): Int
+
+    /**
+     * [clearTempFile] 的逆操作：**摘了指针却没删掉文件时把指针还回去**。
+     *
+     * 为什么必须有它：指针已空而文件仍在 ⇒ 这份 `.part` 从此没有任何行指向它，
+     * 既不会被扫描再发现，也不会被下次 `beginOrResume` 的 `Discard` 点到 ——
+     * 一个永久孤儿，而永久孤儿正是这次要对付的东西。
+     *
+     * 为什么带 `AND temp_file IS NULL` 守卫：只有在我们自己刚摘掉、且没被别人改写的情况下
+     * 才写回；若另一个写者已经用上了这一行，就不该由我们把老名字塞回去。
+     */
+    @Query("UPDATE model_asset SET temp_file = :name WHERE id = :id AND temp_file IS NULL")
+    suspend fun restoreTempFile(id: String, name: String): Int
+
     // ────────────────────────────────────────────────────────────────────────
     // 模型分发（manifest 驱动）新增的两条查询（霍承钧 · P1）
     //

@@ -26,6 +26,7 @@ import com.ake.core.ports.TraceStorePort
 import com.ake.core.ports.WipePort
 import com.ake.data.persist.agentasset.AgentAssetStore
 import com.ake.data.persist.db.AkeDatabase
+import com.ake.data.persist.modeldist.ArchiveRetentionSweep
 import com.ake.data.persist.db.AkeMigrations
 import com.ake.data.persist.db.AkePragmaConfig
 import com.ake.data.persist.db.AkePragmaDriver
@@ -34,8 +35,10 @@ import com.ake.data.persist.modeldist.ManifestTransport
 import com.ake.data.persist.modeldist.ManifestTransports
 import com.ake.data.persist.modeldist.ManifestTrustStore
 import com.ake.data.persist.modeldist.ModelAssetLedger
+import com.ake.data.persist.modeldist.ModelFileImporter
 import com.ake.data.persist.modeldist.ModelManifestConfig
 import com.ake.data.persist.modeldist.ModelManifestConfigFactory
+import com.ake.data.persist.modeldist.ModelManifestImporter
 import com.ake.data.persist.modeldist.ModelManifestParser
 import com.ake.data.persist.modeldist.ModelManifestSource
 import com.ake.data.persist.payload.PayloadStore
@@ -82,6 +85,22 @@ import kotlinx.coroutines.asCoroutineDispatcher
 
 /** 单线程写执行器（§6.2：串行化所有写事务）。 */
 const val DISPATCHER_DB_WRITER: String = "dbWriter"
+
+/**
+ * ★★ 模型文件目录。**必须与 `:app` 的 `CoreModule.provideModelsDir` 指向同一个位置。**
+ *
+ * `:llm` 的 `ModelDownloader.modelsDir` 由 `:app` 装配（`File(ctx.filesDir, "models")`），
+ * `:data` 这一份供归档清理扫描与本地模型导入使用。**两处是两次独立的判断，
+ * 架构守卫（Gradle 边白名单 + import 黑名单）管不到它们的一致性** ——
+ * 唯一能守的是下面这条注释与 `:data` 侧的测试。
+ *
+ * ⚠ 一旦两边不一致：`.part` 会被删在错误的位置、导入的模型会落在 `:llm` 找不到的地方，
+ *   两者都表现为「功能看起来跑了，磁盘/模型却没变化」——最难归因的那类失败。
+ *
+ * TODO(ownership)：更彻底的修法是把这个路径抬到 `:core:common` 的一个常量里，
+ *   由 `:app` 与 `:data` 共同引用（牵涉改 `:core`，本轮边界只允许改 `:data`）。
+ */
+const val DIR_MODELS: String = "modelsDir"
 
 /** ★ v3：聊天外置目录 `filesDir/chat/` 的 PayloadStore 限定符（与轨迹那一份区分）。 */
 const val DIR_CHAT: String = "chatPayloads"
@@ -288,6 +307,16 @@ public abstract class PersistenceBindingsModule {
         public fun provideAgentAssetStore(@ApplicationContext context: Context): AgentAssetStore =
             AgentAssetStore(File(context.filesDir, "agents"))
 
+        /**
+         * 模型文件目录（见 [DIR_MODELS] 那条「必须与 `:app` 一致」的警告）。
+         */
+        @Provides
+        @Singleton
+        @Named(DIR_MODELS)
+        @JvmStatic
+        public fun provideModelsDir(@ApplicationContext context: Context): File =
+            File(context.filesDir, "models").apply { mkdirs() }
+
         @Provides
         @Singleton
         @JvmStatic
@@ -473,11 +502,49 @@ public abstract class PersistenceBindingsModule {
         //    但适配器现在只需要注入本类产出的 `ModelAssetLedger`，不再碰 DAO。
         // ──────────────────────────────────────────────────────────────────────
 
+        /**
+         * 归档保留清理的执行者（`retentionPlan` 的生产调用方，见 [ArchiveRetentionSweep]）。
+         *
+         * ★ 它能删的东西被刻意收得很窄（只有「陈旧 + 无人读写 + 零残留价值」的 `.part`），
+         *   README 级的理由全在那个文件的类注释里；这里是唯一的装配点。
+         */
         @Provides
         @Singleton
         @JvmStatic
-        public fun provideModelAssetLedger(db: AkeDatabase, clock: Clock): ModelAssetLedger =
-            ModelAssetLedger(dao = db.modelAssetDao(), clock = clock)
+        public fun provideArchiveRetentionSweep(
+            db: AkeDatabase,
+            @Named(DIR_MODELS) modelsDir: File,
+            clock: Clock,
+        ): ArchiveRetentionSweep = ArchiveRetentionSweep(
+            dao = db.modelAssetDao(),
+            modelsDir = modelsDir,
+            clock = clock,
+        )
+
+        /**
+         * 账本。
+         *
+         * ★★ 归档保留扫描的自触发点在这里：把 [ArchiveRetentionSweep] 做成它的构造参数，
+         *   由 `ModelAssetLedger.init` 在 `writeScope` 上拉起一轮。
+         *   这与 `TaskStateWriter` 把 `TaskReconciler` 做成构造参数并在自己的 `init` 里自触发
+         *   是**同一个形状**（`ColdStartCoordinator` 也是这一形）——
+         *   好处是「清不清理」不依赖任何人记得调用它，而 `:app` 不需要为此改一行代码
+         *   （它本来就会装配本账本）。
+         */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideModelAssetLedger(
+            db: AkeDatabase,
+            clock: Clock,
+            writeScope: CoroutineScope,
+            sweep: ArchiveRetentionSweep,
+        ): ModelAssetLedger = ModelAssetLedger(
+            dao = db.modelAssetDao(),
+            clock = clock,
+            writeScope = writeScope,
+            retentionSweep = { sweep.runOnce() },
+        )
 
         /**
          * manifest 配置。**整条分发链路的开关与信任锚都在这一个对象里。**
@@ -539,6 +606,33 @@ public abstract class PersistenceBindingsModule {
         @JvmStatic
         public fun provideManifestCache(@ApplicationContext context: Context): ManifestCache =
             ManifestCache(File(context.filesDir, "modeldist"))
+
+        // ──────────────────────────────────────────────────────────────────
+        // 本地人工导入（`ModelFileImporter` / `ModelManifestImporter`）
+        //
+        // ★★ 交接给苏映棠的接口就是这两个类本身（见各自类注释），本模块只负责把它们
+        //    装配成单例并绑到正确的目录上。UI 侧拿到的入口：
+        //
+        //      @Inject lateinit var manifestImporter: ModelManifestImporter
+        //      @Inject lateinit var modelImporter: ModelFileImporter
+        //
+        //    两者都只依赖 `@ApplicationContext` 的私有存储 ⇒ **不需要任何存储权限**，
+        //    也没有引入新的 Gradle 边（`:core:model-api` 仍不在 `:data` 的依赖里）。
+        // ──────────────────────────────────────────────────────────────────
+
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideModelFileImporter(@Named(DIR_MODELS) modelsDir: File): ModelFileImporter =
+            ModelFileImporter(modelsDir = modelsDir)
+
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideModelManifestImporter(
+            parser: ModelManifestParser,
+            cache: ManifestCache,
+        ): ModelManifestImporter = ModelManifestImporter(parser = parser, cache = cache)
 
         /**
          * manifest 的唯一来源。**整条分发链路（含 `:llm` 的 `resolve()`）就挂在这个单例上**。

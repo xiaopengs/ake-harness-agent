@@ -1,5 +1,7 @@
 package com.ake.ui.feature.modelmgt
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -54,6 +56,20 @@ public fun ModelScreen(viewModel: ModelViewModel = hiltViewModel()) {
     val ui by viewModel.ui.collectAsStateWithLifecycle()
     var confirmDelete by remember { mutableStateOf(false) }
 
+    // ── 离线导入：走 SAF，不需要任何存储权限（系统选择器临时授予读权）。
+    val importVm: ModelImportViewModel = hiltViewModel()
+    val importUi by importVm.ui.collectAsStateWithLifecycle()
+
+    // manifest 通常是 .json，但各家云盘 / 蓝牙传过来的 MIME 五花八门，
+    // 所以除了 application/json 外一并兜 "*/*"，否则用户明明看得见文件却点不动。
+    val pickManifest = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        importVm.onManifestPicked(uri?.toString())
+    }
+    // 模型本体是 .litertlm，不在任何标准 MIME 表里 ⇒ 只能全开。
+    val pickModelFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        importVm.onModelFilePicked(uri?.toString())
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -79,6 +95,16 @@ public fun ModelScreen(viewModel: ModelViewModel = hiltViewModel()) {
         }
 
         SpaceCard(ui = ui, viewModel = viewModel)
+
+        Spacer(Modifier.height(12.dp))
+
+        ModelImportSection(
+            ui = importUi,
+            onPickManifest = { pickManifest.launch(arrayOf("application/json", "*/*")) },
+            onPickModelFile = { pickModelFile.launch(arrayOf("*/*")) },
+            onSelect = importVm::select,
+            onReset = importVm::reset,
+        )
 
         Spacer(Modifier.height(12.dp))
 
@@ -229,19 +255,3 @@ private fun SpaceCard(ui: com.ake.ui.feature.modelmgt.ModelUi, viewModel: ModelV
     }
 }
 
-private fun formatBytes(bytes: Long): String {
-    if (bytes <= 0L) return "0 B"
-    val gb = bytes / 1_073_741_824.0
-    if (gb >= 1.0) return String.format("%.2f GB", gb)
-    val mb = bytes / 1_048_576.0
-    if (mb >= 1.0) return String.format("%.1f MB", mb)
-    val kb = bytes / 1024.0
-    return String.format("%.0f KB", kb)
-}
-
-private fun formatDuration(seconds: Long): String {
-    if (seconds <= 0) return "—"
-    val m = seconds / 60
-    val s = seconds % 60
-    return if (m > 0) "${m} 分 ${s} 秒" else "${s} 秒"
-}

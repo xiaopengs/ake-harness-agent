@@ -78,6 +78,27 @@ internal class FakeModelAssetDao : ModelAssetDao {
         rows[id] = row.copy(lastError = error, lastErrorAt = at)
     }
 
+    override suspend fun distinctModelIds(): List<String> = rows.values.map { it.modelId }.distinct()
+
+    /**
+     * ★ 刻意把 SQL 的 CAS 语义（`AND temp_file = :name`）搬进内存：
+     * `ArchiveRetentionSweep` 的可重入完全依赖「名字不符就一行都更新不了」这条，
+     * 若这里写成「无脑置 null」，并发那条性质就从来没有被执行到。
+     */
+    override suspend fun clearTempFile(id: String, name: String): Int {
+        val row = rows[id] ?: return 0
+        if (row.tempFile != name) return 0
+        rows[id] = row.copy(tempFile = null)
+        return 1
+    }
+
+    override suspend fun restoreTempFile(id: String, name: String): Int {
+        val row = rows[id] ?: return 0
+        if (row.tempFile != null) return 0
+        rows[id] = row.copy(tempFile = name)
+        return 1
+    }
+
     override suspend fun markLoaded(id: String, at: Long, backend: String?, loadMs: Long?): Unit =
         unsupported("markLoaded")
 

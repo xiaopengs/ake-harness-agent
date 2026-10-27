@@ -2,9 +2,11 @@ package com.ake.browser
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.webkit.WebViewDatabase
 import com.ake.core.common.AkeLog
 
@@ -58,6 +60,34 @@ public object WebViewFactory {
         }
 
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG)
+    }
+
+    /**
+     * ★ 挂一个只观察**文档切换**的 `WebViewClient`，供 [PageScriptHost] 失效缓存。
+     *
+     * 为什么必须要有这一条：`evaluateJavascript` 注入的全局量（`__extract` / `isSame` /
+     * `__akeMutationCount`）属于 **document**。页面自己点链接跳转（不经过我们的 `loadUrl`）
+     * 时它们会被静默清空，而 Kotlin 侧完全不知道 ⇒ 下一次抽取拿到的是
+     * 「上一份脚本已经不在了」的页面 ⇒ ReferenceError ⇒ 超时。
+     *
+     * 只 override `onPageStarted` / `onPageFinished`：**不**碰 `shouldOverrideUrlLoading`，
+     * 否则会改变「链接由谁处理」的默认行为。
+     *
+     * ⚠ 这是按名字整体设置的（`webViewClient =`），后设置者会覆盖前者 —— 目前全项目只有
+     * 这里设置，将来若别处也要挂 client，必须改成本类提供的组合入口，不能直接赋值。
+     */
+    public fun watchDocuments(webView: WebView, onDocumentChanged: () -> Unit) {
+        webView.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                onDocumentChanged()
+                super.onPageStarted(view, url, favicon)
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                onDocumentChanged()
+                super.onPageFinished(view, url)
+            }
+        }
     }
 
     /**

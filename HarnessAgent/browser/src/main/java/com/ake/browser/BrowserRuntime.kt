@@ -4,11 +4,14 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
+import com.ake.core.common.AkeLog
 import com.ake.core.ports.BrowserExecutorPort
 import com.ake.core.ports.BrowserViewHandle
 import com.ake.core.ports.DomPerceptionPort
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 
 /**
  * 一个 WebView 实例 + 它的 JS 桥 + 挂在上面的两个 Port 实现。
@@ -34,13 +37,19 @@ import kotlinx.coroutines.runBlocking
 public class BrowserRuntime private constructor(
     public val webView: WebView,
     private val bridge: DomExtractBridge,
+    /**
+     * ★ 与 [bridge] 同级：**页面脚本宿主也只有一份**，由感知与执行两侧共用。
+     *   理由与 bridge 完全同构 —— 若各 new 一个，两侧会各自维护「当前文档注入过了没」，
+     *   而它们看到的是同一个 document ⇒ 必有一侧的缓存判断是错的。
+     */
+    private val scriptHost: PageScriptHost,
 ) : BrowserViewHandle {
 
-    /** 执行侧 Port 实现。与 [perception] 共享 [bridge]。 */
-    public val executor: BrowserExecutorPort = WebViewExecutor(webView, bridge)
+    /** 执行侧 Port 实现。与 [perception] 共享 [bridge] 与 [scriptHost]。 */
+    public val executor: BrowserExecutorPort = WebViewExecutor(webView, bridge, scriptHost)
 
-    /** 感知侧 Port 实现。与 [executor] 共享 [bridge]。 */
-    public val perception: DomPerceptionPort = WebViewDomPerception(webView, bridge)
+    /** 感知侧 Port 实现。与 [executor] 共享 [bridge] 与 [scriptHost]。 */
+    public val perception: DomPerceptionPort = WebViewDomPerception(webView, bridge, scriptHost)
 
     init {
         // 构造函数整体跑在主线程上（见 create），这里注入 JS 接口是安全的。
@@ -79,10 +88,31 @@ public class BrowserRuntime private constructor(
         public fun create(context: Context): BrowserRuntime = runOnMainSync {
             val webView = WebViewFactory.create(context)
             val bridge = DomExtractBridge { script -> postEvaluate(webView, script) }
-            BrowserRuntime(webView, bridge)
+            val scriptHost = PageScriptHost(
+                evaluate = { js -> evaluateOn(webView, js) },
+                assetReader = { path -> readAsset(context, path) },
+                // `webView.url` 是主线程 API；换文档即换键 ⇒ 重新注入
+                documentKey = { withContext(Dispatchers.Main.immediate) { webView.url.orEmpty() } },
+            )
+            // 页面自己发起的导航（点链接）也会换 document，必须让宿主缓存失效
+            WebViewFactory.watchDocuments(webView) { scriptHost.invalidate() }
+            BrowserRuntime(webView, bridge, scriptHost)
         }
     }
 }
+
+/**
+ * 从 `assets/` 读一份 JS 资源。
+ *
+ * ★ **失败必须显式返回 null 并记 ERROR 日志**：asset 缺失（打包漏了 / 远端下发失败）
+ * 在 WebView 侧的表现是「`__extract` 未定义」，与「注入时机不对」完全同形，
+ * 不在这里记一笔就只能靠猜。
+ */
+private fun readAsset(context: Context, path: String): String? = runCatching {
+    context.assets.open(path).bufferedReader().use { it.readText() }
+}.onFailure { t ->
+    AkeLog.e("BrowserRuntime", "读取 assets/$path 失败", t)
+}.getOrNull()
 
 /**
  * 主线程同步执行。

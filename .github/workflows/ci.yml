@@ -9,13 +9,22 @@
 #
 # 触发：push 到 main / PR 到 main / 手动
 #
-# 六个作业（两份 ci.yml 合并后的最终形态）：
+# 八个作业（两份 ci.yml 合并后的最终形态）：
 #   1. arch-guard      —— 架构守卫依赖边 + **负向测试**（韩渡川版没有）
 #   2. jvm-tests       —— 模型红线 + :core:common 单测 + 全量单测
 #   3. compile-ksp     —— 11 模块编译 **串接** KSP 产物断言（原 compile + ksp-verify 合并）
 #   4. lint            —— Android Lint 门禁
 #   5. assemble-debug  —— 出包 + 体积红线 + APK 内权重红线
 #   6. release-r8      —— R8 冒烟 + 断言 mapping.txt 非空（内存参数见该 job 头部注释）
+#   7. sign-verify     —— release 包签名校验，**必须带 --min-sdk-version 21**（含负向测试）
+#   8. device-verify-selftest —— `scripts/device-verify/run.py --selftest`（含负向测试）
+#
+# ★ 2026-10（韩渡川）新增 7 / 8 的由来：`:browser` 补到 167 例测试时挖出 M10 的致命
+#   bug（JS 资源从未注入页面）—— 它之所以能一直活着，是因为**那部分从来没有测试覆盖**。
+#   本轮补的两道闸门守的不是"新功能"，是"验证工具本身是否还有效"：
+#     · 7 —— 旧的 `apksigner verify` 不带 `--min-sdk-version 21`，v1/v2 被关掉也不会红；
+#     · 8 —— 真机验证脚本（M0–M27）一条都没跑过，脚本自己坏掉没人知道。
+#   ★ 两道闸门都配了**负向测试**：一条永远绿的守卫和没有守卫是一样的。
 #
 # 合并说明（便于后来人对账）：
 #   · 韩渡川原版的 5 个作业（jvm-tests / compile / ksp-verify / lint / assemble-debug）
@@ -129,6 +138,52 @@ jobs:
           fi
           echo "✅ 守卫按预期拦截注入的越层边（exit=$rc），已还原 $BF"
 
+      # ── 负向：注入一条越层 import，守卫**必须失败** ──
+      # 为什么还要第二条负向测试（2026-10 · 韩渡川）：
+      #   上面那条只覆盖了守卫的 **① Gradle 边** 分支。而 `checkModuleDependencies`
+      #   有两条互相独立的判定路径 —— ② 源码 import 黑名单（`:ui` 不许看见
+      #   `com.ake.agent.` 等）走的是完全不同的代码（正则扫 `src/**/*.kt`）。
+      #   「`:ui → :agent` 能红」证明不了「import 黑名单能红」；
+      #   一条从未被触发过的分支，和没有这条分支是一样的。
+      #
+      # 探针落点选 `:core:common`（黑名单里同样有 `com.ake.agent.`）：
+      #   · 它是内核层，无人并行改动，探针不会撞上别人的编辑；
+      #   · :ui / :data / :browser 本轮有人在改，**绝不**往那里写探针文件。
+      # 文件在 trap 里删除，且 CI 工作区是一次性的 —— 即使作业被取消也进不了仓库。
+      - name: 🧪 负向测试：注入越层 import 后守卫必须红
+        working-directory: HarnessAgent
+        run: |
+          set -uo pipefail
+          F=core/common/src/main/java/com/ake/core/common/ArchGuardImportProbe.kt
+          trap 'rm -f "$F"' EXIT
+          cat > "$F" <<'EOF'
+          package com.ake.core.common
+
+          import com.ake.agent.NeverImportThisInCore  // ARCH-GUARD IMPORT PROBE
+
+          internal object ArchGuardImportProbe
+          EOF
+          if ! grep -q 'ARCH-GUARD IMPORT PROBE' "$F"; then
+            echo "::error::import 探针未写入 —— 负向测试无效"
+            exit 1
+          fi
+
+          set +e
+          ./gradlew checkModuleDependencies --console=plain 2>&1 | tee /tmp/arch-guard-import.log
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::注入越层 import 之后 checkModuleDependencies 仍然通过 ⇒ ② 源码黑名单分支失效"
+            exit 1
+          fi
+          # 同样要求"红得有理由"：必须是命中了黑名单前缀，不是别的什么原因
+          if ! grep -F 'com.ake.agent.' /tmp/arch-guard-import.log; then
+            echo "::error::守卫确实失败了，但日志里找不到 'com.ake.agent.' —— 失败原因与注入无关，需人工确认"
+            exit 1
+          fi
+          echo "✅ ② 源码 import 黑名单按预期拦截（exit=$rc）"
+
       - name: 🧹 还原复核：工作区干净 + 守卫复跑仍绿
         working-directory: HarnessAgent
         run: |
@@ -136,6 +191,11 @@ jobs:
           if ! git diff --quiet -- ui/build.gradle.kts; then
             echo "::error::ui/build.gradle.kts 仍带负向探针残留，还原失败"
             git diff -- ui/build.gradle.kts
+            exit 1
+          fi
+          PROBE=core/common/src/main/java/com/ake/core/common/ArchGuardImportProbe.kt
+          if [ -e "$PROBE" ]; then
+            echo "::error::import 探针文件残留：$PROBE"
             exit 1
           fi
           ./gradlew checkModuleDependencies --console=plain
@@ -454,3 +514,308 @@ jobs:
           path: HarnessAgent/app/build/outputs/mapping/release/mapping.txt
           if-no-files-found: ignore
           retention-days: 14
+
+      # 供 7️⃣ sign-verify 复用：R8 是全场最贵的任务，**不为签名校验再编一次 release**
+      - name: 📤 上传 release APK（供签名校验作业下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: HarnessAgent/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 7. release 包签名校验 —— ★ 必须显式 --min-sdk-version 21
+  #
+  # ★★ 本作业存在的原因（2026-10 实测，韩渡川）★★
+  #   `apksigner verify` 默认**读取 APK 里 AndroidManifest 的 minSdkVersion**（本项目 28）
+  #   来决定要验哪些签名方案。对同一个已签名 release 包实测：
+  #
+  #     apksigner verify -v app-release.apk            （旧写法）
+  #       Verifies
+  #       Verified using v1 scheme (JAR signing): false    ← 没验，不是没签
+  #       Verified using v2 scheme (APK Signature Scheme v2): false
+  #       Verified using v3 scheme (APK Signature Scheme v3): true
+  #       ⇒ exit 0
+  #
+  #     apksigner verify -v --min-sdk-version 21 app-release.apk
+  #       v1: true / v2: true / v3: true   ⇒ exit 0
+  #
+  #   结论：**只要 v3 在，v1/v2 被整段关掉也照样 exit 0**。旧写法下把
+  #   `enableV1Signing` / `enableV2Signing` 改成 false 没人会发现 —— 这就是
+  #   "v1/v2 被关掉也不会红"的真实机制。
+  #
+  #   ⚠ 另一个坑：`-v` 也是必要的。不带 `-v` 时**成功场景一行都不打印**，
+  #      只有一个 exit 0 —— 想解析 "Verified using vN scheme" 就必须带它。
+  #
+  # ★ 为什么"有没有签名"不能靠 apksigner 的报错文本判断
+  #   实测：未签名包与「只有 v3」的包打印的是**同一句**
+  #       ERROR: Missing META-INF/MANIFEST.MF
+  #   纯文本区分不开 ⇒ 改用结构化判定：
+  #     v1 存在性  = ZIP 里有 META-INF/*.RSA|DSA|EC
+  #     v2/v3/v4   = 二进制里有 APK Signing Block 魔数 "APK Sig Block 42"
+  #   两者皆无 ⇒ 认定 unsigned。
+  #
+  # ★ unsigned 是**设计好的降级**（见 app/build.gradle.kts 头部"降级策略"）：
+  #   没有签名 Secret 时 `assembleRelease` 仍应成功出包，否则本地与 PR 都无法验 R8/Lint。
+  #   ⇒ unsigned **不让 CI 红**，但必须被明确标注（annotation + job summary + 产物名后缀），
+  #     绝不能被误读成"签名已校验通过"。release.yml 里签名是硬要求，那里 unsigned 必须红。
+  # ═══════════════════════════════════════════════════════════════════════════
+  sign-verify:
+    name: "7️⃣ 签名校验 · --min-sdk-version 21"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # 复用 6️⃣ 的 release 产物：R8 全构建里最贵的一步，不跑第二次
+    needs: [release-r8]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备构建环境
+        uses: ./.github/actions/setup-build-env
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          compile-sdk: ${{ env.COMPILE_SDK }}
+          build-tools: ${{ env.BUILD_TOOLS }}
+
+      - name: 📥 下载 6️⃣ 产出的 release APK
+        uses: actions/download-artifact@v4
+        with:
+          name: release-apk
+          path: apk
+
+      - name: 📝 落盘签名校验脚本（正负向测试复用同一套判据）
+        run: |
+          set -euo pipefail
+          GATE="$RUNNER_TEMP/ake-apksig-gate.sh"
+          cat > "$GATE" <<'AKE_GATE_EOF'
+          #!/usr/bin/env bash
+          # 退出码：0=已签名且 v1/v2/v3 全通过  1=已签名但校验失败  2=未签名  4=用法/环境错误
+          set -uo pipefail
+          APK="${1:-}"
+          APKSIGNER="${APKSIGNER:-}"
+          if [ -z "$APK" ] || [ ! -f "$APK" ]; then echo "用法: $0 <apk>"; exit 4; fi
+          if [ ! -x "$APKSIGNER" ]; then echo "apksigner 不可执行: $APKSIGNER"; exit 4; fi
+
+          # ① 结构化判定：到底有没有签名（不能靠 apksigner 的报错文本，理由见 job 头部）
+          v1n=$(unzip -l "$APK" 2>/dev/null | grep -cE 'META-INF/.*\.(RSA|DSA|EC)$' || true)
+          sb=$(grep -ac "APK Sig Block 42" "$APK" 2>/dev/null || true)
+          echo "结构化判定: META-INF 签名条目=${v1n:-0}  APK Signing Block=${sb:-0}"
+          if [ "${v1n:-0}" -eq 0 ] && [ "${sb:-0}" -eq 0 ]; then
+            echo "结论: UNSIGNED（未签名）"
+            exit 2
+          fi
+
+          # ② 已签名 ⇒ 必须 --min-sdk-version 21，且 -v 才会打印方案行
+          log=$(mktemp)
+          set +e
+          "$APKSIGNER" verify -v --min-sdk-version 21 --print-certs "$APK" > "$log" 2>&1
+          rc=$?
+          set -e
+          grep -Ei 'Verifies|DOES NOT VERIFY|Verified using v[0-9.]+ scheme|ERROR:' "$log" || true
+          if [ "$rc" -ne 0 ]; then
+            echo "结论: SIGNATURE_INVALID（apksigner exit=$rc）"
+            exit 1
+          fi
+          for s in 1 2 3; do
+            val=$(grep -Ei "Verified using v${s} scheme" "$log" | head -1 \
+                  | sed -E 's/.*: *//' | tr -d '[:space:]')
+            echo "v${s}=${val:-<未打印>}"
+            if [ "$val" != "true" ]; then
+              echo "结论: SIGNATURE_INVALID（v${s} 未 true —— min-sdk 21 下 v1/v2/v3 必须全 true）"
+              exit 1
+            fi
+          done
+          # v4 刻意不判：只在 `adb install --incremental` / Play 增量下发路径生效，
+          # 单独验主 APK 时恒 false（本项目开了 enableV4Signing 也一样）⇒ 判它必假红。
+          echo "结论: SIGNED_OK（v1/v2/v3 全通过）"
+          exit 0
+          AKE_GATE_EOF
+          chmod +x "$GATE"
+          echo "GATE=$GATE" >> "$GITHUB_ENV"
+          echo "APKSIGNER=$ANDROID_HOME/build-tools/${{ env.BUILD_TOOLS }}/apksigner" >> "$GITHUB_ENV"
+
+      - name: 🔏 校验产物签名
+        id: verify
+        run: |
+          set -uo pipefail
+          APK=$(find apk -name '*.apk' | head -1)
+          if [ -z "$APK" ]; then echo "::error::未找到下载的 release APK"; find apk || true; exit 1; fi
+          echo "校验对象：$APK"
+          set +e
+          "$GATE" "$APK" 2>&1 | tee /tmp/sig-gate.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          case "$rc" in
+            0)
+              echo "artifact_type=signed" >> "$GITHUB_OUTPUT"
+              echo "::notice::release 包已签名，v1/v2/v3 在 min-sdk 21 下全部通过" ;;
+            2)
+              echo "artifact_type=unsigned" >> "$GITHUB_OUTPUT"
+              echo "::warning::本作业的 release APK 是**未签名（unsigned）**产物 —— 设计好的降级，不是构建错误。它无法安装（无签名块），也未经过任何签名校验；可安装的签名包由 release.yml 在打 v* 标签时用 GitHub Secrets 产出。" ;;
+            *)
+              echo "::error::签名校验失败（gate exit=$rc）—— 见上方 apksigner 输出"
+              exit 1 ;;
+          esac
+
+      - name: 🏷️ 标注产物类型（signed / unsigned 都必须写进 job summary）
+        if: always() && steps.verify.outputs.artifact_type != ''
+        run: |
+          T="${{ steps.verify.outputs.artifact_type }}"
+          {
+            echo "### 🔏 签名校验结果：\`$T\`"
+            echo
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            if [ "$T" = "unsigned" ]; then
+              echo "| 签名校验 | **未执行**（产物无签名块，无可校验对象） |"
+              echo "| CI 是否变红 | **否** —— 无 Secret 时出 unsigned 是 \`app/build.gradle.kts\` 的既定降级 |"
+              echo "| 能否安装 | **否** —— \`adb install\` 会因无签名失败 |"
+              echo "| 真签名在哪 | \`release.yml\`（打 \`v*\` 标签，凭据来自 GitHub Secrets） |"
+            else
+              echo "| 签名校验 | 已执行，\`apksigner verify -v --min-sdk-version 21\` |"
+              echo "| v1 / v2 / v3 | 全部 \`true\` |"
+              echo "| CI 是否变红 | 否（校验通过） |"
+            fi
+            echo "| 判据脚本 | \`ake-apksig-gate.sh\`（本作业内生成，正负向测试共用） |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🧪 负向测试：v1/v2 被关掉的签名包必须红
+        run: |
+          set -uo pipefail
+          W=$(mktemp -d)
+          APK=$(find apk -name '*.apk' | head -1)
+          keytool -genkeypair -keystore "$W/probe.jks" -storetype JKS \
+            -storepass changeit -keypass changeit -alias probe -keyalg RSA -keysize 2048 \
+            -validity 365 -dname "CN=CI Signature Probe, OU=QA, O=AkeLab, C=CN"
+          cp "$APK" "$W/only_v3.apk"
+          "$APKSIGNER" sign --ks "$W/probe.jks" --ks-key-alias probe \
+            --ks-pass pass:changeit --key-pass pass:changeit \
+            --v1-signing-enabled false --v2-signing-enabled false --v3-signing-enabled true \
+            "$W/only_v3.apk"
+
+          echo "── 证据：旧写法（不带 --min-sdk-version 21）确实会放过这个包 ──"
+          set +e
+          "$APKSIGNER" verify -v "$W/only_v3.apk" 2>&1 | grep -Ei 'Verifies|scheme' || true
+          old_rc=${PIPESTATUS[0]}
+          set -e
+          echo "旧写法 exit=$old_rc（0 = 复现了「v1/v2 被关掉也不红」的坑）"
+
+          echo "── 断言：本作业判据必须让它红 ──"
+          set +e
+          "$GATE" "$W/only_v3.apk"; rc=$?
+          set -e
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::v1/v2 关掉的包 gate 退出码为 $rc（期望 1）⇒ 闸门失效，本作业失去意义"
+            exit 1
+          fi
+          echo "✅ 负向测试通过：v1/v2 关掉的签名被判必须红（gate exit=1）"
+
+      - name: 🧪 正向测试：v1+v2+v3 齐全必须绿（证明闸门也会放行）
+        run: |
+          set -uo pipefail
+          W=$(mktemp -d)
+          APK=$(find apk -name '*.apk' | head -1)
+          keytool -genkeypair -keystore "$W/probe.jks" -storetype JKS \
+            -storepass changeit -keypass changeit -alias probe -keyalg RSA -keysize 2048 \
+            -validity 365 -dname "CN=CI Signature Probe, OU=QA, O=AkeLab, C=CN"
+          cp "$APK" "$W/full.apk"
+          "$APKSIGNER" sign --ks "$W/probe.jks" --ks-key-alias probe \
+            --ks-pass pass:changeit --key-pass pass:changeit \
+            --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+            "$W/full.apk"
+          set +e
+          "$GATE" "$W/full.apk"; rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::v1+v2+v3 齐全的包 gate 退出码为 $rc（期望 0）⇒ 闸门误报，会让签名正常的包也红"
+            exit 1
+          fi
+          echo "✅ 正向测试通过：完整签名被判通过（gate exit=0）"
+
+      - name: 📤 上传（产物名带类型后缀 —— unsigned 一眼可辨）
+        if: steps.verify.outputs.artifact_type != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk-${{ steps.verify.outputs.artifact_type }}
+          path: apk/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 8. 真机验证脚本自检 —— scripts/device-verify/run.py --selftest
+  #
+  # 起因：M0–M27 这套真机验证脚本**一条都没在真机上跑过**（沙箱无模拟器），
+  #   而它是上架放行的判据来源。一个从没跑过、也没人知道它还灵不灵的判据，
+  #   比没有判据更危险 —— 它会给你一种"验过了"的错觉。
+  #   脚本自带自检（`dv/audit.py` SELF-1..SELF-7）：必失败场景必须报 FAIL、
+  #   空判据必须报 ERROR、adb 缺失必须报 SKIP。**在 CI 里跑它，脚本一旦被改坏
+  #   就会被立刻发现。**
+  #
+  # ★ 同样配负向测试：把"必失败"判据改成必然成功，自检**必须报红**。
+  #   只跑正向的话，"自检永远通过"和"自检从没真的检查"是分不开的。
+  #   探针写在**副本**上（$RUNNER_TEMP），仓库内的脚本一行都不动。
+  #
+  # 退出码（run.py 头部契约）：0=自检通过  3=自检失败 ⇒ 脚本不可信
+  # ═══════════════════════════════════════════════════════════════════════════
+  device-verify-selftest:
+    name: "8️⃣ 真机验证脚本自检 · run.py --selftest"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🐍 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 🧪 正向：脚本自检必须通过（exit 0）
+        run: |
+          set -uo pipefail
+          cd scripts/device-verify
+          set +e
+          python3 run.py --selftest 2>&1 | tee /tmp/dv-selftest.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::run.py --selftest 失败（exit=$rc）—— 这套真机验证脚本当前不可信，别拿它的结论放行"
+            exit 1
+          fi
+          # 光 exit 0 不够：必须真的跑够了条数。无设备时 SELF-1 会进 not_run，
+          # 其余 SELF-2/3/4/4b/5/6/7 共 7 条应全部执行 ⇒ 阈值取 6。
+          n=$(grep -cE '^[[:space:]]*(✅|❌|⏭) SELF-' /tmp/dv-selftest.log || true)
+          echo "本轮执行自检条数：${n:-0}"
+          if [ "${n:-0}" -lt 6 ]; then
+            echo "::error::自检只跑了 ${n:-0} 条（预期 ≥6）—— 若有人删掉一半自检项，exit 0 也会变成假绿"
+            exit 1
+          fi
+          grep -E '⏭' /tmp/dv-selftest.log || true
+          echo "✅ 自检通过（exit=0，执行 ${n} 条）"
+
+      - name: 🧪 负向：把「必失败」判据改坏后自检必须红
+        run: |
+          set -uo pipefail
+          TMP=$(mktemp -d)
+          cp -r scripts/device-verify "$TMP/dv"
+          cd "$TMP/dv"
+          rm -rf out
+          # 把「断言一个必然不存在的文件存在 ⇒ 必须 FAIL」反转成必然成功
+          sed -i 's/exists = os.path.exists(NONEXISTENT_FILE)/exists = not os.path.exists(NONEXISTENT_FILE)/' dv/audit.py
+          if ! grep -q 'exists = not os.path.exists' dv/audit.py; then
+            echo "::error::探针未注入（audit.py 里没找到目标行）—— 负向测试无效"
+            exit 1
+          fi
+          set +e
+          python3 run.py --selftest 2>&1 | tee /tmp/dv-neg.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::把必失败判据改坏之后 --selftest 仍然 exit 0 ⇒ 自检不会报红，等于没有自检"
+            exit 1
+          fi
+          # 红得有理由：必须是 SELF-2 这条被判失败，而不是脚本崩了
+          if ! grep -E '❌ SELF-2' /tmp/dv-neg.log; then
+            echo "::error::自检确实红了，但不是 SELF-2 失败 ⇒ 失败原因与注入无关，需人工确认"
+            exit 1
+          fi
+          echo "✅ 负向测试通过：改坏判据后自检报红（exit=$rc，SELF-2 判定失败）"

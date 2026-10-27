@@ -69,7 +69,7 @@ L1  内核层          :core:common :core:ports :core:model-api
 | `:core:model-api` | `ModelPort`/`ModelSession`/`GenerationRequest` 等推理契约 |
 | `:core:ports` | 全部 Port 契约：感知、执行、策略、持久化、设备健康，以及 7 个面向 UI 的 Port |
 | `:llm` | LiteRT-LM 接入、backend 选择与降级、模型下载管理、token 估算、`maxNumTokens` 分档夹紧、真流式解码 |
-| `:browser` | WebView 执行器、DOM 抽取与压缩、页面稳定检测、JS Bridge、`BrowserRuntime` 生命周期 |
+| `:browser` | WebView 执行器、DOM 抽取与压缩、页面稳定检测、JS Bridge、`BrowserRuntime` 生命周期、**`JsBootstrap`/`PageScriptHost` JS 资源注入管线** |
 | `:agent` | Agent Loop、十二终态状态机、上下文预算、提示注入隔离、策略引擎、`UiFacingPorts` 实现 |
 | `:chat` | **聊天会话编排（L5）**：`ChatLoop` 单轮编排、`InferenceFocus` 推理焦点仲裁、`SkillRegistry`/`SkillRouter`、`ChatRehydrator` 复水、`ModeProfile` 三档九表、`ChatEgress` 出云闸 |
 | `:mcp` | MCP 客户端、连接管理、工具注册表、Schema 映射 |
@@ -219,7 +219,7 @@ cd HarnessAgent
 **已完成并通过真机级编译验证**
 
 - **全部 12 个模块 `compileDebugKotlin` / `compileKotlin` 均 BUILD SUCCESSFUL**（含 Hilt KSP 与 Room KSP）
-- **`./gradlew test`：629 通过 / 0 失败**（立项时全工程仅 4 个单测；第 3–4 轮新增 243 例）
+- **`./gradlew test`：838 通过 / 0 失败**（立项时全工程仅 4 个单测）
 - **`checkModuleDependencies`：OK** —— 12 个模块的依赖边均在白名单内，`:ui` 对 `:chat`/`:agent`/`:mcp`/`:data` 的 import 为 0
 - `:app` —— Dagger 依赖图贯通，MissingBinding 清零；`ChatRunnerPort`/`SkillRegistryPort`/`CapabilityGrantPort` 均已真绑定（生成代码里是 `Optional.of(...)` 而非 `Optional.empty()`）
 - 依赖红线已排除：`ktor-client-plugins-sse` 该坐标在任何版本都不存在（SSE 已收进 `ktor-client-core`），已从 catalog 移除
@@ -242,7 +242,7 @@ cd HarnessAgent
 | 产物 | 体积 | 说明 |
 |---|---|---|
 | `app/build/outputs/apk/debug/app-debug.apk` | 95.62 MB | arm64-v8a + x86_64，**v2 签名，`apksigner verify` 通过** |
-| `app/build/outputs/apk/release/app-release.apk` | 60.68 MB | **R8 已执行 + v1/v2/v3/v4 签名**，`apksigner verify` 通过（工程验证密钥，非正式发布密钥）|
+| `app/build/outputs/apk/release/app-release.apk` | 60.68 MB | **R8 已执行 + v1/v2/v3 签名**，`apksigner verify --min-sdk-version 21` 实测三项全 true（工程验证密钥，非正式发布密钥）|
 
 debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 个 UI 文件后，debug 从 93.70 → 95.62MB（+1.92MB），release 从 60.04 → 60.68MB（+0.64MB）——**增量主要是 dex，`.so` 体积不变**（native 不受 R8 管）。
 
@@ -274,7 +274,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 |---|---|
 | 从未产出过 APK | ✅ **已解除** —— debug 93.70MB + release 60.04MB |
 | AGP 与 R8 从未执行 | ✅ **已解除** —— `assembleRelease` 跑通，R8 真实执行 |
-| 七个模块零测试 | ✅ **已解除** —— 4 → **629 通过** |
+| 七个模块零测试 | ✅ **已解除** —— 4 → **838 通过** |
 | **从未在任何真机上运行过一次** | ❌ **仍然成立 —— 这是现在唯一充分的一条** |
 
 复审新识别的 P0：
@@ -296,7 +296,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 
 合计约 **0%，宽口径 ≤5%**。放宽到相邻纯逻辑（如模型分发状态机）有 30–45%，但那不是风险本体。
 
-**629 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
+**838 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
 
 > **禁令**（验收文档已写死）：不得把 `assembleRelease` 成功表述为"release 验证通过"。
 > 它能证明：编译/KSP/资源与 manifest 合并跑通、R8 真执行、高危符号存活、`.so` 入双 ABI、可复现。
@@ -310,21 +310,49 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 
 | 原待办 | 现状 |
 |---|---|
-| **P0** release 包未签名 | ✅ 已解除 —— 生成工程验证 keystore，`apksigner` 实测 **v1/v2/v3/v4 全通过**。正式发布需替换密钥并配四个 CI Secret |
+| **P0** release 包未签名 | ✅ 已解除 —— 生成工程验证 keystore，`apksigner verify --min-sdk-version 21` 实测 **v1/v2/v3 true**。正式发布需替换密钥并配四个 CI Secret |
+| —— v4 签名 | ⚠️ **实测 false** —— v4 需配套 `.idsig` 边车文件，本流程未产出。v1/v2/v3 足以安装，暂不处理 |
 | **P0** 运维侧签名 manifest 未产出 | ✅ 已解除 —— schema/规范化字节/RSA-SHA256 验签/公钥钉定全部接通，`ManifestFailClosedTest` 12 例证明"签名不对 ⇒ 从不下载" |
 | **P3** `:ui` 零测试 | ✅ 已解除 —— 0 → **49 例**，重点守终态文案不互串、禁词表、发送闸 |
 | 真机验证只是"文字描述" | ✅ 已解除 —— `scripts/device-verify/run.py`，**M0–M27** 可执行，含自检 |
 
+**第 5 轮已解除**
+
+| 原待办 | 现状 |
+|---|---|
+| **P3** `:browser` 零测试 | ✅ 已解除 —— 0 → **167 例**，且当场挖出咽喉项的一批致命 bug（见下表） |
+| **P1** `androidTest` 不存在 | ✅ 已解除 —— 15 例，`ui-debug-androidTest.apk` 编译成功。**但无模拟器，一条都没跑过** |
+| **P2** 归档清理无调用方 | ✅ 已解除 —— `ArchiveRetentionSweep` 自触发接入，五个闸保证"宁可少删" |
+| **P1** 手动导入本地模型 | ✅ 已解除 —— `ModelFileImporter` + 导入页，**承接“首次启动 + 无网络”这个场景** |
+| **P2** 隐私政策 / Data Safety | ✅ 已备 —— `docs/compliance/`，逐项对照代码申报，五个难看处已如实列出 |
+
+### `:browser` 补测挖出的真 bug（咽喉项 M10）
+
+这条最值得记：**它们是"写测试之前没人知道不存在"的问题**。补测前 `:browser` 是 0 测试，符号层已 100% 静态验过，看起来很健康：
+
+| 问题 | 后果 |
+|---|---|
+| `assets/js/dom-extract.js` **从未被读进页面** | `__extract` 未定义 ⇒ DOM 抽取必然超时 |
+| `BridgeHelpers.SCRIPT` **从未注入** | JS 侧 `isSame` 未定义 ⇒ 每次点击判定 STALE 或 ReferenceError |
+| `INSTALL` 脚本**从未注入** | mutation 恒 0 ⇒ 第二次轮询就判定"页面静默"，**一次变更都没看到就放行** |
+| XHR 同时挂 `loadend` + `error` | 失败请求减两次 ⇒ `__akeNetworkPending` 漂负 ⇒ 网络空闲判据永久失效 |
+| `stableKey` Kotlin/JS 算法不等价 | SHA-256 前 8 字节 vs FNV-1a，值域不相交 ⇒ "元素是否还是同一个"全失效 |
+| **`PocketDom.host` 不做 lowercase** | `PASTEBIN.com` 既不等于也不 `endsWith` 名单项 ⇒ **域名黑名单硬拒退化成"需确认"** |
+
+最后一条是安全问题：域名白/黑名单被大小写绕过，安全护栏失效。
+
+根因是同一条 —— **`:browser` 里没有"JS 资源所有者"**，三段脚本各自被某个调用方"以为已经在页面里了"地引用。修法收敛成一处：`JsBootstrap`（唯一清单）+ `PageScriptHost`（唯一执行者），且注入后自检缺失的全局名，失败返回显式错误而非伪装成超时。
+
 **仍待办**
 
-- **P0**：`adb` 不可用，真机验证 M0–M27 **一条都没跑过**（脚本就绪，设备未至）。M10 WebView DOM 抽取为咽喉项
+- **P0**：`adb` 不可用，真机验证 M0–M27 **一条都没跑过**（脚本就绪，设备未至）。**第一次跑建议直奔 M23/M26**
+- **P0**：上面这批 `:browser` 修复**同样没有真机验证**。虽然已补 41 条测试 + 用 node 跑真实 asset 交叉验证 stableKey，但注入时机在 SPA 路由切换时的行为、XHR 计数在真实页面能否归零，都只能上设备才知道
 - **P1**：安全护栏未实测（支付硬禁止 / 提示注入拦截 / 预算告知）
 - **P1**：端侧 OOM / 延迟 / SoC 矩阵 / GPU 降级 —— 全部需真机
-- **P1**：`androidTest` 完全不存在（Composable 置灰/横幅/脚注等无法自动化验证）
-- **P1**：手动导入本地模型未做（首次启动 + 无网络 ⇒ 拿不到模型。内置兜底 manifest 无用——模型本体 2.6GB 不随包）
-- **P2**：归档清理（`retentionPlan`）已实现但无调用方，等产品策略
-- **P2**：隐私政策与 Data Safety 未备（需如实申报以登录态访问第三方网站）；两个 `specialUse` 前台服务各需演示视频
-- **P3**：`:browser` 仍零测试；`TaskStateWriter` 端到端、两条新 SQL 与 rename 顺序未经真机 SQLite 验证
+- **P1**：`:ui` 的 15 个 androidTest 从未执行过（需模拟器或真机）
+- **P2**：两个 `specialUse` 前台服务**演示视频未拍**（脚本已在 `docs/compliance/`，缺拍摄）
+- **P2**：`FOREGROUND_SERVICE_DATA_SYNC` 声明了但无人使用
+- **P3**：`:data` 与 `:app` 各自算 `filesDir/models`，架构守卫管不到（跨层修，留 TODO）
 
 ### 真机验证怎么用
 

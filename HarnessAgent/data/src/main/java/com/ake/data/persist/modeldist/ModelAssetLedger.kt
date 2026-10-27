@@ -2,6 +2,7 @@ package com.ake.data.persist.modeldist
 
 import com.ake.core.common.AppError
 import com.ake.core.common.Clock
+import com.ake.core.common.AkeLog
 import com.ake.core.common.Ulid
 import com.ake.core.contract.ModelAssetRecord
 import com.ake.core.contract.ModelAssetState
@@ -9,6 +10,8 @@ import com.ake.data.persist.db.dao.ModelAssetDao
 import com.ake.data.persist.db.entity.ModelAssetEntity
 import com.ake.data.persist.db.mapper.EntityMappers
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 /** 需要 `:llm` 代执行的文件动作 —— `:data` 不持有 `File`，只描述意图。 */
 public sealed interface ModelFileOp {
@@ -65,14 +68,50 @@ public data class VerifyOutcome(
  *  - 新版本校验通过后槽位行才转正为 `READY`。
  *
  * ★ 副作用：归档行会随时间累积（每次模型更新 +1 行 / +2.6 GB）。
- *   **本模块不提供任何自动删除** —— 那会直接违反硬规则 1。
- *   清理入口必须由用户在设置里显式触发（`:ui` → `ModelLifecyclePort.deleteModelFile`）。
+ *   **「可用模型」一个都不会被自动删** —— 那会直接违反硬规则 1。
+ *   归档本体的删除入口必须由用户在设置里显式触发（`:ui` → `ModelLifecyclePort.deleteModelFile`）；
+ *   只有**已经没有任何价值的 `.part`** 才由自动的那轮扫描回收，见下面一节。
+ *
+ * ## ★ 归档保留扫描的自触发钩子（[retentionSweep]）
+ *
+ * `retentionPlan()` 曾经一个生产调用方都没有 —— 这正是上面那条副作用一直没人收拾的原因。
+ * 这里按既有先例补上，**不发明第三种方式**：
+ *
+ * ```
+ *   TaskStateWriter.init   { writeScope.launch { reconciler?.invoke(); drainLoop() } }   ← `:data`
+ *   ColdStartCoordinator.init { scope.launch { run() } }                                  ← `:app`
+ *   ModelAssetLedger.init  { writeScope.launch { retentionSweep?.invoke() } }             ← 本类
+ * ```
+ *
+ * ⇒ 只要这个单例被装配，一轮保留扫描就一定发生过，不需要任何人记得调用它。
+ * （`:app` 不需要为此改一行：它本来就会装配 `ModelAssetLedger`。）
  */
 public class ModelAssetLedger(
     private val dao: ModelAssetDao,
     private val clock: Clock,
     private val maxVerifyAttempts: Int = DEFAULT_MAX_VERIFY_ATTEMPTS,
+    /**
+     * `:data` 的单线程 writer scope。**只在装配期注入**，测试不带 ⇒ 不触发任何协程。
+     */
+    private val writeScope: CoroutineScope? = null,
+    /**
+     * 归档保留扫描钩子。**它为 null 时本类就是一个纯状态机**（既有单测的形态）。
+     */
+    private val retentionSweep: (suspend () -> Unit)? = null,
 ) {
+
+    init {
+        // ① 先跑一轮归档保留扫描，账本才开始接新写入。
+        //    顺序上不必挡住谁：它跑在同一个单线程 writer 上，且每个动作自带 CAS 守卫。
+        val scope = writeScope
+        val sweep = retentionSweep
+        if (scope != null && sweep != null) {
+            scope.launch {
+                runCatching { sweep.invoke() }
+                    .onFailure { t -> AkeLog.w(TAG, "archive retention sweep failed: ${t.message}") }
+            }
+        }
+    }
 
     /**
      * 开始 / 续传一次下载。
@@ -254,9 +293,22 @@ public class ModelAssetLedger(
         return names.toList()
     }
 
-    /** 某个 modelId 的归档清理裁决（策略见 [ModelArchiveRetention]）。 */
-    public suspend fun retentionPlan(modelId: String): ModelRetentionPlan =
-        ModelArchiveRetention.plan(dao.byModelId(modelId).map(EntityMappers::modelAssetToDomain))
+    /**
+     * 某个 modelId 的归档清理裁决（策略见 [ModelArchiveRetention]）。
+     *
+     * ★ 想知道某份账本行长什么样就直接调用本方法；真正动手清理的是
+     *   [ArchiveRetentionSweep]，两者共用同一个算法入口
+     *   （[ModelArchiveRetention.planOf]），不存在两份名单。
+     */
+    public suspend fun retentionPlan(
+        modelId: String,
+        graceMillis: Long = 0L,
+        nowMillis: Long = Long.MAX_VALUE,
+    ): ModelRetentionPlan = ModelArchiveRetention.planOf(
+        entities = dao.byModelId(modelId),
+        graceMillis = graceMillis,
+        nowMillis = nowMillis,
+    )
 
     private fun newEntity(
         id: String,
@@ -304,5 +356,7 @@ public class ModelAssetLedger(
 
     public companion object {
         public const val DEFAULT_MAX_VERIFY_ATTEMPTS: Int = 3
+
+        public const val TAG: String = "ModelAssetLedger"
     }
 }

@@ -54,6 +54,12 @@ public class WebViewExecutor(
      * 而执行看起来正常。所以 bridge 由 [BrowserRuntime] 统一创建并注入进来。
      */
     private val bridge: DomExtractBridge,
+    /**
+     * ★ 动作脚本里调的 `isSame` 定义在 `dom-extract.js` 里（与 stableKey 同一闭包）。
+     * 历史上它定义在另一个从未被注入的常量串里 ⇒ 每次点击都在 `isSame(...)` 处
+     * 抛 ReferenceError（或恒判 STALE）。执行前必须先 [PageScriptHost.ensureReady]。
+     */
+    private val scriptHost: PageScriptHost,
 ) : BrowserExecutorPort {
 
     private val _events = MutableSharedFlow<PageEvent>(
@@ -70,10 +76,19 @@ public class WebViewExecutor(
         }
         _events.tryEmit(PageEvent.NavStarted(url))
         webView.loadUrl(url.value)
+        // 新 document 会清掉所有注入的全局量 ⇒ 标记宿主为「未注入」
+        scriptHost.invalidate()
         Outcome.Ok(PageHandle(Ulid.next(), url, System.currentTimeMillis()))
     }
 
     override suspend fun waitForSettled(timeoutMs: Long): Outcome<PageState> {
+        // ★ 稳定检测的 mutation / 网络计数来自 `StabilityScripts.INSTALL`。
+        //   它没注入时 probe 恒返回 `0,0,...` ⇒ 第二次 poll 就判「已静默」
+        //   ⇒ 一次 mutation 都没看到就放行 ⇒ 懒加载页面抽到半成品 DOM。
+        //   所以等待之前必须先让脚本就位。
+        if (!scriptHost.ensureReady()) {
+            return Outcome.Err(AppError(AppError.CODE_UNKNOWN, "err_js_bootstrap_failed"))
+        }
         val ok = waitForPageSettled(evaluate = { js -> evaluate(js) }, timeoutMs = timeoutMs)
         return if (ok) {
             _events.tryEmit(PageEvent.Settled)
@@ -84,6 +99,9 @@ public class WebViewExecutor(
     }
 
     override suspend fun execute(action: BrowserAction): Outcome<ExecutionResult> {
+        if (!scriptHost.ensureReady()) {
+            return Outcome.Err(AppError(AppError.CODE_UNKNOWN, "err_js_bootstrap_failed"))
+        }
         // WebView.getUrl() 是主线程 API；从后台线程读会拿到过期值甚至抛异常
         val beforeUrl = onMain { webView.url }
         val beforeMutations = currentProbe().mutations
@@ -126,11 +144,17 @@ public class WebViewExecutor(
 
     // ────────────────────────────────────────────────────────────── 脚本构造
 
+    /**
+     * ★ `isSame(el, selector, key)`：**selector 由 Kotlin 传入**，就是 `stableKey` 当初
+     * 哈希的那一个字符串。JS 侧不许重算 —— 重算拿到的是「当前 DOM 的 class」，
+     * 而那正是要检测的漂移；历史上 JS 自己算 `tag + '.' + class首段`，与 Kotlin 用的
+     * `safeSelectorPath(el)` 根本不是同一个东西 ⇒ 两端 key 永远对不上。
+     */
     private fun clickScript(a: BrowserAction.Click): String = """
         (function(){
           var el = document.querySelector(${a.selector.js()});
           if (!el) return 'NOT_FOUND';
-          if (!isSame(el, ${a.stableKey.js()})) return 'STALE';
+          if (!isSame(el, ${a.selector.js()}, ${a.stableKey.js()})) return 'STALE';
           el.scrollIntoView({block:'center'});
           el.click();
           return 'OK';
@@ -141,7 +165,7 @@ public class WebViewExecutor(
         (function(){
           var el = document.querySelector(${a.selector.js()});
           if (!el) return 'NOT_FOUND';
-          if (!isSame(el, ${a.stableKey.js()})) return 'STALE';
+          if (!isSame(el, ${a.selector.js()}, ${a.stableKey.js()})) return 'STALE';
           el.focus();
           var proto = el instanceof HTMLTextAreaElement
             ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -161,7 +185,7 @@ public class WebViewExecutor(
         (function(){
           var el = document.querySelector(${a.selector.js()});
           if (!el) return 'NOT_FOUND';
-          if (!isSame(el, ${a.stableKey.js()})) return 'STALE';
+          if (!isSame(el, ${a.selector.js()}, ${a.stableKey.js()})) return 'STALE';
           el.value = ${a.value.js()};
           el.dispatchEvent(new Event('change', {bubbles:true}));
           return 'OK';
@@ -182,6 +206,7 @@ public class WebViewExecutor(
         _events.tryEmit(PageEvent.NavStarted(url))
         return onMain {
             webView.loadUrl(url.value)
+            scriptHost.invalidate()
             Outcome.Ok(Unit)
         }
     }
@@ -204,24 +229,7 @@ public class WebViewExecutor(
      *   frame 变化等路径上都出现过）。用 `cont.isActive` 守卫，只让第一次生效 ——
      *   二次 resume 会抛 `IllegalStateException`，是真实的崩溃来源。
      */
-    public suspend fun evaluate(script: String): String? = withContext(Dispatchers.Main.immediate) {
-        suspendCancellableCoroutine { cont ->
-            var resumed = false
-            runCatching {
-                webView.evaluateJavascript(script) { value ->
-                    if (!resumed) {
-                        resumed = true
-                        cont.resume(value)
-                    }
-                }
-            }.onFailure { t ->
-                if (!resumed) {
-                    resumed = true
-                    cont.resumeWith(Result.failure(t))
-                }
-            }
-        }
-    }
+    public suspend fun evaluate(script: String): String? = evaluateOn(webView, script)
 
     /** 执行 JS 并把统一错误语义映射到 Outcome。 */
     private suspend fun runScript(script: String, selector: String): Outcome<Unit> {
@@ -262,3 +270,34 @@ public class WebViewExecutor(
         const val ACTION_SETTLE_TIMEOUT_MS = 8_000L
     }
 }
+
+/**
+ * 在主线程求值一段 JS 并返回结果。
+ *
+ * ★ 抽成顶层函数是为了让 [WebViewExecutor] 与 [PageScriptHost] **共用同一条求值通道** ——
+ * 两者都对同一个 WebView 做 `evaluateJavascript`，两条实现迟早会在
+ * 「是否需要主线程 / 抛异常时怎么收口」上漂。
+ *
+ * ★ **幂等**：`evaluateJavascript` 的回调**可能被多次调用**（页面重定向、
+ *   frame 变化等路径上都出现过）。用 `resumed` 守卫，只让第一次生效 ——
+ *   二次 resume 会抛 `IllegalStateException`，是真实的崩溃来源。
+ */
+public suspend fun evaluateOn(webView: WebView, script: String): String? =
+    withContext(Dispatchers.Main.immediate) {
+        suspendCancellableCoroutine { cont ->
+            var resumed = false
+            runCatching {
+                webView.evaluateJavascript(script) { value ->
+                    if (!resumed) {
+                        resumed = true
+                        cont.resume(value)
+                    }
+                }
+            }.onFailure { t ->
+                if (!resumed) {
+                    resumed = true
+                    cont.resumeWith(Result.failure(t))
+                }
+            }
+        }
+    }

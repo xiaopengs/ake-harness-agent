@@ -123,6 +123,71 @@
 
   // ────────────────────────────────────────────────────────────── 主函数
 
+  // ────────────────────────────────────────────────── stableKey（与 Kotlin 侧同一口径）
+  //
+  // ★ 这是「这个元素还是不是刚才那个元素」的**唯一判据**：Kotlin 侧
+  //   `DomJsonParser.stableKeyOf` 与这里的 `__stableKeyOf` 必须产出**逐字相同**的
+  //   16 位小写 hex。历史上两边分别是 SHA-256 前 8 字节（恒 16 hex）与 FNV-1a 32
+  //   （1-8 hex）—— 值域根本不相交 ⇒ `isSame()` 恒 false ⇒ 每次点击都是 'STALE'。
+  //
+  //   为什么统一到「FNV-1a 的两个 32 位变体拼成的 64 位」，而不是把 JS 改成 SHA-256：
+  //     · `crypto.subtle.digest` 是**异步**的（返回 Promise），而 `isSame` 必须在
+  //       点击脚本里同步返回 —— 没有同步 SHA-256 可用（除非内联 60 行 SHA-2）；
+  //     · JVM 单测里没有 JS 引擎，两端一致只能靠「常量同源 + 结构静态对照」保证，
+  //       一个 10 行的算术循环比 60 行 SHA-2 更容易被逐字核对错一个常数；
+  //     · 两条不同 offset basis ⇒ 64 位。单条 32 位在 48-64 个候选的快照上，
+  //       碰撞不是理论风险而是「点错元素」，端侧 Agent 在登录态下点错代价太高。
+  //
+  //   三个常量由 Kotlin 的 `BridgeHelpers.SCRIPT` 以同名**全局变量**注入（唯一数据源），
+  //   下面的 `typeof` 兜底只用于脱离 Android 单独跑本文件（node/jest）时。
+  var KEY_PRIME = (typeof AKE_FNV_PRIME === 'number') ? AKE_FNV_PRIME : 16777619;
+  var KEY_OFFSET_A = (typeof AKE_FNV_OFFSET_A === 'number') ? AKE_FNV_OFFSET_A : 2166136261;
+  var KEY_OFFSET_B = (typeof AKE_FNV_OFFSET_B === 'number') ? AKE_FNV_OFFSET_B : 2654435769;
+
+  /** 32 位 FNV-1a。逐字对应 `DomJsonParser.fnv1a32`：h ^= 码元; h *= prime（取低 32 位）。 */
+  function __fnv1a32(s, offsetBasis) {
+    var h = offsetBasis | 0;
+    for (var i = 0; i < s.length; i++) {
+      h = Math.imul(h ^ s.charCodeAt(i), KEY_PRIME);
+    }
+    return h;
+  }
+
+  function __hex8(h) {
+    return ('00000000' + (h >>> 0).toString(16)).slice(-8);
+  }
+
+  /**
+   * 与 `DomJsonParser.stableKeyOf` 逐字一致：`tag|role|selector|text前24字`。
+   *
+   * ★ role 为 null / undefined 时插**空串**（不是字符串 "null"）—— 这是历史上
+   *   第二重不等价：Kotlin 的 `"$role"` 在 null 时插的是四个字母 "null"。
+   * ★ 按 **UTF-16 码元**迭代（`charCodeAt`），Kotlin 侧也按 `String` 的码元迭代，
+   *   因此中文 / emoji（含代理对）两端一致，不需要 TextEncoder（老 WebView 没有）。
+   */
+  function __stableKeyOf(tag, role, selector, text) {
+    var s = String(tag || '') + '|' + String(role || '') + '|' +
+      String(selector || '') + '|' + String(text || '').slice(0, 24);
+    return __hex8(__fnv1a32(s, KEY_OFFSET_A)) + __hex8(__fnv1a32(s, KEY_OFFSET_B));
+  }
+
+  /**
+   * 执行前的二级确认（§5.6 / R3）。
+   *
+   * ★ **selector 必须由 Kotlin 传入** —— 就是它当初哈希的那一个字符串。
+   *   历史上这里是 JS 自己重算 `tag + '.' + class首段`，与 Kotlin 哈希用的
+   *   `safeSelectorPath(el)` 根本不是同一个东西 ⇒ 第三重不等价。
+   * ★ 文本必须走与抽取时同一个 `compactText`：抽取产物里的 text 是压过空白的，
+   *   直接 `textContent.trim()` 会在多行文本上两端不等（第四重不等价）。
+   */
+  function isSame(el, selector, expectedKey) {
+    if (!expectedKey) return true;
+    var tag = el.tagName.toLowerCase();
+    var role = el.getAttribute('role') || '';
+    var key = __stableKeyOf(tag, role, selector, compactText(el.textContent || '').slice(0, 24));
+    return key === expectedKey;
+  }
+
   /**
    * @param {Object} userOpts 覆盖 DEFAULT
    */
@@ -349,5 +414,7 @@
   }
 
   global.__extract = __extract;
+  global.__stableKeyOf = __stableKeyOf;
+  global.isSame = isSame;
   global.__domExtractVersion = '1.0.0';
 })(typeof globalThis !== 'undefined' ? globalThis : window);

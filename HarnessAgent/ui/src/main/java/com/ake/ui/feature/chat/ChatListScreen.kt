@@ -125,8 +125,18 @@ public fun ChatListScreen(
     }
 }
 
+/**
+ * 列表里的一行：头像 + 「名称 / 时间 / 预览」三件套 + 未读数。
+ *
+ * ## 为什么是 `public`
+ *
+ * 原本是 `private`。改公开只有一个理由：名称/预览/未读这三样是**列表页存在的全部意义**
+ * （用户不点进去就能认出要找的那条），而这句承诺此前没有任何测试守着 ——
+ * 它藏在 `ChatListScreen` 内部，instrumentation 测试够不到。
+ * 付出的代价是 `:ui` 的 API 面多了一个符号，收益是这三行字终于有人看着。
+ */
 @Composable
-private fun SessionRow(
+public fun SessionRow(
     item: ChatListItem,
     nowMillis: Long,
     onClick: () -> Unit,

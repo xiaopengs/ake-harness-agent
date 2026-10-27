@@ -123,6 +123,17 @@ public object ModelDistErrorCodes {
 
     public const val MODEL_INCOMPATIBLE: String = "MODEL_INCOMPATIBLE"
     public const val MODEL_UNAVAILABLE: String = "MODEL_UNAVAILABLE"
+
+    // ── 本地人工导入（`ModelFileImporter` / `ModelManifestImporter`）
+    public const val IMPORT_NO_SPACE: String = "MODEL_IMPORT_NO_SPACE"
+    public const val IMPORT_SIZE_MISMATCH: String = "MODEL_IMPORT_SIZE_MISMATCH"
+    public const val IMPORT_CHECKSUM_MISMATCH: String = "MODEL_IMPORT_CHECKSUM_MISMATCH"
+    public const val IMPORT_IO_FAILED: String = "MODEL_IMPORT_IO_FAILED"
+    public const val IMPORT_SOURCE_MISSING: String = "MODEL_IMPORT_SOURCE_MISSING"
+
+    /** manifest 侧载被拒：`manifest_version` 比现有缓存更小（replay 防护）。 */
+    public const val IMPORT_MANIFEST_DOWNGRADE: String = "MODEL_IMPORT_MANIFEST_DOWNGRADE"
+    public const val IMPORT_MANIFEST_INVALID: String = "MODEL_IMPORT_MANIFEST_INVALID"
 }
 
 /** manifest schema 版本。客户端只接受这一个 —— 未知 schema 直接拒绝，不做「尽力解析」。 */

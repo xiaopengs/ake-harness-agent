@@ -1,6 +1,5 @@
 package com.ake.browser
 
-import android.webkit.WebView
 import com.ake.core.common.AkeLog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
@@ -33,12 +32,30 @@ public object StabilityScripts {
           window.__akeMutationCount = 0;
           window.__akeNetworkPending = 0;
 
+          // ★ 网络计数只在**这里**加减，且**夹在 0 上界**：
+          //   判据是 `pendingRequests == 0`，一旦漂成负数就永远不成立
+          //   ⇒ 「网络空闲」这条判据永久失效 ⇒ 页面再也等不到稳定。
+          var netDone = function(){
+            if (window.__akeNetworkPending > 0) window.__akeNetworkPending--;
+          };
+          window.__akeNetDone = netDone;
+
           if (!window.__akeXhrWrapped) {
             window.__akeXhrWrapped = true;
             var origOpen = XMLHttpRequest.prototype.open;
             XMLHttpRequest.prototype.open = function(){
-              this.addEventListener('loadend', function(){ window.__akeNetworkPending--; });
-              this.addEventListener('error',   function(){ window.__akeNetworkPending--; });
+              // ★ 只挂 `loadend`：按 XHR spec，load / abort / error / timeout 之后
+              //   **一定**再补发一发 loadend。历史实现同时挂了 `loadend` 与 `error`
+              //   ⇒ 失败的请求 decrement 两次，而 send() 只 increment 一次
+              //   ⇒ 计数漂成负数。这里再加一道 per-request 的 once 守卫兜底。
+              if (!this.__akeHooked) {
+                this.__akeHooked = true;
+                this.addEventListener('loadend', function(){
+                  if (this.__akeSettled) return;
+                  this.__akeSettled = true;
+                  netDone();
+                });
+              }
               return origOpen.apply(this, arguments);
             };
             var origSend = XMLHttpRequest.prototype.send;
@@ -50,9 +67,11 @@ public object StabilityScripts {
             if (origFetch) {
               window.fetch = function(){
                 window.__akeNetworkPending++;
-                return origFetch.apply(this, arguments).then(
-                  function(r){ window.__akeNetworkPending--; return r; },
-                  function(e){ window.__akeNetworkPending--; throw e; });
+                try {
+                  return origFetch.apply(this, arguments).then(
+                    function(r){ netDone(); return r; },
+                    function(e){ netDone(); throw e; });
+                } catch (e) { netDone(); throw e; }
               };
             }
           }
@@ -164,7 +183,8 @@ public suspend fun waitForPageSettled(
     return settled ?: false
 }
 
-/** 供外部做「注入脚本」的统一入口：每次导航后调用。 */
-public suspend fun WebView.installStabilityProbe(evaluate: suspend (String) -> String?) {
-    evaluate(StabilityScripts.INSTALL)
-}
+// ★ 这里**刻意不再导出** `WebView.installStabilityProbe()` 之类的第二套注入入口。
+//   稳定探测脚本的安装现在和 `__extract` / stableKey 常量同属 `JsBootstrap` 一份清单，
+//   由 `PageScriptHost` 在每次需要前统一注入 ——
+//   留下第二套入口就等于留下「有人调了它、有人没调」的第二处漂移。
+//   （`WebViewExecutor` / `WebViewDomPerception` 各自调 `scriptHost.ensureReady()`。）

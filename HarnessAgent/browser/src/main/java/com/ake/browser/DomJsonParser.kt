@@ -24,25 +24,55 @@ import java.security.MessageDigest
  */
 public object DomJsonParser {
 
+    // ── stableKey 的哈希常量（§5.6 跨快照指纹）
+    //
+    // ★★ 这三个数是 **Kotlin 与 JS 的唯一数据源**：`BridgeHelpers.SCRIPT` 把它们注入成
+    //   页面全局变量 `AKE_FNV_PRIME / AKE_FNV_OFFSET_A / AKE_FNV_OFFSET_B`，
+    //   `dom-extract.js` 的 `__stableKeyOf` 只从全局变量取值。
+    //   于是「两端常量对不上」这类漂移在结构上不可能发生 —— 而不是靠注释担保。
+    //
+    // 为什么是 FNV-1a（而不是继续用 SHA-256）：见 `dom-extract.js` 里 `__stableKeyOf`
+    // 上方的长注释。一句话：JS 侧拿不到同步的 SHA-256，而 JVM 单测里没有 JS 引擎，
+    // 两端一致只能靠「常量同源 + 结构逐字可核对」，那就选一个 10 行能写完的算法。
+    public const val FNV_PRIME: Long = 16_777_619L
+    public const val FNV_OFFSET_A: Long = 2_166_136_261L
+    public const val FNV_OFFSET_B: Long = 2_654_435_769L
+
+    /** stableKey 的长度（16 hex = 两段 32 位）。长度本身是契约的一部分：历史上 JS 侧
+     *  用 `h.toString(16)` 不补零 ⇒ 长度 1–8，与 Kotlin 的恒 16 位值域不相交。 */
+    public const val STABLE_KEY_LEN: Int = 16
+
+    /** `stats` 段是 `__extract` 的必备字段；缺它说明这不是一次完整抽取的产物。 */
+    private const val STATS_KEY = "stats"
+
     public fun parse(raw: String, topK: Int = 48): PocketDom {
         val root = runCatching { JSONObject(raw) }
             .getOrElse { return PocketDom.errored() }
 
-        val stats = root.optJSONObject("stats")
-        val pruned = stats?.optInt("prunedNodeCount", 0) ?: 0
-        val rawNodes = stats?.optInt("rawNodeCount", 0) ?: 0
+        val url = root.optString("url", "")
+        val host = hostOf(url)
+
+        // ★ 信封校验：`{"partial":true}` 这种合法 JSON 与「页面真的是空的」在字段层面
+        //   完全同形（都是 READY + 零候选）。唯一的区分点是「有没有 stats 段」——
+        //   `__extract` 恒产出它，缺了就说明 payload 被截断 / 不是本版本的产物。
+        //   这里必须显式判成 ERROR，否则 UI 无法区分「正在加载」与「什么都不在」。
+        val stats = root.optJSONObject(STATS_KEY)
+            ?: return PocketDom.errored(url = url, host = host)
+
+        val pruned = stats.optInt("prunedNodeCount", 0)
+        val rawNodes = stats.optInt("rawNodeCount", 0)
 
         // ★ 顺序：先评分 → 按分排倒序 → 再截断。
         //   先截断再排序会变成「取 DOM 顺序前 N 个然后重排」，把真正重要的元素挡在外面。
+        //
+        // ★ `coerceAtLeast(0)`：`Takeable.take(-1)` 直接抛 IllegalArgumentException，
+        //   而 `candidateTopK` 是从 `ObserveOptions` 一路传下来的配置项 ——
+        //   一个负数配置不该让整个 observe 挂掉，优雅退化为空列表即可。
         val candidates = parseCandidates(root.optJSONArray("candidates"))
             .score()
             .sortedByDescending { it.score }
-            .take(topK)
+            .take(topK.coerceAtLeast(0))
             .enumerate()
-
-        val host = runCatching { java.net.URI(root.optString("url", "")).host.orEmpty() }
-            .getOrDefault("")
-            .removePrefix("www.")
 
         val signals = parseStrings(root.optJSONArray("signals"))
             .mapNotNull { runCatching { DomSignal.valueOf(it) }.getOrNull() }
@@ -52,10 +82,10 @@ public object DomJsonParser {
             .toSet()
 
         return PocketDom(
-            url = root.optString("url", ""),
+            url = url,
             host = host,
             title = root.optString("title", "").take(96),
-            pageState = detectPageState(root, warnings),
+            pageState = detectPageState(root),
             scroll = ScrollInfo(
                 y = root.optInt("scrollY", 0),
                 maxY = root.optInt("maxY", 0),
@@ -70,9 +100,31 @@ public object DomJsonParser {
                 rawNodeCount = rawNodes,
                 prunedNodeCount = pruned,
                 compressionRatio = if (rawNodes > 0) pruned.toFloat() / rawNodes else 0f,
-                serializedChars = stats?.optInt("serializedChars", 0) ?: 0,
+                serializedChars = stats.optInt("serializedChars", 0),
             ),
         )
+    }
+
+    /**
+     * ★ **域名归一化 —— 这是安全代码，不是格式化代码。**
+     *
+     * `PocketDom.host` 会一路流到 `ObservationSummary.host`（`ObservationProjector`），
+     * 而该字段的契约注释写得很死：**「小写化裸域名，明文 —— 域名策略要精确等值查询」**
+     * （数据库 §7.4）。域名策略（`DomainPolicy`）的黑名单是「命中即 Denied，不提供确认选项」，
+     * 白名单是 `host == it || host.endsWith(".$it")` —— 全是**精确等值**比较。
+     *
+     * 因此只要这里漏掉 lowercase / `www.` 归一，`PASTEBIN.com` 就既不等于也不 endsWith
+     * `pastebin.com` ⇒ 硬拒变「需确认」、白名单归类错、按 host 精确查询的清理/保留策略漏行。
+     * 这正是 `DomainPolicy` 自己的 KDoc 点名的「攻击者绕过白名单的入口」。
+     *
+     * 口径与 `core:common/Url.host`、`:agent` 的 `UrlSanitizer.hostOf` /
+     * `ObservationProjector.hostOf` **逐字一致**（小写、去 `www.`、去端口、去 userinfo）。
+     */
+    public fun hostOf(url: String): String {
+        // `URI.host` 已经去掉了 userinfo（`user@`）与端口；相对 URL / `about:blank`
+        // 解析不出 host ⇒ null ⇒ 空串（与 `Url.host` 对相对 URL 的行为保持一致）。
+        val host = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
+        return host.lowercase().removePrefix("www.")
     }
 
     // ────────────────────────────────────────────────────────────── candidates
@@ -107,7 +159,12 @@ public object DomJsonParser {
                 }
             }
             val rectObj = o.optJSONObject("rect")
-            val rect = if (rectObj != null && rectObj.optInt("w", 0) > 0) {
+            // ★ 判据是「宽或高至少有一个非零」，不是「w > 0」。
+            //   w=0 而 h=44 的竖条（某些 overlay / label 包裹 / 分隔线按钮）是合法的：
+            //   JS 侧 `isVisible` 已经排掉了 w 与 h **同时**为 0 的元素。
+            //   历史实现把 w=0 的整条 rect 丢掉 ⇒ rect=null ⇒ 模型既拿不到位置也看不到它。
+            //   （sizeReasonableness 仍会给它 0 分，所以这条改动只补回位置信息，不改排序。）
+            val rect = if (rectObj != null && (rectObj.optInt("w", 0) != 0 || rectObj.optInt("h", 0) != 0)) {
                 Rect(rectObj.optInt("x"), rectObj.optInt("y"), rectObj.optInt("w"), rectObj.optInt("h"))
             } else null
 
@@ -197,11 +254,36 @@ public object DomJsonParser {
         e.copy(id = index + 1)
     }
 
+    /**
+     * 跨快照指纹（§5.6）。**两端唯一契约** —— 与 `dom-extract.js` 的 `__stableKeyOf` 逐字对应。
+     *
+     * ★ `role = null` 必须插**空串**：历史上 `"$role"` 在 null 时插的是字符串 "null"，
+     *   而 JS 侧 `(role || '')` 插空串 ⇒ 凡是 role 为 null 的元素（占绝大多数）
+     *   两端永远不等 ⇒ 每次点击都 STALE。
+     */
     public fun stableKeyOf(tag: String, selector: String, text: String, role: String?): String {
-        val input = "$tag|$role|$selector|${text.take(24)}"
-        val bytes = MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
-        return bytes.take(8).joinToString("") { "%02x".format(it) }
+        val input = "$tag|${role.orEmpty()}|$selector|${text.take(24)}"
+        return hex8(fnv1a32(input, FNV_OFFSET_A)) + hex8(fnv1a32(input, FNV_OFFSET_B))
     }
+
+    /**
+     * 32 位 FNV-1a。逐字对应 JS 的 `__fnv1a32`：`h = Math.imul(h ^ s.charCodeAt(i), PRIME)`。
+     *
+     * ★ 按 **UTF-16 码元**迭代（`String` 的 `Char`），与 JS 的 `charCodeAt` 同口径 ——
+     *   不按 UTF-8 字节，否则中文 / emoji 两端不等。
+     * ★ 全程用 Long 做乘法并取低 32 位，等价于 `Math.imul` 的 int32 截断语义。
+     */
+    public fun fnv1a32(s: String, offsetBasis: Long): Int {
+        var h = offsetBasis and 0xFFFF_FFFFL
+        for (i in s.indices) {
+            h = ((h xor (s[i].code.toLong() and 0xFFFFL)) * FNV_PRIME) and 0xFFFF_FFFFL
+        }
+        return h.toInt()
+    }
+
+    /** 定长 8 位小写 hex —— 不补零会让长度变成契约的一部分（历史 bug）。 */
+    private fun hex8(v: Int): String =
+        (v.toLong() and 0xFFFF_FFFFL).toString(16).padStart(8, '0')
 
     private fun stableKeyOf(c: RawCandidate): String =
         stableKeyOf(c.tag, c.selector, c.text, c.role)
@@ -213,9 +295,22 @@ public object DomJsonParser {
         else -> 1.0f
     }
 
-    private val CONTEXT_KEYWORDS = listOf("form", "search", "nav", "pagination", "dialog", "list", "filter", "sort")
-    private fun contextBonus(c: RawCandidate): Float =
-        if (CONTEXT_KEYWORDS.any { c.selector.contains(it, ignoreCase = true) }) 1.0f else 0f
+    private val CONTEXT_KEYWORDS = setOf("form", "search", "nav", "pagination", "dialog", "list", "filter", "sort")
+
+    /**
+     * ★ 必须按**片段**等值匹配，不能子串匹配。
+     *
+     * 子串匹配时 `.informal-banner` 含 `form`、`.platform-row` 含 `form` ⇒
+     * 与真正的 `<form>` 同样 +0.10。评分表只有 0.10 这一档，误伤会直接改变 Top-K 的排序，
+     * 表现为「模型总去点那个其实不重要的横幅」。
+     */
+    private fun contextBonus(c: RawCandidate): Float {
+        val segments = c.selector.lowercase().split(SEGMENT_SEPARATORS)
+        return if (segments.any { it in CONTEXT_KEYWORDS }) 1.0f else 0f
+    }
+
+    /** 选择器里的片段分隔符：`div.pdp>button.buy` → [div, pdp, button, buy]。 */
+    private val SEGMENT_SEPARATORS: Regex = Regex("""[^A-Za-z0-9_-]+""")
 
     // ────────────────────────────────────────────────────────────── records / 其它
 
@@ -255,7 +350,7 @@ public object DomJsonParser {
      *
      * 这一步不是体验优化而是合规边界：绕过风控会让整个产品失去长期信任。
      */
-    private fun detectPageState(root: JSONObject, warnings: Set<DomWarning>): PageState {
+    private fun detectPageState(root: JSONObject): PageState {
         val title = root.optString("title", "")
         val url = root.optString("url", "")
         if (CAPTCHA_HINTS.any { title.contains(it, true) || url.contains(it, true) }) return PageState.CAPTCHA

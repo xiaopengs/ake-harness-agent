@@ -27,12 +27,22 @@ public class WebViewDomPerception(
      * 理由同 `WebViewExecutor` 的构造函数注释：`addJavascriptInterface` 按名字覆盖。
      */
     private val bridge: DomExtractBridge,
+    /**
+     * ★ **感知前必须先让脚本就位**：`observeJs` 调的是 `__extract`，
+     * 它只存在于 `assets/js/dom-extract.js` 里。历史上没人把这份 asset 读进页面
+     * ⇒ `__extract` 未定义 ⇒ observe 的 IIFE 抛 ReferenceError ⇒ 没有任何 deliver
+     * ⇒ 必超时。现在这一步由 [PageScriptHost.ensureReady] 统一负责。
+     */
+    private val scriptHost: PageScriptHost,
 ) : DomPerceptionPort {
 
     // （JS 接口的注入/摘除统一在 BrowserRuntime 做，这里不再持有 ——
     //  感知侧自己 detach 会把执行侧正在用的 bridge 一起掐掉。）
 
     override suspend fun observe(opts: ObserveOptions): Outcome<PocketDom> {
+        if (!scriptHost.ensureReady()) {
+            return Outcome.Err(AppError(AppError.CODE_UNKNOWN, "err_js_bootstrap_failed"))
+        }
         val json = bridge.run(observeJs(opts), timeoutMs = PERCEIVE_TIMEOUT_MS)
             ?: return Outcome.Err(AppError(AppError.CODE_TIMEOUT, "err_perceive_timeout"))
 
@@ -44,6 +54,9 @@ public class WebViewDomPerception(
     }
 
     override suspend fun extractRecords(hint: ExtractHint): Outcome<RecordTable> {
+        if (!scriptHost.ensureReady()) {
+            return Outcome.Err(AppError(AppError.CODE_UNKNOWN, "err_js_bootstrap_failed"))
+        }
         val js = """
             (function(){
               var roots = document.querySelectorAll(${hint.selectorHint.js()});
@@ -105,13 +118,29 @@ public class WebViewDomPerception(
         }
     }
 
+    /**
+     * ★ OPTS 的 key 必须与 `dom-extract.js` 里 `opts.xxx` **逐字同名**。
+     *
+     * 历史上这里发的是 `includeBelowFold` / `maxRecords` / `viewportExpansion`，
+     * 而 JS 读的是 `opts.includeTextBelowFold` / `opts.maxRecordsRows` /
+     * `opts.viewportExpansionPx` ⇒ 三个参数传过去没人接，JS 恒走默认值。
+     *
+     * ★★ 其中 `viewportExpansion` 那条**比另外两条严重一个量级**：JS 里
+     *   `minY = -opts.viewportExpansionPx` 在键缺失时得到 `NaN`，
+     *   而 `rect.bottom > NaN` 恒为 false ⇒ **视口裁剪把每一个元素都判成视口外**
+     *   ⇒ 候选恒为空（除非 `includeTextBelowFold` 为真）。它不是「参数不生效」，
+     *   是「整页什么都抽不到」。
+     *
+     * 这类漂移的失败模式是**静默**的（JS 里 `undefined` 不报错），所以
+     * `InjectPipelineTest` 有一条测试把 Kotlin 发出的每个 key 拿去和 JS 逐条比对。
+     */
     private fun observeJs(opts: ObserveOptions): String = """
         (function(){
           var OPTS = {
             maxTextLen: ${UiElement.MAX_TEXT_LEN},
-            viewportExpansion: ${opts.viewportExpansionPx},
-            includeBelowFold: ${opts.includeTextBelowFold},
-            maxRecords: ${opts.maxRecordsHint},
+            viewportExpansionPx: ${opts.viewportExpansionPx},
+            includeTextBelowFold: ${opts.includeTextBelowFold},
+            maxRecordsRows: ${opts.maxRecordsHint},
             maxNodes: 20000,
             maxDepth: 40
           };

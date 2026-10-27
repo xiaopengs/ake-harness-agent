@@ -114,37 +114,8 @@ public fun ChatScreen(
         //   （上一轮还没收尾、这一轮没开始）没有任何东西失败，用红色去说"等一下"
         //   等于先说"出事了"再补一句"其实没事" —— 用户只会记住前半句。
         ui.terminal?.let { reason ->
-            val copy = chatTerminalCopyOf(reason)
             if (reason != ChatTerminalReason.COMPLETED && ui.stuck.isEmpty()) {
-                val text = stringResource(copy.titleRes) + " · " + stringResource(copy.nextRes)
-                BannerSlot {
-                    Column {
-                        when (copy.tone) {
-                            ChatTerminalTone.ALERT -> AlertBar(text, color = AkeColors.RiskSensitive)
-                            ChatTerminalTone.NOTICE -> NoticeBar(text)
-                        }
-                        // ★ `IN_FLIGHT` 的重试只能挂在这里。
-                        //
-                        //   它的宿主一定是「用户刚发出去的那句话」，而 USER 气泡不画脚注
-                        //   （见 `MessageBubble` 里 `isUser` 的早退）—— 也就是说 `FailureFoot`
-                        //   那条路对它是死的：文案里写了「点重试」，屏幕上却没有那个按钮，
-                        //   用户只能把整句话重打一遍。横幅是它唯一的出口，按钮就补在这里。
-                        //
-                        //   其它终态的宿主是助手气泡，脚注里已经有按钮；横幅再挂一个，
-                        //   屏幕上就会同时出现两个「重试」，反而不知道该按哪个。
-                        if (reason == ChatTerminalReason.IN_FLIGHT && copy.retryable) {
-                            TextButton(
-                                onClick = viewModel::retry,
-                                contentPadding = PaddingValues(horizontal = 4.dp),
-                            ) {
-                                Text(
-                                    text = stringResource(R.string.chat_turn_retry),
-                                    style = MaterialTheme.typography.labelMedium,
-                                )
-                            }
-                        }
-                    }
-                }
+                BannerSlot { TerminalBanner(reason, onRetry = viewModel::retry) }
             }
         }
 
@@ -246,6 +217,67 @@ public fun ChatScreen(
 @Composable
 private fun BannerSlot(content: @Composable () -> Unit) {
     Column(Modifier.padding(horizontal = 12.dp, vertical = 3.dp)) { content() }
+}
+
+/**
+ * 上一轮的终态横幅。
+ *
+ * ## 为什么要把它从 [ChatScreen] 里拆出来
+ *
+ * 这段原来是内联在 `ChatScreen` 的组合体里的，而 `ChatScreen` 的最后一个参数是
+ * `viewModel: ChatViewModel = hiltViewModel()` —— 要渲染它就得先造出 ViewModel 的
+ * 七个依赖（`ChatSessionStorePort` / `AgentProfileStorePort` / `Optional<ChatRunnerPort>` /
+ * `Optional<CapabilityGrantPort>` / `UiHumanGate` / `Clock` / `SavedStateHandle`）。
+ *
+ * 那意味着「横幅到底弹没弹、是不是红色的」这两个**用户第一眼看到的东西**只能靠 JVM 单测
+ * 间接推断（`chatTerminalCopyOf` 的 tone 对了 ⇒ 推出来颜色对），中间那一层"tone 真的喂给了
+ * `NoticeBar` 而不是 `AlertBar`"没人验证过。拆出来之后它变成一个只吃 `reason` 和回调的
+ * 纯函数式 composable，instrumentation 测试可以直接渲染它并**读屏幕像素**。
+ *
+ * 提取是行为等价的：`COMPLETED` 的过滤与 `stuck` 的例外仍留在调用侧
+ * （那里才拿得到 `ui.stuck`），这里只负责画。
+ *
+ * ## 为什么颜色由 `copy.tone` 决定，而不是由"是不是失败"决定
+ *
+ * `IN_FLIGHT`（上一轮还没收尾、这一轮没开始）没有任何东西失败，用红色去说"等一下"
+ * 等于先说"出事了"再补一句"其实没事" —— 用户只会记住前半句。
+ *
+ * ## 为什么只有 `IN_FLIGHT` 挂重试按钮
+ *
+ * 它的宿主一定是「用户刚发出去的那句话」，而 USER 气泡不画脚注（见 `MessageBubble` 里
+ * `isUser` 的早退）—— `FailureFoot` 那条路对它是死的：文案里写了「点重试」，屏幕上却没有
+ * 那个按钮，用户只能把整句话重打一遍。横幅是它唯一的出口。
+ * 其它终态的宿主是助手气泡，脚注里已经有按钮；横幅再挂一个，屏幕上就会同时出现两个
+ * 「重试」，反而不知道该按哪个。
+ */
+@Composable
+public fun TerminalBanner(
+    reason: ChatTerminalReason,
+    modifier: Modifier = Modifier,
+    onRetry: () -> Unit = {},
+) {
+    if (reason == ChatTerminalReason.COMPLETED) return
+
+    val copy = chatTerminalCopyOf(reason)
+    val text = stringResource(copy.titleRes) + " · " + stringResource(copy.nextRes)
+
+    Column(modifier) {
+        when (copy.tone) {
+            ChatTerminalTone.ALERT -> AlertBar(text, color = AkeColors.RiskSensitive)
+            ChatTerminalTone.NOTICE -> NoticeBar(text)
+        }
+        if (reason == ChatTerminalReason.IN_FLIGHT && copy.retryable) {
+            TextButton(
+                onClick = onRetry,
+                contentPadding = PaddingValues(horizontal = 4.dp),
+            ) {
+                Text(
+                    text = stringResource(R.string.chat_turn_retry),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+    }
 }
 
 @Composable

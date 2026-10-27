@@ -108,22 +108,61 @@ jobs:
           done
           echo "✅ 体积红线通过"
 
-      - name: 🔏 校验签名确实生效（不是 debug key）
+      # ── ★ 必须带 --min-sdk-version 21（2026-10 实测，韩渡川）──
+      # 不带这个参数时 apksigner 按 APK 里 AndroidManifest 的 minSdkVersion（本项目 28）
+      # 裁剪要验的签名方案，实测输出 v1:false / v2:false / v3:true 而 **exit 0** ——
+      # 那不是没签名，是"v1/v2 根本没被检查"。于是把 enableV1Signing / enableV2Signing
+      # 改成 false 也不会有人知道。带上 --min-sdk-version 21 后 v1/v2/v3 才会全部被验。
+      # （`-v` 同样必要：不带它时成功场景一行都不打印，无法解析方案行。）
+      #
+      # ★ 与 ci.yml 7️⃣ 的差别：那里 unsigned 是设计好的降级（不红，只标注）；
+      #   这里是**发版**，unsigned 必须红 —— 发出去一个装不上的包没有任何意义。
+      - name: 🔏 校验签名确实生效（--min-sdk-version 21）
         working-directory: HarnessAgent
         env:
           AKE_KEY_ALIAS: ${{ secrets.AKE_KEY_ALIAS }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          APKSIGNER="$ANDROID_HOME/build-tools/${{ env.BUILD_TOOLS }}/apksigner"
           APK=$(ls app/build/outputs/apk/release/app-universal-release.apk \
                    app/build/outputs/apk/release/app-release.apk 2>/dev/null | head -1)
           echo "校验对象：$APK"
-          "$ANDROID_HOME/build-tools/${{ env.BUILD_TOOLS }}/apksigner" verify --print-certs "$APK" \
-            | tee /tmp/signer.txt
+
+          # ① 结构化判定有没有签名（未签名包与"只有 v3"的包报错文本相同，无法靠文本区分）
+          v1n=$(unzip -l "$APK" 2>/dev/null | grep -cE 'META-INF/.*\.(RSA|DSA|EC)$' || true)
+          sb=$(grep -ac "APK Sig Block 42" "$APK" 2>/dev/null || true)
+          echo "结构化判定: META-INF 签名条目=${v1n:-0}  APK Signing Block=${sb:-0}"
+          if [ "${v1n:-0}" -eq 0 ] && [ "${sb:-0}" -eq 0 ]; then
+            echo "::error::release 包**未签名** —— 凭据未生效（缺 keystore/alias/密码之一）。发版不接受 unsigned 产物：它装不上。"
+            exit 1
+          fi
+
+          # ② 方案矩阵：min-sdk 21 下 v1/v2/v3 必须全 true
+          set +e
+          "$APKSIGNER" verify -v --min-sdk-version 21 --print-certs "$APK" > /tmp/signer.txt 2>&1
+          rc=$?
+          set -e
+          grep -Ei 'Verifies|DOES NOT VERIFY|Verified using v[0-9.]+ scheme|ERROR:' /tmp/signer.txt || true
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::apksigner verify 失败（exit=$rc）—— 上面的输出即为原因"
+            exit 1
+          fi
+          for s in 1 2 3; do
+            val=$(grep -Ei "Verified using v${s} scheme" /tmp/signer.txt | head -1 \
+                  | sed -E 's/.*: *//' | tr -d '[:space:]')
+            echo "v${s}=${val:-<未打印>}"
+            if [ "$val" != "true" ]; then
+              echo "::error::v${s} 签名方案未通过（min-sdk 21 下必须三项全 true）—— app/build.gradle.kts 的 enableV${s}Signing 被关掉了？"
+              exit 1
+            fi
+          done
+
+          # ③ 不是 debug key（v4 不判：单独验主 APK 时恒 false，判它必假红）
           if grep -qi "androiddebugkey" /tmp/signer.txt; then
             echo "::error::release 包仍使用 debug 签名 —— 凭据未生效"
             exit 1
           fi
-          echo "✅ 已使用 release 密钥签名"
+          echo "✅ 已使用 release 密钥签名，v1/v2/v3 在 min-sdk 21 下全部通过"
 
       - name: 📤 上传产物
         uses: actions/upload-artifact@v4

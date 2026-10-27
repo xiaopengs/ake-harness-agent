@@ -8,7 +8,32 @@ plugins {
 android {
     namespace = "com.ake.ui"
     compileSdk = 36
-    defaultConfig { minSdk = 28 }
+    defaultConfig {
+        minSdk = 28
+
+        // ─────────────────────────────────────────────────────────────────────
+        // instrumentation 跑 JUnit4 用例需要 runner，默认 [`android.test.
+        // InstrumentationTestRunner`] 是 JUnit3 时代的产物，不理解 Compose 测试规则。
+        //
+        // ★ 但要注意：`androidx.test:runner` **不是我自己声明的**，它是传递依赖，链路实测如下
+        //   （`./gradlew :ui:dependencyInsight --dependency androidx.test:runner
+        //      --configuration debugAndroidTestRuntimeClasspath`）：
+        //
+        //     androidx.test:runner:1.5.0
+        //     \--- androidx.test.espresso:espresso-core:3.5.0
+        //          \--- androidx.compose.ui:ui-test-android:1.11.4
+        //
+        //   同一条链也带进来了 `androidx.test.ext:junit:1.1.5`（测试里的
+        //   `@RunWith(AndroidJUnit4::class)` 就靠它），`junit:junit:4.13.2` 则由
+        //   `libs.bundles.testUnit` 直接提供。
+        //
+        //   这条路是 Compose ui-test 自己的设计（它天生依赖 espresso），所以短期稳定；
+        //   ⚠ 但它毕竟是"别人顺带捎过来的"。等邝随行补了 catalog 别名后应当显式声明
+        //   `androidTestImplementation(libs.androidx.test.runner)` 和
+        //   `...ext.junit`，别让自己站在传递链的第 3 层上。
+        // ─────────────────────────────────────────────────────────────────────
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -88,12 +113,49 @@ dependencies {
     //    没有 Android 的 Main 实现，`Dispatchers.setMain(TestDispatcher)` 必须由它提供。
     //    这条别的模块用不上（它们的 ViewModel 不多或已被 Robolectric 覆盖），所以没进 bundle。
     //
-    // ⚠ 刻意**不引** Robolectric / `compose-ui-test-junit4`：那会新增 catalog 条目
-    //   （邝随行的地盘），而且本项目没有 androidTest 基础设施。这里的测试一律绕开 Compose
-    //   渲染，只测**行为**：文案映射、状态归约、选择器闸门 —— 像素与布局不在 C 位。
+    // 【补记 · 2026-10 苏映棠】上面提到的"刻意不引 compose-ui-test-junit4、本项目没有
+    //   androidTest 基础设施"**已经作废**：本轮的 `src/androidTest/` 把它引了进来，
+    //   理由见下面那段注释。这段保留是因为它解释了为什么 JVM 侧只测行为不测像素 ——
+    //   那个取舍本身仍然是成立的，只是不再"别无选择"。
     // ─────────────────────────────────────────────────────────────────────────
     testImplementation(libs.bundles.testUnit)
     testImplementation(libs.coroutines.test)
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 【本轮 · 苏映棠】`:ui` 的 Compose 界面测试（instrumentation）依赖。
+    //
+    // ## 为什么这里出现的是裸坐标而不是 `libs.*` 别名
+    //
+    // 版本目录（`gradle/libs.versions.toml`）里**没有任何** Compose / AndroidX 测试坐标 ——
+    // 它的测试区只有 junit / truth / turbine 三条。也就是说不存在"现成别名"可用。
+    // 两条出路权衡后选了"不改 catalog"：
+    //   · 改 catalog：等于在邝随行并行编辑的同一份文件里动手，冲突风险由别人承担；
+    //   · **不改 catalog**：版本由 `libs.compose.bom`（已有别名）统一供给 —— 下面两行
+    //    坐标**一个版本号都不写**，正是 `compose-ui` / `compose-material3` 现有的玩法
+    //    （它们在 catalog 里也没有 version 字段）。
+    //
+    // 代价：`libs.versions.toml` 头部"模块只允许出现别名"的纪律被局部违反。
+    // ⚠ 待办（需邝随行）：把这两条提升为 catalog 别名 `compose-ui-test-junit4` /
+    //   `compose-ui-test-manifest`（同样不带 version），届时这里的裸坐标应被替换掉。
+    //
+    // ## 为什么 `ui-test-manifest` 落在 debugImplementation 而不是 androidTest
+    //
+    // 它往 **被测 APK（debug）** 的 manifest 里塞 `ComponentActivity` 与空 theme；
+    // 放进 androidTest 的话 activity 在被测端找不到，启动即 ClassNotFound。
+    //
+    // ## 刻意不引的
+    //   · `uiAutomator`：本次全部场景都在应用内的 Compose 树里，用不到跨进程/系统 UI 查询。
+    //     而且它**不在 compose BOM 管理范围内**，引它就必须写一个裸版本号 —— 不值得。
+    //   · AndroidX Test Orchestrator：同理（`androidx.test:orchestrator` 需版本号），
+    //     且它只影响"怎么跑"，不影响本次要保证的"能不能编译"。真机上跑之前再补。
+    //   · Hilt 测试相关：本次刻意不渲染带 `hiltViewModel()` 的整屏（见 tests 注释），
+    //     所以不需要 hilt-android-testing。也没那个别名。
+    // ─────────────────────────────────────────────────────────────────────────
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.truth)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

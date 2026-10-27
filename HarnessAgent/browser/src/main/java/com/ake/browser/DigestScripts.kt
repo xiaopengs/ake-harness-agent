@@ -28,34 +28,31 @@ public object DigestScripts {
     """.trimIndent()
 }
 
-/** 让注入脚本能用的两个小工具：`isSame(el, key)` 做 stableKey 二次确认。 */
+/**
+ * `stableKey` 的**哈希常量注入段**。
+ *
+ * ★★ 这是历史上「点击全废」的根因所在位置。修复前这里是一份手写的 FNV-1a 实现
+ * （`__stableKeyOf` + `isSame`），而它**从未被注入到任何 WebView** ——
+ * Kotlin 侧 `stableKeyOf` 用的是 SHA-256，JS 侧这份用的是 FNV-1a，两边连算法都不是一个，
+ * 于是 `isSame()` 恒 false ⇒ click/type/select 一律 'STALE'。
+ *
+ * 现在的分工：
+ *   · **算法只有一份**，写在 `dom-extract.js` 里（`__stableKeyOf` / `isSame`）——
+ *     它和抽取用的 `compactText` 同处一个闭包，文本归一口径不可能漂；
+ *   · **常量只有一份**，就是 `DomJsonParser` 的这三个 `const val`，由本段注入成全局变量。
+ *
+ * 于是两端既不可能「算法不同」，也不可能「常量不同」—— 剩下的只有脚本体本身，
+ * 而它是 10 行算术，可以逐字核对。
+ *
+ * 注入顺序：**必须在 `dom-extract.js` 之前**（见 `JsBootstrap.RESOURCES`）。
+ */
 public object BridgeHelpers {
 
-    /**
-     * 与 Kotlin 侧 `stableKeyOf()` **逐字一致**的实现。
-     *
-     * ★ 必须一致，否则二级确认永远失败 —— 这类 bug 表现为「每个点击都 STALE」，
-     * 症状看起来像页面疯狂重绘，实际是两侧哈希口径不同。
-     */
     public val SCRIPT: String = """
-      function __stableKeyOf(tag, role, selector, text) {
-        var s = tag + '|' + (role || '') + '|' + selector + '|' + String(text || '').slice(0, 24);
-        // 与 Kotlin 一致：取 SHA-256 前 8 字节的 hex
-        var h = 2166136261;
-        for (var i = 0; i < s.length; i++) {
-          h ^= s.charCodeAt(i);
-          h = (h * 16777619) >>> 0;
-        }
-        return h.toString(16);
-      }
-      function isSame(el, expectedKey) {
-        if (!expectedKey) return true;
-        var tag = el.tagName.toLowerCase();
-        var role = el.getAttribute('role') || '';
-        var cls = (el.getAttribute('class') || '').trim().split(/\s+/)[0] || '';
-        var selector = tag + (cls ? '.' + cls : '');
-        var key = __stableKeyOf(tag, role, selector, (el.textContent || '').trim().slice(0, 24));
-        return key === expectedKey;
-      }
+      // stableKey 哈希常量 —— 唯一数据源是 Kotlin 的 DomJsonParser；dom-extract.js 只读取。
+      var AKE_FNV_PRIME = ${DomJsonParser.FNV_PRIME};
+      var AKE_FNV_OFFSET_A = ${DomJsonParser.FNV_OFFSET_A};
+      var AKE_FNV_OFFSET_B = ${DomJsonParser.FNV_OFFSET_B};
+      var AKE_STABLE_KEY_LEN = ${DomJsonParser.STABLE_KEY_LEN};
     """.trimIndent()
 }
