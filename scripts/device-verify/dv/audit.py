@@ -11,8 +11,14 @@
   SELF-5  一条必然为真的断言                         ⇒ 必须 PASS（证明它也会说好）
   SELF-6  FAIL 但不带证据的断言                      ⇒ 必须 ERROR（无证据的 FAIL 无法排查）
   SELF-7  环境预检在 adb 缺失时必须把缺项列出来      ⇒ 必须列出 ≥1 条
+  SELF-8  M10 新增的三条静态判据各自自证            ⇒ 必须 PASS（8 / 8b / 8c）
+  SELF-9  把源码根指到不存在的地方跑同一批判据       ⇒ 必须 FAIL（不许静默变绿）
 
 任何一条不符合预期 ⇒ 自检整体失败 ⇒ 退出码非 0 ⇒ **不要拿这个脚本的结论去放行**。
+
+★ SELF-8/9 的存在理由：「多加了判据」不等于「多了一层守护」。M10 那三条新判据读的是
+  **仓库源码**，一旦抽取器悄悄退化（抽到空表、读到别处），它完全可能一路绿着却什么都没看。
+  所以它们必须当场自证：正常仓库下各自 PASS，源码不在时必须 FAIL。
 """
 
 from __future__ import annotations
@@ -151,5 +157,47 @@ def run_selftest(cfg, adb: Any = None, env: Any = None) -> Tuple[bool, List[Dict
     finally:
         cfg.adb_bin, cfg.serial = saved
 
+    # ── SELF-8 / SELF-9：M10 新增静态判据必须自己站得住
+    _check_browserfix(checks, cfg)
+
     all_ok = all(c["ok"] for c in checks)
     return all_ok, checks, not_run
+
+
+def _check_browserfix(checks: List[Dict[str, Any]], cfg: Any) -> None:
+    """
+    SELF-8 / SELF-9 —— M10 新增静态判据的自证。
+
+    它们从**仓库源码**里抽取出判据（畸形向量表 / 内置黑名单 / 注入自检片段）。
+    抽取器退化时那种失效是最隐蔽的：抽到空表 ⇒ 循环零次 ⇒ 断言全绿 ⇒ 守护为零。
+    所以这里两条腿一起走：
+
+      · SELF-8 家族：在真实工程根上，三条判据各自必须 PASS（并交代抽到了多少条）；
+      · SELF-9：把源码根指到一个不存在的地方，三条**必须**都判 False ——
+        抽不到源码时静默变绿，等于「ci 上的守护一条都没跑，报告却写着 PASS」。
+    """
+    from . import browserfix as BF
+
+    for cid, key, desc in (
+        ("SELF-8", "vectors", "normalise 镜像复现仓库权威向量表的每一条答案"),
+        ("SELF-8b", "blacklist", "黑名单对 PASTEBIN.com 类写法硬拒，且不误伤无关域名"),
+        ("SELF-8c", "selfcheck", "JsBootstrap 自检仍在校测 __stableKeyOf ⇒ 16 位 hex"),
+    ):
+        try:
+            ok, detail = BF.run_all(cfg.project_dir).get(key, (False, f"{key} 没跑起来"))
+        except Exception as e:  # noqa: BLE001
+            ok, detail = False, f"{type(e).__name__}: {e}"
+        checks.append({
+            "id": cid, "expected": PASS, "actual": PASS if ok else FAIL, "ok": bool(ok),
+            "detail": f"{desc} —— {detail}",
+        })
+
+    # SELF-9：源码都不在的仓库 ⇒ 三条判据必须**响**
+    broken = BF.run_all(os.path.join(NONEXISTENT_FILE, "not-even-a-dir"))
+    all_loud = broken and all(not ok for (ok, _detail) in broken.values())
+    checks.append({
+        "id": "SELF-9", "expected": "三条判据全部判 False（不许静默变绿）",
+        "actual": str({k: ok for k, (ok, _d) in broken.items()}),
+        "ok": bool(all_loud),
+        "detail": "抽不到源码时必须 FAIL —— 「guard 永远不响」是最隐蔽的失效方式",
+    })

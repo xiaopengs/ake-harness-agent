@@ -12,6 +12,7 @@ import com.ake.core.ports.AgentProfileStorePort
 import com.ake.core.ports.AgentProfileSummary
 import com.ake.core.ports.AgentTemplate
 import com.ake.core.ports.AppendMessage
+import com.ake.core.ports.BatteryState
 import com.ake.core.ports.CapabilityGrantPort
 import com.ake.core.ports.CapabilityKind
 import com.ake.core.ports.CapabilityRef
@@ -22,21 +23,33 @@ import com.ake.core.ports.ChatSessionStorePort
 import com.ake.core.ports.ChatSessionSummary
 import com.ake.core.ports.ChatTerminalReason
 import com.ake.core.ports.ChatTurnRequest
+import com.ake.core.ports.DeviceHealthPort
+import com.ake.core.ports.LocalSettings
+import com.ake.core.ports.LoopBudgetFacts
+import com.ake.core.ports.LoopBudgetPort
 import com.ake.core.ports.LoopMode
+import com.ake.core.ports.MemoryTier
 import com.ake.core.ports.MessageKind
 import com.ake.core.ports.MessageRole
 import com.ake.core.ports.MessageStatus
 import com.ake.core.ports.ProfileOrigin
 import com.ake.core.ports.ProfileOverrides
+import com.ake.core.ports.SettingsStorePort
 import com.ake.core.ports.SkillCostClass
 import com.ake.core.ports.SkillConfirmPolicy
 import com.ake.core.ports.SkillSpec
+import com.ake.core.ports.SocProfile
 import com.ake.core.ports.TemplateStorePort
 import com.ake.core.ports.TemplateTrust
+import com.ake.core.ports.ThermalState
 import com.ake.core.ports.ToolPermissionStorePort
 import com.ake.core.ports.TrustScanVerdict
 import com.ake.core.ports.TrustTier
+import com.ake.core.ports.UsageTotals
 import com.ake.core.ports.ActionRiskPort
+import com.ake.ui.spi.PrivacyPort
+import com.ake.ui.spi.StorageUsage
+import com.ake.ui.spi.WipeReport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.Channel
@@ -286,6 +299,90 @@ public object NoopPermissions : ToolPermissionStorePort {
     override suspend fun upsertDiscovered(tools: List<ToolSpec>): Unit = Unit
     override fun catalog(): Flow<List<ToolSpec>> = emptyFlow()
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 设置页（SettingsViewModel）
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 记账式 `SettingsStorePort`。
+ *
+ * ★ `updates` 记的是**每次写入的参数**，不是「最后剩下的值」：白名单那类用例要
+ *   断言的是「这一次到底写进去了什么」，只看终态区分不出「写了一次」和「写了两次」。
+ */
+public class FakeSettingsStore(
+    initial: LocalSettings = LocalSettings(),
+) : SettingsStorePort {
+
+    public val updates: MutableList<LocalSettings> = mutableListOf()
+
+    private val state = MutableStateFlow(initial)
+
+    override fun values(): Flow<LocalSettings> = state
+
+    override suspend fun update(v: LocalSettings) {
+        updates += v
+        state.value = v
+    }
+
+    override suspend fun clearAll() {
+        updates += LocalSettings()
+        state.value = LocalSettings()
+    }
+}
+
+/**
+ * 什么都不做的 `PrivacyPort`。
+ *
+ * 存储占用一律给 0 而不是编几个"看起来合理"的数字 —— 假数字会让「用占用数算百分比」
+ * 这类断言变成在断言 fake 自己。
+ */
+public object NoopPrivacy : PrivacyPort {
+    override suspend fun usage(): StorageUsage = StorageUsage(0L, 0L, 0L, 0L, 0L, 0L)
+
+    override suspend fun wipe(deleteModelFiles: Boolean): WipeReport =
+        WipeReport(
+            keystoreEntriesDeleted = 0,
+            databasesDeleted = 0,
+            webViewCleared = true,
+            modelFilesDeleted = false,
+            failures = emptyList(),
+        )
+
+    override suspend fun disconnectTools(): Unit = Unit
+}
+
+public class FixedDeviceHealth(
+    private val tier: MemoryTier = MemoryTier.MID,
+) : DeviceHealthPort {
+    override fun memoryTier(): MemoryTier = tier
+    override fun thermal(): Flow<ThermalState> = flowOf(ThermalState.NOMINAL)
+    override fun battery(): Flow<BatteryState> = flowOf(BatteryState.unknown())
+    override fun socProfile(): SocProfile = SocProfile.unknown()
+}
+
+/** 预算只读查询给定值 —— 设置页只把它显示成「只读」，不参与任何判断。 */
+public class FixedBudgets(
+    private val facts: LoopBudgetFacts = budgetFacts(),
+) : LoopBudgetPort {
+    override fun forTier(tier: MemoryTier): LoopBudgetFacts = facts
+    override fun remainingPct(tier: MemoryTier, used: UsageTotals): Int = 100
+}
+
+public fun budgetFacts(maxSteps: Int = 12): LoopBudgetFacts = LoopBudgetFacts(
+    memoryTier = "MID",
+    maxSteps = maxSteps,
+    maxWallClockMs = 60_000L,
+    perStepMs = 5_000L,
+    decodeMs = 1_500L,
+    actionMs = 2_000L,
+    maxPrefillTokens = 8_192L,
+    maxDecodeTokens = 1_024L,
+    currentTopK = 8,
+    workingWindowTokens = 32_768,
+    outputReserveTokens = 1_024,
+    usablePromptTokens = 31_744,
+)
 
 // ═════════════════════════════════════════════════════════════════════════════
 // 领域对象构造糖

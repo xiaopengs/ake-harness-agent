@@ -92,15 +92,26 @@ class InjectionIsolator(
         var maxEscalation = Escalation.NONE
         var hits = 0
         for (e in elements) {
+            // ★ 每个字段都按 `UiElement.MAX_TEXT_LEN` 截断 —— 与 `PocketDomSerializer` 同一口径。
+            //
+            //   原实现直接 `append(e.text)` / `"$k=$v"`，**没有任何长度上限**：
+            //   `PocketDomSerializer` 的「行式、可预测：每行字数可控 ⇒ 预算控制才可能精确」
+            //   这条不变量在这条路径上根本不成立，于是 `SegmentCaps.topKFor` 的
+            //   「每候选 token 成本」在这里是一个**没有上界**的量。
+            //   （`:browser` 的 `DomJsonParser` 今天已经把 text 与 attrs 截到 48，
+            //    所以对真实数据这是一次 no-op；它堵的是「换一个 UiElement 生产者就失控」。
+            //    顺带把同样没有上限的 `role` 一起截了 —— `role` 也是页面可控的字符串。）
             val raw = buildString {
                 append('[').append(e.id).append("] ")
-                append(e.tag)
-                e.role?.let { append("[role=").append(it).append(']') }
+                append(e.tag.take(UiElement.MAX_TEXT_LEN))
+                e.role?.let { append("[role=").append(it.take(UiElement.MAX_TEXT_LEN)).append(']') }
                 append(' ')
-                append(e.text)
+                append(e.text.take(UiElement.MAX_TEXT_LEN))
                 if (e.attrs.isNotEmpty()) {
                     append(' ')
-                    append(e.attrs.entries.joinToString(" ") { (k, v) -> "$k=$v" })
+                    append(e.attrs.entries.joinToString(" ") { (k, v) ->
+                        "${k.take(UiElement.MAX_TEXT_LEN)}=${v.take(UiElement.MAX_TEXT_LEN)}"
+                    })
                 }
                 append(" ::").append(supportedActionsOf(e))
             }

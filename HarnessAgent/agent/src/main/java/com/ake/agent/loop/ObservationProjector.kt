@@ -70,13 +70,15 @@ object ObservationProjector {
         )
     }
 
-    /** 与 `:agent:context/UrlSanitizer.hostOf` 同口径（小写、去 www.、去端口、去 userinfo）。 */
-    fun hostOf(url: String): String {
-        val s = url.substringAfter("://", url)
-        return s.substringBefore('/').substringBefore('?').substringBefore('#')
-            .substringAfter('@').substringBefore(':')
-            .lowercase().removePrefix("www.")
-    }
+    /**
+     * 与 `:agent:context/UrlSanitizer.hostOf`、`core:common/Url.host` 同口径
+     * （小写、去 www.、去端口、去 userinfo、去尾点、IDN 不塌成空串）。
+     *
+     * ★ 实现**不在本文件** —— 转发到 [com.ake.core.common.Hosts.normalise]（全仓的公共一份）。
+     *   这里曾经有一份自己的管道，漏掉「去尾点」⇒ `pastebin.com.` 落库后
+     *   与 `pastebin.com` 在「按 host 精确等值查询」下是两行 ⇒ 域名策略与保留策略都漏行。
+     */
+    fun hostOf(url: String): String = com.ake.core.common.Hosts.normalise(url)
 
     /**
      * ★ 页面标题脱敏（R0）。**`titleRedacted` 这一列必须真的脱敏过。**

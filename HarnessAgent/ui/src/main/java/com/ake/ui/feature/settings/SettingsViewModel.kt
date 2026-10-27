@@ -2,6 +2,7 @@ package com.ake.ui.feature.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ake.core.common.Hosts
 import com.ake.core.ports.DeviceHealthPort
 import com.ake.core.ports.LocalSettings
 import com.ake.core.ports.LoopBudgetPort
@@ -124,7 +125,12 @@ public class SettingsViewModel @Inject constructor(
         val host = normalizeHost(raw)
         val cur = local.value.allowHosts
         if (host.isBlank() || host in cur) {
-            _ui.update { it.copy(hostDraft = "", message = if (host.isBlank()) "域名不合法" else "已经在名单里了") }
+            _ui.update {
+                it.copy(
+                    hostDraft = "",
+                    message = if (host.isBlank()) INVALID_HOST_MESSAGE else "已经在名单里了",
+                )
+            }
             return
         }
         viewModelScope.launch {
@@ -139,13 +145,55 @@ public class SettingsViewModel @Inject constructor(
         }
     }
 
-    /** 与 `core/common/Url.host` 同口径：小写、去 `www.`、去端口。 */
-    public fun normalizeHost(raw: String): String =
-        raw.substringAfter("://")
-            .substringBefore('/').substringBefore('?')
-            .substringAfter('@').substringBefore(':')
-            .lowercase().removePrefix("www.")
-            .trim()
+    /**
+     * 录入侧的 host 归一化 —— **转发**给 [Hosts.normalise]，不在这里再实现一份。
+     *
+     * ## 为什么必须是转发而不是"同口径的等价实现"
+     *
+     * 白名单里写进去的那个字符串，就是 `DomainPolicy` 匹配时用的那个字符串
+     * （`host == it || host.endsWith(".$it")`，精确等值）。于是录入侧与判定侧只要差一步 ——
+     * 少小写、少去尾点 —— `PASTEBIN.com` / `pastebin.com.` 就能从黑名单硬拒里绕出去。
+     * 全仓曾经有 5 份不等价的实现，病根正是"各自实现 + 等价断言"：那等于要求 5 个文件
+     * 永远同步，而它们已经证明了同步不了。所以这里只做转发。
+     *
+     * ## 那为什么裸域名还要兜一层
+     *
+     * [Hosts.normalise] 只认「字母开头 + `://`」，裸域名一律判成"没有 host" ⇒ 空串。
+     * 这在**判定侧**是对的（保守分支），但设置页输入框的 placeholder 写的就是
+     * `example.com`，照搬就会把用户最正常的输入拒掉。所以这里对"确实只填了一个域名"
+     * 的输入**补上缺失的协议**，再走同一条管道 —— 补的是协议，不是重算一遍 host。
+     *
+     * ★ 兜底只认裸域名：`example.com/list` 的首段是 path、`about:blank` 是 opaque，
+     *   它们都没有 host，补协议等于凭空造出一个 host —— 那正是会让黑名单失效的那类 bug。
+     *
+     * @return 归一化后的裸域名；判不出 host 时返回空串（调用方据此提示用户，不崩、不静默接受）。
+     */
+    public fun normalizeHost(raw: String): String {
+        val s = raw.trim()
+        val hierarchical = Hosts.normalise(s)
+        if (hierarchical.isNotEmpty()) return hierarchical
+        if (!BARE_HOST.matches(s)) return ""
+        return Hosts.normalise("$ASSUMED_SCHEME$s")
+    }
+
+    private companion object {
+
+        /** 补在裸域名前面的协议。只用于喂给 [Hosts.normalise]，不参与任何判定。 */
+        const val ASSUMED_SCHEME: String = "https://"
+
+        /**
+         * 「用户只填了一个域名」的形状：不含 path / query / fragment / userinfo，
+         * 端口只能是纯数字。IPv6 必须带方括号 —— 裸写 `::1` 不是 URL 的 host 段。
+         *
+         * ★ 这是**录入形状的判别**，不是归一化：小写 / `www.` / 尾点 / 端口 / userinfo
+         *   全交给 [Hosts.normalise]，这里一个字符都不重算。
+         */
+        val BARE_HOST: Regex = Regex("""^(?:\[[0-9A-Fa-f:.]+\]|[^\s/?#@:]+)(?::\d+)?$""")
+
+        /** 提示文案带例子：用户被拒时最需要知道的是"该写成什么样"，不是"你错了"。 */
+        const val INVALID_HOST_MESSAGE: String =
+            "域名不合法：请填 example.com，或带协议写成 https://example.com"
+    }
 
     // ── 最大步数（真生效：下发到 `TaskSpec.maxSteps`） ──
 

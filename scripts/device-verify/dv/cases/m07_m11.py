@@ -19,6 +19,7 @@ import time
 import urllib.request
 from typing import Dict, List, Optional, Tuple
 
+from .. import browserfix as BF
 from .. import helpers as H
 from ..ctx import Ctx, cold_start
 from ..model import Assertion, Case, Skip
@@ -234,6 +235,111 @@ def m09(ctx: Ctx) -> List[Assertion]:
 
 
 # ─────────────────────────────────────────────────────── M10
+#
+# ★ `PageScriptHost` 打出来的失败日志（见 browser/JsBootstrap.kt）——
+#   「注入自检完整」这件事在 App 侧**只在失败时留痕**，所以 M10 只能据此取反。
+#   为免「取反」变成空转，`browserfix.selfcheck_contract()` 会同时盯住那段自检
+#   确实还验着 `__stableKeyOf` ⇒ 16 位 hex。
+PAGE_SCRIPT_HOST_FAIL = (
+    r"JS 运行时注入不完整|注入 JS 运行时脚本时抛异常|为空 —— DOM 抽取脚本缺失"
+)
+
+
+def _bootstrap_fix_assertions(ctx: Ctx, lc, stat) -> List[Assertion]:
+    """① 注入自检通过（缺件清单为空） ② `__stableKeyOf` 在真 WebView 上算出 16 位 hex。"""
+    failures = lc.grep(PAGE_SCRIPT_HOST_FAIL, tag="PageScriptHost")
+    cmd = ("adb logcat -v time -d | grep PageScriptHost；"
+           "python: dv/browserfix.selfcheck_contract()")
+    out = lc.excerpt(20, tag="PageScriptHost") or "(本次窗口内没有任何 PageScriptHost 日志)"
+
+    ok_selfcheck, why_selfcheck = stat.get("selfcheck", (False, "静态审计没跑起来"))
+
+    return [
+        ctx.assert_true(
+            "JsBootstrap 注入自检在真机上通过（缺失的全局名清单为空）",
+            not failures,
+            "观测窗口内没有 PageScriptHost 的缺件 / asset 缺失 / 注入异常日志 ⇒ AKE_MISSING 为空",
+            f"{len(failures)} 条失败日志",
+            cmd=cmd, out=out,
+            calibrated=False,
+            note="【形态】`:browser` 只在**失败**时留痕，成功路径一行不打 —— 所以本条是取反判据。"
+                 "它成立的前提有三：(a) 前面几条已经证明目标和抽取真的发生了（⇒ 注入跑过）；"
+                 "(b) `dumpsys`/crash 那条证明没有提前崩溃；(c) 下面那条证明自检段还在。"
+                 "【待真机校准】若真机上 minLevel 把 E 级日志挡掉，本条会假绿 —— "
+                 "届时必须给 PageScriptHost 加一条成功日志，再改成正向判据。",
+        ),
+        ctx.assert_true(
+            "`__stableKeyOf` 在真 WebView 上真的算出 16 位 hex",
+            ok_selfcheck and not failures,
+            "① 自检段在页面上下文里用 /^[0-9a-f]{16}$/ 校验 __stableKeyOf；"
+            "② 上面那条缺件清单为空 ⇒ 真引擎通过了这次校验",
+            f"静态={why_selfcheck}；真机={len(failures)} 条缺件日志",
+            cmd=cmd, out=f"[静态] {why_selfcheck}\n[真机] {out}",
+            calibrated=False,
+            note="★ 这就是「真引擎验一遍」：`ensureReady()` 返回 true 之前，`JsBootstrap` 的"
+                 "自检段已经在**设备上的 WebView 里**跑过 `__stableKeyOf('a','','','')` 并正则校验。"
+                 "常量没注进去 / 远端替换了 asset / 注入顺序错了时它算出 NaN 或短 hex，"
+                 "缺件清单会带上 `__stableKeyOf` ⇒ 上面那条立刻变红。"
+                 "node 侧的同源码校验在 `browser/StableKeyContractTest`，两边是互补的。"
+                 "【待真机校准】若将来需要脱离 App 自检独立求值，得给 App 加一个调试求值入口 —— "
+                 "那是 `:browser` 业务逻辑改动，不在本次范围内。",
+        ),
+    ]
+
+
+def _host_and_blacklist_assertions(ctx: Ctx, rows, pol_rows, stat) -> List[Assertion]:
+    """③ 黑名单对 `PASTEBIN.com` 这类写法仍硬拒 ④ 真机落库的 host 已归一化。"""
+    a: List[Assertion] = []
+
+    ok_bl, why_bl = stat.get("blacklist", (False, "静态审计没跑起来"))
+    proj = ctx.cfg.project_dir
+    a.append(ctx.assert_true(
+        "黑名单对 `PASTEBIN.com` 这类写法仍然硬拒（不退化成「需确认」）",
+        ok_bl,
+        "7 种敌意写法（大写 / 尾点 / www+尾点 / userinfo+端口 / query / fragment）"
+        "归一化后必须全部命中 `DomainPolicy` 内置黑名单",
+        why_bl,
+        cmd=f"python: dv/browserfix.check_blacklist_hard_denies({proj})；"
+            "黑名单清单与等式均从 DomainPolicy.kt / core:common 机械抽取",
+        out=why_bl,
+        note="★ python 侧那个 `normalise` 不是新立一份口径 —— 它被钉在从仓库读出来的"
+             "`HostsTest.HOST_VECTORS`（30 条畸形输入）上，由 selftest 的 SELF-8 逐条对拍。"
+             "少 lowercase 或去尾点一步，上面这些敌意写法就会漏出硬拒。",
+    ))
+
+    bl, why_list = BF.builtin_blacklist(proj) if proj else (set(), "")
+    # 真机侧：命中黑名单的 target_host 必须是 DENIED，不许是 REQUIRES_CONFIRM / ALLOW
+    soft = [(d, h) for (d, h) in pol_rows if h and BF.blacklist_hit(h, bl) and d != "DENIED"]
+    pol_sql = ("SELECT decision, COALESCE(target_host,'') FROM policy_decision "
+               "WHERE created_at >= t0")
+    a.append(ctx.assert_true(
+        "真机上命中黑名单的目标 host 是 DENIED（不是「需确认」）",
+        not soft,
+        "policy_decision 里命中内置黑名单的每一行 decision == DENIED",
+        f"软化 {len(soft)} 行: {soft[:5]}；命中清单 {len(bl)} 条" if bl else f"（黑名单清单为空：{why_list}）",
+        cmd=pol_sql, out=str(pol_rows)[:1200],
+        calibrated=False,
+        note="【形态】本轮的 goal 若没碰黑名单域名，这里会是零行 ⇒ 空集通过属正常；"
+             "它拦的是「万一撞上了却只给了确认」。主判据是上面那条静态的。",
+    ))
+
+    seen = sorted({h for h in [r[0] for r in rows] if h} | {h for (_d, h) in pol_rows if h})
+    weird = [h for h in seen if not BF.is_normalised_host(h)]
+    a.append(ctx.assert_true(
+        "真机落库的 host 已经是归一化形态（小写 / 无尾点 / 无端口 / 无 `www.` / 无 userinfo）",
+        not weird,
+        "observation.host 与 policy_decision.target_host 全部已归一化",
+        f"落库 host {len(seen)} 个（样本 {seen[:8]}）；未归一化的 {len(weird)} 个: {weird[:8]}",
+        cmd=f"SELECT host FROM observation WHERE created_at >= t0；{pol_sql}",
+        out=f"observation.host={[r[0] for r in rows][:12]}\npolicy.target_host={[h for (_d, h) in pol_rows][:12]}",
+        calibrated=False,
+        note="★ 这条是「host 不 lowercase」那个 bug 的真机取证点：修复前 `PASTEBIN.com` 会以"
+             "**大写**原样落进 `observation.host`，而 `DomainPolicy` 是精确等值匹配 ⇒ 硬拒变放行。"
+             "【待真机校准】只看形态不看来源：若将来业务上确实需要原样保存某个非归一化值，届时要换别的证据。",
+    ))
+    return a
+
+
 def m10(ctx: Ctx) -> List[Assertion]:
     """M10 · WebView DOM 抽取成功 —— 本项目的咽喉。
 
@@ -243,6 +349,12 @@ def m10(ctx: Ctx) -> List[Assertion]:
       · candidate_count > 0  ← 抽取出的候选元素数
       · raw_node_count > 0 且 serialized_chars > 0
       · logcat 真的出现 DomExtractBridge（证明 addJavascriptInterface 的回调来了）
+
+    ★ 2026-10 追加：「这批 bug 修了」而不是「有没有结果」（原先只问后半句）。
+      修之前，三段 JS 从未注入 / XHR 计数漂负 / stableKey 两端不等价 / host 不 lowercase
+      会让 M10 一跑就挂；修之后若只看 rows>0，则「修复失效」与「目标站今天没数据」不可分辨。
+      所以追加四条：**注入自检缺失全局名为空**、**`__stableKeyOf` 在真引擎算出 16 位 hex**、
+      **黑名单对 `PASTEBIN.com` 仍硬拒**、**落库 host 已归一化**。
     """
     lc = ctx.logcat()
     lc.clear()
@@ -306,6 +418,20 @@ def m10(ctx: Ctx) -> List[Assertion]:
              "正常成功路径可能**一行都没有**。若真机确认如此，本条应改为观察 observation 表"
              "（那时本条是假 FAIL，请据 out 判断）",
     ))
+
+    # ★ 新增：`:browser` 那批修复在真机上到底生效没有（`dv/browserfix.py` 提供静态那一半）
+    stat = BF.run_all(ctx.cfg.project_dir)
+    pol_rows: List[Tuple[str, str]] = []
+    try:
+        pol_rows = ctx.db().query(
+            pr.local_db,
+            "SELECT decision, COALESCE(target_host,'') FROM policy_decision "
+            "WHERE created_at >= ? ORDER BY created_at DESC LIMIT 20", (t0,))
+    except Exception as e:  # noqa: BLE001
+        ctx.notes.append(f"policy_decision 查询失败: {e}")
+    a += _bootstrap_fix_assertions(ctx, lc, stat)
+    a += _host_and_blacklist_assertions(ctx, rows, pol_rows, stat)
+
     a.append(H.no_crash_assertion(ctx, lc))
     return a
 
@@ -393,7 +519,12 @@ CASES = [
          doc="docs/04-release-gate.md §5.2 阶段二",
          calibration=["candidate_count 的语义（是否=抽取元素数）未实测",
                       "DomExtractBridge 成功路径可能不打日志 ⇒ 该条可能假 FAIL",
-                      "payload 是加密区 ⇒ 「包含预期目标元素」退化为 host + candidate_count"]),
+                      "payload 是加密区 ⇒ 「包含预期目标元素」退化为 host + candidate_count",
+                      "★ 新增 4 条（修复生效）判据首次真机验证：注入自检 / stableKey 16 位 hex "
+                      "两条是**取反**判据（成功不打日志），若 release 的 minLevel 挡掉 E 级日志会假绿 —— "
+                      "届时给 PageScriptHost 补一条成功日志，或改读 policy_decision 的成功侧",
+                      "黑名单 / host 归一化两条的主判据在静态侧（dv/browserfix.py）；"
+                      "真机侧 policy_decision 出现 0 行也可能只是本轮 goal 没碰黑名单域名"]),
     Case(id="M11", title="C1 端到端跑通（release 包）", phase=PHASE, fn=m11,
          needs=["adb", "device", "install", "runas", "releaseapk", "model", "modelrun",
                 "goal", "targeturl", "expectedrecords"],

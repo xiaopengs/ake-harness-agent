@@ -10,9 +10,15 @@ import org.junit.Test
 // ===========================================================================
 // P2 · 页面稳定检测
 //
-// 判据只有两条：
+// 判据三条：
 //   ① 稳定信号到达后就绪（而且必须**真的观察到了一段静默**，不是第一次 probe 就放行）
 //   ② 信号永不到达时**必须有超时**，不能永久挂起
+//   ③ ★ 网络 pending 只是**辅助信号**：它能延长等待，但**不能**成为放行的必要条件 ——
+//      否则一个永不结算的请求（长轮询 / 挂死 SSE / 被 CORS 拦掉的 fetch）就让 ② 形同虚设
+//      （「每次都等满超时」和「永久挂起」对用户是同一件事：App 卡住了）
+//
+// ③ 的判据是**「pending 还在不在动」**，不是「pending 是不是 0」：
+//   还在动 ⇒ 请求真的在跑 ⇒ 继续等；冻住了 ⇒ 它已经不可能再给 DOM 带来变化 ⇒ 判定放行。
 //
 // 怎么测时间：`android/os/TestSystemClock.kt` 把 `SystemClock.elapsedRealtime()`
 // 换成了测试推着走的时钟，所以 300 ms 的静默窗口不必真等 300 ms；
@@ -115,15 +121,90 @@ class StabilityDetectorTest {
     }
 
     @Test
-    fun networkInFlightBlocksSettling() {
+    fun networkStillMovingBlocksSettling() {
+        // ⚠ 原用例是 `pending` 恒为 3 ⇒ 期望「永不放行」。那正是 N-1 那条 bug 的**帮凶**：
+        //   把「挂死的请求」和「真的在跑的请求」当成同一件事，代价是真实页面永久挂起。
+        //
+        //   伪稳定防护的正确形态是看 pending **还在不在动**：这里 3↔2 交替，
+        //   说明请求真的在起落 ⇒ 数据可能还在路上 ⇒ 继续等。
+        var n = 0
         val settled = settle(
             timeoutMs = 400,
             quietWindowMs = 20,
-            lenientAfterPulses = 5,
-            evaluate = { android.os.SystemClock.advance(30); "0,3,complete,0,1000" },
+            lenientAfterPulses = 1_000_000,
+            evaluate = { n++; android.os.SystemClock.advance(30); "0,${3 - (n % 2)},complete,0,1000" },
         )
-        // 三个请求在飞 ⇒ 伪稳定（数据还没回来），必须继续等
         assertThat(settled).isFalse()
+    }
+
+    // ───────────────────────────────────── ★ N-1：永不结算的请求不能让等待永久挂起
+
+    @Test
+    fun aRequestThatNeverSettlesCannotHangTheWait() {
+        // ★ 本体：长轮询 / 挂死的 SSE / 被 CORS 拦掉的 fetch 让 `__akeNetworkPending` 恒为 1。
+        //   旧实现的两条出口都要求 `pending == 0` ⇒ 页面**永远**等不到稳定
+        //   ⇒ 用户看到「App 卡住了」，而它只是在等一个永远不会来的信号。
+        //
+        //   这里的出口必须是**判定**（网络信号已冻死），不是超时：
+        //   所以超时给到 10 秒、轮播兜底关掉，真返回 true 就一定是判定出来的。
+        val started = System.currentTimeMillis()
+        var calls = 0
+        val settled = settle(
+            timeoutMs = 10_000,
+            quietWindowMs = 60,
+            lenientAfterPulses = 1_000_000, // 关掉兜底，只留判定出口
+            evaluate = { calls++; android.os.SystemClock.advance(30); "7,1,complete,0,1000" },
+        )
+        val elapsed = System.currentTimeMillis() - started
+
+        assertThat(settled).isTrue()
+        assertWithMessage(
+            "必须**判定**返回，不是等满 10s 超时 ——" +
+                "把「永久挂起」换成「每次都等满超时」对用户是同一件事",
+        ).that(elapsed).isLessThan(1_000)
+        assertWithMessage("也不能第二轮就放行：静默窗口与网络冻死都真的等过了")
+            .that(calls).isGreaterThan(3)
+    }
+
+    @Test
+    fun aDriftedNegativeNetworkCounterDoesNotBlockSettling() {
+        // 计数漂成负数（历史上 XHR 双 decrement 干过）⇒ `pending == 0` 永远不成立。
+        // 但既然它已经失真，就不该再拿来否决放行。
+        val settled = settle(
+            timeoutMs = 2_000,
+            quietWindowMs = 60,
+            lenientAfterPulses = 1_000_000,
+            evaluate = { android.os.SystemClock.advance(30); "7,-1,complete,0,1000" },
+        )
+        assertThat(settled).isTrue()
+    }
+
+    @Test
+    fun aRequestThatReallyFeedsTheDomIsStillWaitedFor() {
+        // ★ 反向验证：判定出口不是「一律放行」。请求真在喂 DOM ⇒ mutation 一直在动
+        //   ⇒ 静默窗口被反复重置 ⇒ 不放行。
+        var n = 0
+        val settled = settle(
+            timeoutMs = 400,
+            quietWindowMs = 200,
+            lenientAfterPulses = 1_000_000,
+            evaluate = { n += 2; android.os.SystemClock.advance(30); "$n,1,complete,0,1000" },
+        )
+        assertThat(settled).isFalse()
+    }
+
+    @Test
+    fun theCarouselFallbackNoLongerRequiresAnIdleNetwork() {
+        // 轮播图/无限滚动页常常同时挂着一个长轮询；兜底出口若还要求 pending==0，
+        // 那这条兜底在真实页面上永远不生效。
+        var n = 0
+        val settled = settle(
+            timeoutMs = 3_000,
+            quietWindowMs = 60,
+            lenientAfterPulses = 4,
+            evaluate = { n++; android.os.SystemClock.advance(20); "$n,1,complete,0,1000" },
+        )
+        assertThat(settled).isTrue()
     }
 
     @Test

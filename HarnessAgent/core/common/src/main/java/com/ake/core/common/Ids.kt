@@ -39,15 +39,21 @@ public value class SessionId(public val value: String) {
  */
 @JvmInline
 public value class Url(public val value: String) {
-    /** 裸域名，小写、去 `www.`。与 `agent` 侧 `UrlSanitizer.hostOf` 口径一致。 */
-    public val host: String
-        get() {
-            val schemeStripped = value.substringAfter("://", value)
-            val authority = schemeStripped.substringBefore('/').substringBefore('?').substringBefore('#')
-            return authority.substringAfter('@').substringBefore(':')
-                .lowercase()
-                .removePrefix("www.")
-        }
+    /**
+     * 裸域名：小写、去 `www.`、去端口、去 userinfo、去尾点、IDN 不塌成空串。
+     *
+     * ★ 实现**不在本文件** —— 转发到 [Hosts.normalise]（全仓的公共一份）。
+     *   这里曾经有一份自己的字符串管道，它漏掉了「去尾点」，于是 `pastebin.com.`
+     *   在 `DomainPolicy` 的精确等值匹配下既不等于也不 endsWith `pastebin.com`
+     *   ⇒ **黑名单硬拒被绕过**，退化成「需确认」。
+     *   「同一个类里自己再写一遍」正是这个 bug 能活下来的原因 —— 现在它不存在了。
+     *
+     * 与 `:agent` 的 `ObservationProjector.hostOf` / `UrlSanitizer.hostOf`、
+     * `:browser` 的 `com.ake.browser.Hosts.normalise` 逐字等价（有测试对拍）。
+     *
+     * 相对 URL / opaque URL **没有 host** ⇒ 空串（不会「发明」出一个域）。
+     */
+    public val host: String get() = Hosts.normalise(value)
 
     public val isHttps: Boolean get() = value.startsWith("https://", ignoreCase = true)
 }

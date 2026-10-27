@@ -4,6 +4,7 @@ import com.ake.core.contract.DomSignal
 import com.ake.core.contract.PageState
 import com.ake.core.contract.UiElement
 import com.google.common.truth.Truth.assertThat
+import com.google.common.truth.Truth.assertWithMessage
 import org.junit.Test
 
 // ===========================================================================
@@ -65,7 +66,10 @@ class DomBudgetTest {
         // 构造最坏情况：48 条候选，每条文本顶满 48 字、每个白名单属性顶满 48 字。
         // §5.2 的 12 KB 目标是写在文档里的，但 :browser 里没有任何一处按字符预算截断 ——
         //   `take(topK)` 限的是**条数**，`take(UiElement.MAX_TEXT_LEN)` 只限了 **text** 一个字段。
-        val attrs = ATTR_WHITELIST_ASSOCIATED_SIZE_TEST.associateWith { "a".repeat(48) }
+        //
+        // ★ 白名单是**机械抽取**的（`attrWhitelistFromJsAsset()`），不再是手抄：
+        //   手抄的那份停在 14 项，JS 里早就是 18 项 ⇒ 最坏体积被低估 9,216 字符。
+        val attrs = attrWhitelistFromJsAsset().associateWith { "a".repeat(48) }
         val parsed = DomJsonParser.parse(
             dom(
                 *Array(TOP_K) { candidate(text = "t".repeat(UiElement.MAX_TEXT_LEN), attrs = attrs) },
@@ -80,22 +84,70 @@ class DomBudgetTest {
         val expected = TOP_K * (UiElement.MAX_TEXT_LEN + attrs.size * 48)
         assertThat(payloadChars).isEqualTo(expected)
 
-        // ★ 结论要直说：48 条满配候选 = 34,560 字符，已经是 §5.2 目标的近 3 倍。
-        //   上下文预算是在 :agent 的 ContextAssembler 侧收口的，:browser 这一层不兜这个数。
+        // ★ 结论要直说：48 条满配候选 = **43,776** 字符（18 项白名单 × 48 字 + 48 字文本，
+        //   × 48 条），已经是 §5.2 目标的近 3.6 倍。
+        //   上下文预算是在 :agent 的 ContextAssembler 侧收口的，:browser 这一层不兜这个数，
+        //   但这个数必须是真值 —— `:agent` 的 `ContextBudget.topKFor` 里
+        //   「约 58 token/候选」就是按候选体积反推的，这里少算 ⇒ 那边 topK 给多了 ⇒ 爆上下文。
+        assertWithMessage(
+            "最坏候选体积真值：18 项白名单全命中 × 48 字 + 48 字文本，再 × 48 条。" +
+                "JS 改白名单后这个数会变，届时 :agent 的 58 token/候选 必须同步重估",
+        ).that(payloadChars).isEqualTo(WORST_CASE_PAYLOAD_CHARS)
         assertThat(payloadChars).isGreaterThan(DOCUMENTED_BUDGET_CHARS)
     }
 
     @Test
     fun attrCountIsUnboundedSoAttrsDominateThePayload() {
-        // attrs 的值被砍到 48，**但条目数没有上限**：白名单 14 项全命中时，
-        // 单个候选的属性体积是文本体积的 14 倍。
+        // attrs 的值被砍到 48，**但条目数没有上限**：白名单 18 项全命中时，
+        // 单个候选的属性体积是文本体积的 18 倍。
         val el = DomJsonParser.parse(
-            dom(candidate(text = "短文本", attrs = ATTR_WHITELIST_ASSOCIATED_SIZE_TEST.associateWith { "v".repeat(48) })),
+            dom(candidate(text = "短文本", attrs = attrWhitelistFromJsAsset().associateWith { "v".repeat(48) })),
             topK = 2,
         ).candidates.single()
 
-        assertThat(el.attrs).hasSize(ATTR_WHITELIST_ASSOCIATED_SIZE_TEST.size)
+        assertThat(el.attrs).hasSize(attrWhitelistFromJsAsset().size)
         assertThat(el.attrs.values.sumOf { it.length }).isGreaterThan(el.text.length)
+    }
+
+    // ── ②′ 白名单只允许有一份（在 JS 里）
+
+    @Test
+    fun attrWhitelistIsExtractedFromTheJsAsset_notCopiedIntoKotlin() {
+        // ★ 这条是「测试注释在说谎」的机械防线：以前这里写着
+        //   「与 dom-extract.js 的 ATTR_WHITELIST 逐字对齐」，实际是 14 项 vs 18 项。
+        //   注释担保不了任何事 —— 现在名单本身从 JS 里抽，且不允许 Kotlin 侧再留第二份。
+        val whitelist = attrWhitelistFromJsAsset()
+
+        assertWithMessage("抽出来的名单不能有重复（重复 ⇒ 抽取器把注释也吃进去了）")
+            .that(whitelist).containsNoDuplicates()
+        assertWithMessage("属性名应全部是小写字母/连字符形式")
+            .that(whitelist).containsNoneIn(whitelist.filter { !it.matches(Regex("""[a-z][a-z-]*""")) })
+
+        // 「抄了一份」的判据：某一行里同时出现 ≥4 个白名单属性名的字符串字面量。
+        // （单个 `"aria-label"` 是正常的用例入参，不是名单副本 —— 旧的那份是每行 5 个。）
+        val offenders = browserTestSources()
+            .filter { it.name != "DomFixture.kt" } // 抽取器本身住在 DomFixture.kt
+            .filter { f ->
+                f.readText().stripLineComments().lines().any { line ->
+                    whitelist.count { name -> line.contains("\"$name\"") } >= 4
+                }
+            }
+            .map { it.name }
+        assertWithMessage("Kotlin 侧不许再手抄一份属性白名单 —— 改从 dom-extract.js 抽")
+            .that(offenders).isEmpty()
+    }
+
+    @Test
+    fun whitelistSizeDrivesTheWorstCasePayload_soItIsPinnedToTheAgentBudget() {
+        // ★ 这根钉子的用途：白名单项数一旦变，最坏候选体积就变，
+        //   而 `:agent` 的 `SegmentCaps.topKFor` 用「58 token/候选」这个**写死的**标定值
+        //   反推 topK。:browser 改不了 :agent，但要让改动在 :browser 这里立刻响。
+        val whitelist = attrWhitelistFromJsAsset()
+        val perCandidate = UiElement.MAX_TEXT_LEN + whitelist.size * 48
+        assertWithMessage(
+            "白名单现在是 ${whitelist.size} 项 ⇒ 单候选最坏 ${perCandidate} 字符。" +
+                "若与 912 不符，:agent 的 ContextBudget.topKFor 的 58 token/候选 必须重估",
+        ).that(perCandidate).isEqualTo(912)
     }
 
     @Test
@@ -211,11 +263,12 @@ class DomBudgetTest {
         const val TOP_K = 48
         const val DOCUMENTED_BUDGET_CHARS = 12_000
 
-        /** 与 dom-extract.js 的 `ATTR_WHITELIST` 逐字对齐；JS 改白名单必须同步改这里。 */
-        val ATTR_WHITELIST_ASSOCIATED_SIZE_TEST: List<String> = listOf(
-            "aria-label", "aria-labelledby", "aria-describedby", "role", "placeholder",
-            "value", "href", "type", "name", "alt", "title", "id", "class",
-            "aria-current",
-        )
+        /**
+         * 最坏候选体积真值：**912 字符/候选 × 48 条 = 43,776**。
+         *
+         * 912 = 48（text）+ 18 × 48（白名单属性全命中）。18 这一项**不是**手抄的，
+         * 由 `attrWhitelistFromJsAsset()` 从 `dom-extract.js` 机械抽取后现算。
+         */
+        const val WORST_CASE_PAYLOAD_CHARS = 43_776
     }
 }

@@ -122,10 +122,19 @@ object UrlSanitizer {
         return base + "?" + kept.joinToString("&")
     }
 
-    /** 取裸域名小写化（对齐数据库 §7.4 host 归一化规则） */
-    fun hostOf(url: String): String {
-        val s = url.substringAfter("://", url)
-        val host = s.substringBefore('/').substringBefore(':').substringAfter('@')
-        return host.lowercase().removePrefix("www.")
-    }
+    /**
+     * 取裸域名小写化（对齐数据库 §7.4 host 归一化规则）。
+     *
+     * ★ 实现**不在本文件** —— 转发到 [com.ake.core.common.Hosts.normalise]（全仓的公共一份）。
+     *
+     *   原来那份有四处漏：
+     *     · **顺序错**：先 `substringBefore(':')` 再 `substringAfter('@')`。
+     *       `user:pw@host:8443` 的第一个 `:` 落在 **userinfo 里** ⇒ 先截 `:` 得到
+     *       `user`，再取 `@` 之后（找不到 `@` 时 `substringAfter` 原样返回）⇒ **产出 `user`**。
+     *       正确顺序是**先**按最后一个 `@` 去 userinfo、**再**去端口。
+     *     · **漏 `?` / `#`**：`https://host?x=1` 会把 `?x=1` 当成 host 的一部分。
+     *     · **漏去尾点**：`pastebin.com.` 不等于也不 endsWith `pastebin.com` ⇒ 绕过硬拒。
+     *     · **IPv6**：`https://[::1]:8080/a` 被 `substringBefore(':')` 砍成 `[`。
+     */
+    fun hostOf(url: String): String = com.ake.core.common.Hosts.normalise(url)
 }

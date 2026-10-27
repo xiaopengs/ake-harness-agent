@@ -117,15 +117,16 @@ public object DomJsonParser {
      * `pastebin.com` ⇒ 硬拒变「需确认」、白名单归类错、按 host 精确查询的清理/保留策略漏行。
      * 这正是 `DomainPolicy` 自己的 KDoc 点名的「攻击者绕过白名单的入口」。
      *
-     * 口径与 `core:common/Url.host`、`:agent` 的 `UrlSanitizer.hostOf` /
-     * `ObservationProjector.hostOf` **逐字一致**（小写、去 `www.`、去端口、去 userinfo）。
+     * 实现**只有一份**，在 `com.ake.core.common.Hosts.normalise`；
+     * `com.ake.browser.Hosts.normalise` 与这里的 `hostOf` 都只是它的转发入口。
+     * **全仓没有任何第二份管道** —— 这件事由 `HostNormalisationTest` 扫全仓 `src/main`
+     * 机械盯住（指标是「去 `www.` 前缀」那一步）：命中它的文件只允许剩 1 个，
+     * 其余登记在转发清单里。
+     *
+     * （历史注：这一轮之前仓里有 5 处归一化，`core:common` / `:agent` ×2 / `:ui` 那四处
+     * 各自漏掉不同步骤 —— 已在后续两轮全部收敛成转发。）
      */
-    public fun hostOf(url: String): String {
-        // `URI.host` 已经去掉了 userinfo（`user@`）与端口；相对 URL / `about:blank`
-        // 解析不出 host ⇒ null ⇒ 空串（与 `Url.host` 对相对 URL 的行为保持一致）。
-        val host = runCatching { java.net.URI(url).host }.getOrNull().orEmpty()
-        return host.lowercase().removePrefix("www.")
-    }
+    public fun hostOf(url: String): String = Hosts.normalise(url)
 
     // ────────────────────────────────────────────────────────────── candidates
 

@@ -19,8 +19,12 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * 所以判定顺序是：**先等静默，再看 readyState**，而不是反过来。
  *
- * 注入脚本对 XHR/fetch 做计数包装，把「有几个请求在飞」也纳入 `quiet` 判断 ——
+ * 注入脚本对 XHR/fetch 做计数包装，把「有几个请求在飞」也纳入判断 ——
  * 否则会遇到「mutation 暂时为 0 但数据还没回来」这种伪稳定。
+ *
+ * ⚠ 但它的角色是**辅助**：只用来「延长」等待，不作为放行的必要条件。
+ *   两条出口都要求 `pending == 0` 时，一个永不结算的请求就能让页面永远等不到稳定
+ *   （详见 [waitForPageSettled] 的 KDoc）。
  */
 public object StabilityScripts {
 
@@ -128,11 +132,42 @@ public data class StabilityProbe(
 }
 
 /**
- * 等待页面稳定。
+ * 等待页面**DOM 稳定**。
+ *
+ * ## 等待的语义（★ 这一条被重新定义过，别再退回旧口径）
+ *
+ * 要等的到底是「页面 DOM 不再变化」，**不是**「网络空闲」。
+ * 网络 pending 只是**辅助信号**：它唯一的用处是防止「mutation 暂时为 0 但数据还在路上」
+ * 这种伪稳定，所以它可以**延长**等待，但它不能成为放行的**必要条件**。
+ *
+ * 旧实现的两条出口都硬要求 `pending == 0`：
+ *
+ *   ① 主出口 `quiet = mutations 没动 && pending == 0`
+ *   ② 兜底出口 `pulses > N && readyComplete && pending == 0`
+ *
+ * ⇒ 页面上只要有一个**永不结算**的请求（长轮询 / 挂死的 SSE / 被 CORS 拦掉的 fetch），
+ *   `pending` 就永远归不了零 ⇒ 两条出口同时失效 ⇒ 页面**永远等不到稳定**。
+ *   用户看到的是「App 卡住了」，而它其实只是在等一个永远不会来的信号 ——
+ *   这正是本项目反复警告的静默失效：不崩、不报错、只让你干等。
+ *
+ * ## 真正的出口：**区分「还在等有意义的信号」与「信号已经不可能来了」**
+ *
+ * 判据不看 `pending` 的**绝对值**，看它**还在不在动**：
+ *
+ *   · `pending` 仍在变化 ⇒ 请求真的在跑（起新的 / 结算旧的）⇒ **继续等**
+ *   · `pending` 冻住不动且已冻够 [networkStallGraceMs]，同时 DOM 静默 + `readyState == complete`
+ *     ⇒ 那几个挂着的东西**已经不可能再给 DOM 带来任何变化**（否则 mutation 计数会动）
+ *     ⇒ **判定放行**
+ *   · `pending <= 0` ⇒ 网络侧无事；`pending < 0` 说明计数器已经失真，同样不能拿来挡住放行
+ *
+ * 于是「加个超时」不是这里的解法：那只是把「永久挂起」换成「每次都等满超时」，
+ * 用户感受到的仍然是「每次打开页面都要卡 N 秒」，而且真正该等的请求也被一起等死了。
  *
  * @param evaluate 执行 JS 并返回结果字符串的桥（内部只用 [StabilityScripts.PROBE]）。
- * @param quietWindowMs   连续静默多久算稳定。300 ms 是 §5.8 的推荐值。
- * @param lenientAfterPulses 页面「永远在动」的兜底：轮数超过它且网络空闲时放行，避免死等。
+ * @param quietWindowMs   连续 **DOM** 静默多久算稳定。300 ms 是 §5.8 的推荐值。
+ * @param lenientAfterPulses 页面「永远在动」的兜底（无限滚动 / 轮播图）：
+ *                            轮数超过它且文档已完成时放行；这条兜底同样**不再**要求 pending == 0。
+ * @param networkStallGraceMs pending 计数冻住多久算「信号已经不可能来了」。
  * @return true = 已稳定；false = 超时
  */
 public suspend fun waitForPageSettled(
@@ -141,9 +176,12 @@ public suspend fun waitForPageSettled(
     quietWindowMs: Long = 300L,
     pollIntervalMs: Long = 100L,
     lenientAfterPulses: Int = 40,
+    networkStallGraceMs: Long = 1_000L,
 ): Boolean {
     var lastMutations = -1L
     var stableSince = -1L
+    var lastPending: Int? = null
+    var pendingFrozenSince = -1L
     var pulses = 0
 
     // ★ 原实现在 lambda 里用 `return@withTimeoutOrNull true` 提前返回，
@@ -156,10 +194,23 @@ public suspend fun waitForPageSettled(
             val probe = StabilityProbe.parse(evaluate(StabilityScripts.PROBE))
             val now = android.os.SystemClock.elapsedRealtime()
 
-            val quiet = probe.mutations == lastMutations && probe.pendingRequests == 0
-            if (quiet) {
+            // ── 网络信号：辅助量，只看「还在不在动」，不看绝对值
+            if (lastPending == null || probe.pendingRequests != lastPending) {
+                lastPending = probe.pendingRequests
+                pendingFrozenSince = now
+            }
+            val networkClear: Boolean = when {
+                // 没有在飞的请求；计数漂成负数说明它已经失真，同样不该挡住放行
+                probe.pendingRequests <= 0 -> true
+                // 挂着但一直不动 ⇒ 它不会给 DOM 带来变化（带来了 mutation 计数就会动）
+                else -> now - pendingFrozenSince >= networkStallGraceMs
+            }
+
+            // ── 主判据：DOM 静默（网络只做「延长」，不做「否决」）
+            val domQuiet = probe.mutations == lastMutations
+            if (domQuiet) {
                 if (stableSince < 0) stableSince = now
-                if (now - stableSince >= quietWindowMs && probe.readyComplete) {
+                if (now - stableSince >= quietWindowMs && probe.readyComplete && networkClear) {
                     done = true
                     break
                 }
@@ -169,9 +220,10 @@ public suspend fun waitForPageSettled(
             lastMutations = probe.mutations
             pulses++
 
-            // 无限滚动/轮播图永远不会静默 ⇒ 退化为「文档已完成且网络空闲」
-            if (pulses > lenientAfterPulses && probe.readyComplete && probe.pendingRequests == 0) {
-                AkeLog.w("PageSettler", "page never settles (infinite scroll?); accepting network-idle state")
+            // ── 兜底：无限滚动 / 轮播图永远不会静默 ⇒ 只看文档完成
+            //   （这里同样不能要求 pending == 0：轮播页常常配着一个长轮询）
+            if (pulses > lenientAfterPulses && probe.readyComplete) {
+                AkeLog.w("PageSettler", "page never settles (infinite scroll?); accepting document-complete state")
                 done = true
                 break
             }

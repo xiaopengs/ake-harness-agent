@@ -75,15 +75,68 @@ data class SegmentCaps(
         SegmentId.OUTPUT_RESERVE -> 0
     }
 
-    /** §3.4 的 OBSERVATION 降级阶梯：Top-K 48 → 24 → 12 → 6 → 骨架 */
+    /**
+     * §3.4 的 OBSERVATION 降级阶梯：Top-K K → K/2 → 12 → 6 → 骨架
+     * （K = `observation / WORST_CASE_TOKENS_PER_CANDIDATE`，不再是写死的 48）。
+     */
     fun topKFor(level: Int): Int = when (level) {
-        0 -> (observation / 58).coerceIn(12, 72)   // 满配：约 58 token/候选
-        1 -> (observation / 58 / 2).coerceAtLeast(12)
-        2 -> 12
+        0 -> (observation / WORST_CASE_TOKENS_PER_CANDIDATE).coerceIn(MIN_TOP_K, MAX_TOP_K)
+        1 -> (observation / WORST_CASE_TOKENS_PER_CANDIDATE / 2).coerceAtLeast(MIN_TOP_K)
+        2 -> MIN_TOP_K
         else -> 6
     }
 
     companion object {
+
+        /**
+         * ★★ 单个候选进 prompt 的**最坏** token 成本 —— **110**（拉丁 / ASCII 内容）。
+         *
+         * 这个值**不是估的**，是量出来的，由 `ContextBudgetTest` 用最坏候选机械重算：
+         *
+         *   最坏候选行（`PocketDomSerializer.renderCandidate`，唯一真会进 prompt 的那条路径）
+         *     `  [48] textarea[<type 48>] "<text 48>" ph="<48>" value="<48>" aria-label="<48>"`
+         *     `     ::type,submit` + `\n`
+         *   = **308 字符** ⇒ 按 `:llm/TokenEstimator` 的口径
+         *     （拉丁 3.6 chars/token、数字 2.0、+6 token/100 字符、`×1.06` 保守系数）
+         *     = **110 token**。
+         *
+         * ## 为什么 58 是错的
+         *
+         * 58 反推回去只有 160–210 字符/候选 —— 大约等于「只有文本、没有属性」的一条候选行。
+         * 而 `PocketDomSerializer` 实际渲染 **4 个**属性字段（`type` / `placeholder` /
+         * `value` / `aria-label`），每个上限 `MAX_TEXT = 48` 字符 ⇒ 光属性就是 192 字符。
+         * 于是 `48 条 × 110 = 5,280 token`，而 STANDARD 的 `observation` 只有 2,816
+         * ⇒ **超编 1.88×**；NARROW（1,536）超编 3.4×。
+         *
+         * ## 为什么能错这么久
+         *
+         * 因为这个数字**没有任何测试** —— 它是 `2816 / 48 ≈ 58` 反推出来的
+         * （为了在 STANDARD 上凑出「Top-K 48」这个文档阶梯值），而不是由候选体积推出来的。
+         * 现在它由 `ContextBudgetTest` 的 4 条用例钉住：改渲染格式 / 改 `MAX_TEXT` /
+         * 改 `:llm` 的 token 口径，这里立刻红。
+         *
+         * ## 诚实边界
+         *
+         *   · **CJK 内容更贵**：`TokenEstimator` 对中日韩字符按 1 token/字 计，
+         *     全 CJK 的最坏候选是 **294** token/候选（同一个 308 字符）。
+         *     任何有限的 `topK` 都挡不住它（1 条就可能 257），那部分的收口在
+         *     `ContextAssembler.buildObservation` 的 `tailCut` —— OBSERVATION 段
+         *     最终被硬截到 `caps.observation`，所以**总 prompt 不会击穿工作窗口**；
+         *     `topKFor` 负责的是「别让截断成为常态」。
+         *   · `InjectionIsolator.isolateCandidates` 渲染**全部**白名单属性（18 项），
+         *     最坏 1,136 字符 / 406 token —— 但那条路径今天**没有生产调用方**
+         *     （由 `ContextBudgetTest` 机械断言盯住），所以它不是本常数的依据。
+         *     哪天它接进 prompt，这个常数必须换成 406。
+         */
+        const val WORST_CASE_TOKENS_PER_CANDIDATE: Int = 110
+
+        /** Top-K 阶梯的下限 / 上限（§3.4：低于 12 条模型认不出页面骨架）。 */
+        const val MIN_TOP_K: Int = 12
+        const val MAX_TOP_K: Int = 72
+
+        /** 单条候选渲染行的**最坏字符数**（含缩进与换行）。由 `ContextBudgetTest` 重算。 */
+        const val WORST_CASE_CHARS_PER_CANDIDATE: Int = 308
+
         val NARROW = SegmentCaps(
             system = 576, task = 128, observation = 1_536, toolReturn = 384,
             historyCompact = 704, recentTrace = 256, scratchpad = 128,

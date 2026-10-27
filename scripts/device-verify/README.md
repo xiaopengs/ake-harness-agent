@@ -30,6 +30,7 @@
 | `dv/apk.py` | APK 签名块解析（不依赖 apksigner） |
 | `dv/ui.py` | `uiautomator dump` → 找节点 → `input tap` |
 | `dv/audit.py` | 自检：制造必失败场景，确认脚本报 FAIL |
+| `dv/browserfix.py` | **M10 新增**：`:browser` 那批修复的静态判据（向量表 / 黑名单 / 注入自检均从仓库**机械抽取**） |
 | `dv/report.py` | 报告输出（JSON + Markdown + 控制台） |
 | `dv/cases/m01_m06.py` | M1 / M2 / M2b / M3 / M4 / M5 / M6 |
 | `dv/cases/m07_m11.py` | M7 / M8 / M9 / M10 / M11 |
@@ -147,6 +148,28 @@ artifacts/<用例号>/   仅失败用例：logcat.txt / dumpsys_meminfo.txt /
 | M15「协程泄漏」 | 没有统一日志形态，也没接 LeakCanary/StrictMode ⇒ 该条判据偏弱，已在报告里标注 |
 | M24 写失败的「同会话继续发」 | 需要模型在场；本次给了模型无关的等价判据（清空 `template_registry` 后冷启能否重新写入） |
 | M20/M21 的人工部分 | Play Console 提交审核、Data Safety 表单 —— 脚本只判能静态判的部分，其余写进 `manual_pending` |
+| M10 的注入自检 / `__stableKeyOf` 两条 | App 侧**只在失败时留痕**（`ensureReady()` 成功不打日志）⇒ 这两条是**取反**判据。支撑它们的前提由 `browserfix.selfcheck_contract()` 从源码盯住（自检段确实还在校验 16 位 hex），但若将来 release 的 minLevel 把 E 级日志挡掉，会出现假绿 —— 届时改读成功侧，不要直接删掉这两条 |
+| M10 的「黑名单硬拒」真机部分 | 让 App 真的导航到黑名单域名需要改动 App 行为/新增调试入口，本次不做 ⇒ 主判据在静态侧（`browserfix.check_blacklist_hard_denies`），真机侧只有「撞上了必须 DENIED」这条佐证，本轮 goal 没碰黑名单时它会是 0 行通过 |
+
+---
+
+## 6b. M10 现在在验什么（2026-10 追加）
+
+M10 原本只问「DOM 抽取有没有结果」。但 `:browser` 那批 bug（三段 JS 从未注入 / XHR 计数漂负 /
+stableKey 两端不等价 / host 不 lowercase）在真机上**全是静默的** —— 它们表现为「桥超时 / 页面是
+空的」，和「目标站今天真的没数据」同形。所以判据改成「验证修复真的生效」，追加四条：
+
+| 判据 | 证据来源 | 形态 |
+|---|---|---|
+| JsBootstrap 注入自检通过（缺失全局名清单为空） | `adb logcat` 的 `PageScriptHost` | 取反（成功不打日志） |
+| `__stableKeyOf` 在真 WebView 上算出 16 位 hex | 同上 + `JsBootstrap` 自检段源码 | 取反 + 静态自证 |
+| 黑名单对 `PASTEBIN.com` 类写法仍硬拒 | `DomainPolicy.kt`（清单机械抽取）+ oracle 对拍 | 静态为主，真机佐证 |
+| 落库 host 已归一化（小写/无尾点/无端口/无 `www.`） | `observation.host`、`policy_decision.target_host` | 真机正向 |
+
+`dv/browserfix.py` 里那个 Python 版 `normalise` **不是新立一份口径**：它被钉在从仓库读出来的
+`HostsTest.HOST_VECTORS`（30 条畸形输入）上，逐条复现才算通过，由 `--selftest` 的
+**SELF-8 / SELF-8b / SELF-8c / SELF-9** 当场自证 —— SELF-9 会把源码根指到不存在的地方，
+要求三条判据**必须**判 False：抽不到源码却一路绿，是最隐蔽的「守护为零」。
 
 ---
 

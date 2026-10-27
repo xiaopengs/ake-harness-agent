@@ -103,11 +103,104 @@ internal fun browserMainSources(): List<java.io.File> =
         .filter { it.isFile && it.extension == "kt" }
         .toList()
 
+internal fun browserTestSources(): List<java.io.File> =
+    java.io.File(repoRoot(), "browser/src/test/java").walkTopDown()
+        .filter { it.isFile && it.extension == "kt" }
+        .toList()
+
+/**
+ * 全仓 `src/main` 的 Kotlin 源码（跳过 `build/` 与 `.git/`）。
+ *
+ * 给「跨模块清单」类断言用：host 归一化在 `:browser` 之外还有几份实现，
+ * `:browser` 的测试**编译期看不见它们**（依赖边只允许 core），只能靠扫源码盯住清单。
+ */
+internal fun repoMainKotlinSources(): List<java.io.File> = repoRoot().walkTopDown()
+    .onEnter { it.name != "build" && it.name != ".git" }
+    .filter {
+        it.isFile && it.extension == "kt" &&
+            it.invariantSeparatorsPath.contains("/src/main/")
+    }
+    .toList()
+
+/**
+ * 从 `assets/js/dom-extract.js` **机械抽取** `ATTR_WHITELIST`。
+ *
+ * ★ 为什么必须是抽取而不是「测试里再抄一份」：抄的那份一旦和 JS 脱钩，
+ *   最坏候选体积就被系统性低估 —— 而上下文预算是按这个体积估的。
+ *   （历史上这里抄的是 14 项，JS 里是 18 项 ⇒ 少算 9,216 字符。）
+ */
+internal fun attrWhitelistFromJsAsset(): List<String> {
+    val src = java.io.File(browserMainDir(), "assets/js/dom-extract.js").readText()
+    val marker = "var ATTR_WHITELIST = ["
+    val start = src.indexOf(marker)
+    check(start >= 0) {
+        "`dom-extract.js` 里找不到 `$marker` —— 机械抽取器要跟着改，" +
+            "绝不允许退化成「测试里再手抄一份名单」"
+    }
+    val end = src.indexOf(']', startIndex = start)
+    check(end > start) { "`dom-extract.js` 的 `ATTR_WHITELIST` 数组没有闭合" }
+    val names = Regex("""'([^']+)'""").findAll(src.substring(start, end))
+        .map { it.groupValues[1] }
+        .toList()
+    check(names.isNotEmpty()) { "`ATTR_WHITELIST` 抽出来是空的 —— 抽取器坏了，别默默用空名单算预算" }
+    return names
+}
+
 /** 按相对路径读 `:browser` 的主源码（缺件时给出明确失败原因，不要静默给空串）。 */
 internal fun browserSource(relativeToMain: String): String {
     val f = java.io.File(browserMainDir(), relativeToMain)
     check(f.isFile) { "找不到源码 $relativeToMain —— :browser 主源码结构变了，静态审计需要同步" }
     return f.readText()
+}
+
+/** 按相对路径读全仓任意一个源码文件（`src/main` / `src/test` 都行）。 */
+internal fun repoSource(relativeToRoot: String): String {
+    val f = java.io.File(repoRoot(), relativeToRoot)
+    check(f.isFile) { "找不到源码 $relativeToRoot —— 仓库结构变了，机械抽取器需要同步" }
+    return f.readText()
+}
+
+/**
+ * 从 `core:common` 的 `HostsTest.HOST_VECTORS` **机械抽取**那批畸形输入向量。
+ *
+ * ★ 为什么不出题 attack list 而是在测试里手抄一份：手抄的那份一旦和权威表脱钩，
+ *   两边就会各自维护各自的口径 —— 「少覆盖一条绕过路径」在报表上看不出来，
+ *   因为抄的那份自己也全绿。抽取出错必须**响**（下面的 `check`），不许退化成空表。
+ *
+ * ★ `core:common` 的测试源码对 `:browser` **编译期不可见**（模块间互看不见对方的
+ *   test source set），所以只能按文件读 —— 这与 `attrWhitelistFromJsAsset` 同一手法。
+ */
+internal fun sharedHostVectors(): List<Pair<String, String>> {
+    val src = repoSource("core/common/src/test/java/com/ake/core/common/HostsTest.kt")
+
+    // ★ 锚必须是**声明**（`val HOST_VECTORS … = listOf(`），不能用第一次出现的名字 ——
+    //   那只是某个用例里的引用，后面紧跟的 `listOf(` 是另一坨无关的 URL 列表
+    //   （第一次这里就抽成了 0 条，被 size 检查拦住才没变成「少覆盖也不响」）。
+    val start = src.indexOf("val HOST_VECTORS")
+    check(start >= 0) {
+        "`core:common/HostsTest.kt` 里找不到 `val HOST_VECTORS` —— 机械抽取器要跟着改"
+    }
+
+    val open = src.indexOf("listOf(", startIndex = start)
+    check(open > start) { "`HOST_VECTORS` 的声明后面找不到 `listOf(` —— 抽取器坏了" }
+
+    // 取到 `listOf(` 的闭合括号为止（其后还有别的代码），注释行在这里就被留着，
+    // 下面的非锚定正则自然不会命中它们。
+    val body = StringBuilder()
+    for (line in src.substring(open).lineSequence()) {
+        if (line.trim().startsWith(")")) break
+        body.appendLine(line)
+    }
+
+    // ★ 非锚定：不依赖行首/行尾锚（它们在 JVM 正则 + Kotlin 原始字符串里的写法
+    //   容易踩 `$`，上一次就是这么静默抽成 0 条的），也不需要剥注释。
+    val pair = Regex(""""((?:[^"\\]|\\.)*)"\s+to\s+"((?:[^"\\]|\\.)*)"\s*,?""")
+    val out = pair.findAll(body).map { m -> m.groupValues[1] to m.groupValues[2] }.toList()
+    check(out.size >= 29) {
+        "从 `HostsTest.HOST_VECTORS` 只抽到 ${out.size} 条向量（历史记录里是 30 条）—— " +
+            "抽取器坏了，绝不允许默默拿一张更小的表去跑一致性断言"
+    }
+    return out
 }
 
 /** 剥行注释，保留 `https://` 里的 `//`（与根 build.gradle.kts 的同名工具同一手法）。 */
