@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import subprocess
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -88,12 +89,33 @@ class DbProbe:
         for suffix, attr in (("", "db"), ("-wal", "wal"), ("-shm", "shm")):
             remote = f"databases/{self.db_name}{suffix}"
             local = local_db + suffix
-            # exec-out + run-as：走 stdout 拿二进制，避免 /sdcard 中转的权限差异
-            r = self.adb.exec_out(f"run-as {self.package} cat {remote}", timeout=180)
-            if r.ok and r.out is not None:
-                # exec-out 是文本管道，二进制会被改写 —— 改用 pull 到 /sdcard 再拉
-                pass
-            # 走 /sdcard 中转会污染外存，但对「读」是唯一稳的方式；用完即删
+            # ── 首选：adb exec-out + 二进制直写文件 ──────────────────────
+            # `run()` 是文本管道（解码后再写回会破坏 SQLite 的二进制页），
+            # 但 exec-out 本身就是为二进制设计的：把 stdout 直接指向本地文件，
+            # 中间不经过任何字符串转换。
+            #
+            # 走 /sdcard 中转是这里曾经的唯一路径，但它在「App 数据目录 → 外存」
+            # 这一步会因 scoped storage / run-as 的权限差异失败，且会污染外存。
+            # 实测：真机上 run-as 可读、/sdcard 中转失败 ⇒ 拉库恒为 0 字节，
+            # 用例报"包非 debuggable / 库还没建"，而实际上库好好的。
+            got = -1
+            try:
+                argv = [self.adb.binary]
+                if self.adb.serial:
+                    argv += ["-s", self.adb.serial]
+                argv += ["exec-out", f"run-as {self.package} cat {remote}"]
+                with open(local, "wb") as fh:
+                    pr = subprocess.run(argv, stdout=fh, stderr=subprocess.PIPE, timeout=180)
+                if pr.returncode == 0 and os.path.isfile(local) and os.path.getsize(local) > 0:
+                    got = os.path.getsize(local)
+            except (OSError, subprocess.SubprocessError):
+                got = -1
+            if got >= 0:
+                setattr(res, f"{attr}_bytes", got)
+                res.steps.append(f"{remote}: {got} B (exec-out)")
+                continue
+
+            # ── 回退：/sdcard 中转 ────────────────────────────────────────
             tmp = f"/sdcard/.ake_verify_{self.db_name}{suffix}"
             r2 = self._run_as(f"sh -c 'cp {remote} {tmp} 2>/dev/null && chmod 644 {tmp} && echo COPIED'")
             if "COPIED" not in (r2.out or ""):

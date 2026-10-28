@@ -218,22 +218,25 @@ def m04(ctx: Ctx) -> List[Assertion]:
     out = (start.out or "") + (start.err or "")
 
     a: List[Assertion] = []
+    am_fatal = ("does not exist" in out) or ("Error type" in out)
     a.append(ctx.assert_true(
-        "am start 返回 Status: ok", "Status: ok" in out, "Status: ok",
-        "\n".join(l for l in out.splitlines() if "Status" in l) or out[:300],
+        "am start 无活动管理错误", not am_fatal,
+        "输出不含 Activity does not exist / Error type",
+        "\n".join(l for l in out.splitlines() if "Error" in l or "does not exist" in l)
+        or f"无活动管理错误（Status 段：{next((l for l in out.splitlines() if 'Status' in l), '无')}）",
         cmd=f"adb shell am start -W -n {ctx.component}", out=out[-1500:],
+        note="【真机校准】软件模拟器（-no-accel）上 `am start -W` 常在 25s 超时返回 "
+             "`Status: timeout`，而 Activity 实际已到前台（topResumedActivity 就是它）。"
+             "所以判据改成「无活动管理错误」，`Status: ok` 不再是必要条件；"
+             "是否真的起来了由「目标 Activity 处于前台」那条独立判定。",
     ))
-    a.append(ctx.assert_true(
-        "启动没有超时", "Timeout" not in out, "输出中不含 Timeout",
-        "含 Timeout" if "Timeout" in out else "无 Timeout",
-        cmd="同上", out=out[-1500:],
-    ))
-    tt = H.parse_am_time(out)
-    a.append(ctx.assert_true(
-        "能读到 ThisTime（启动耗时）", tt is not None, "ThisTime: <数字>",
-        f"ThisTime={tt} TotalTime={H.parse_am_total(out)}",
-        cmd="同上", out=out[-1500:],
-    ))
+    if "Status: ok" in out:
+        tt = H.parse_am_time(out)
+        a.append(ctx.assert_true(
+            "能读到 ThisTime（启动耗时）", tt is not None, "ThisTime: <数字>",
+            f"ThisTime={tt} TotalTime={H.parse_am_total(out)}",
+            cmd="同上", out=out[-1500:],
+        ))
     a.append(H.no_crash_assertion(ctx, lc))
     pid = ctx.adb.pidof(ctx.package)
     a.append(ctx.assert_true(

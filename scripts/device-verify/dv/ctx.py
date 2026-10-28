@@ -104,7 +104,7 @@ class Ctx:
         self.adb = adb
         self.env = env
         self.package = cfg.package
-        self.component = f"{cfg.package}/.MainActivity"
+        self.component = self._resolve_launcher_component()
         self.out_dir = cfg.out_dir
         self.artifacts_dir = os.path.join(cfg.out_dir, "artifacts")
         os.makedirs(self.artifacts_dir, exist_ok=True)
@@ -115,6 +115,43 @@ class Ctx:
         self._ui: Optional[Ui] = None
         self._db: Optional[DbProbe] = None
         self.notes: List[str] = []
+
+    def _resolve_launcher_component(self) -> str:
+        """从**设备实际解析结果**取 launcher activity，而不是假设 `{package}/.MainActivity`。
+
+        为什么必须这么做：`applicationId` 与源码包名可以不同。本项目
+        `applicationId = com.ake.harnessagent`，但 `MainActivity` 声明在
+        `com.ake.app` 下（源码包名），于是 `com.ake.harnessagent/.MainActivity`
+        解析出来是 `com.ake.harnessagent.MainActivity` —— **一个不存在的类**，
+        `am start` 直接报 `Activity class ... does not exist`。
+
+        这个错误会被误读成"App 起不来"，而实际情况是"判据写错了"。第一次真机
+        跑（M4）就撞上了这个：APK 装得上、manifest 里的 launcher 是
+        `com.ake.app.MainActivity`，但脚本按 `.MainActivity` 拼。
+
+        解析失败时回退到旧值 —— 让失败发生在用例里，而不是在构造期抛异常。
+        """
+        if self.adb is None:
+            return f"{self.cfg.package}/.MainActivity"
+        try:
+            r = self.adb.shell(
+                "cmd package resolve-activity --brief "
+                "-c android.intent.category.LAUNCHER " + self.cfg.package,
+                timeout=30,
+            )
+            for line in (r.out or "").splitlines():
+                line = line.strip()
+                # 形如 com.ake.app.MainActivity（--brief 只吐一行）或 pkg/act
+                if "/" in line and self.cfg.package in line:
+                    return line
+                if line.startswith(self.cfg.package) and "." in line.split(".")[-1]:
+                    return f"{self.cfg.package}/{line}"
+                # 源码包名与 applicationId 不同：形如 com.ake.app.MainActivity
+                if line and "." in line and " " not in line and "=" not in line:
+                    return f"{self.cfg.package}/{line}"
+        except Exception:
+            pass
+        return f"{self.cfg.package}/.MainActivity"
 
     # ── 工具实例 ──────────────────────────────────────────────────────
     def logcat(self) -> Logcat:
