@@ -50,6 +50,44 @@ android {
         compose = true
         buildConfig = false
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 【本轮 · 苏映棠】让 `src/androidTest` 下的用例**同时**编进 JVM 单测源集。
+    //
+    // 动机：那 15 条用例此前只有 `compileDebugAndroidTestKotlin` 在编译它们，
+    // 一条都没真正执行过（CI 无 emulator，本机 /dev/kvm 缺失 + 无 binder 模块
+    // ⇒ ReDroid 也起不来）。它们测的是纯 Compose 语义树（置灰/可见性/文案/布局
+    // 相对位置），不需要 ART ⇒ 放到 Robolectric 下就能真跑。
+    //
+    // 为什么选「注册 srcDir」而不是「把文件搬到 src/test」：
+    //   · 搬过去 ⇒ 将来真机/模拟器可用时它们再也回不到 device 上跑；
+    //   · 注册 srcDir ⇒ 一份源码两个源集：:ui:testDebugUnitTest 下走 Robolectric，
+    //     connectedDebugAndroidTest 下走真机。测试规则用的是同一个
+    //     @RunWith(AndroidJUnit4)，它在 JVM 上自动委派给 RobolectricTestRunner
+    //     （实测 androidx.test.ext:junit 1.1.5 的 `getRunnerClassName()` 就是这么写的），
+    //     所以两边都不用改注解。
+    //
+    // ⚠ 代价：同一批 .kt 会被编两遍（Kotlin 编译一次给 unitTest、一次给 androidTest）。
+    //   可接受 —— 它们总共 4 个文件。
+    // ─────────────────────────────────────────────────────────────────────────
+    sourceSets {
+        getByName("test") {
+            java.srcDirs("src/androidTest/java")
+            // AGP 9 的内置 Kotlin 编译**不**从 `java.srcDirs` 派生 Kotlin 源集
+            // （实测：只加上面那行，:ui:compileDebugUnitTestKotlin 产物里一个
+            //  *UiTest.class 都没有，`:ui:testDebugUnitTest` 于是只跑了原来的 10 个类）。
+            // Kotlin 源目录得单独登记。
+            kotlin.srcDirs("src/androidTest/java")
+        }
+    }
+
+    testOptions {
+        unitTests {
+            // Robolectric 要用 `Context.getString(...)` 读 strings.xml（用例里到处都是），
+            // 不加这条 resources 不会打进单测 classpath，运行时直接 Resources.NotFoundException。
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 dependencies {
@@ -120,6 +158,50 @@ dependencies {
     // ─────────────────────────────────────────────────────────────────────────
     testImplementation(libs.bundles.testUnit)
     testImplementation(libs.coroutines.test)
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 【本轮 · 苏映棠】Robolectric：让上面那 15 条 Compose 用例在 JVM 上真跑起来。
+    //
+    // ## ⚠ 先说结论：catalog 里**没有** Robolectric 别名
+    //
+    // `gradle/libs.versions.toml` 的测试区只有 junit / truth / turbine 三条，
+    // `[bundles] testUnit` 也只有这三样。同理 `androidx.test:core` /
+    // `androidx.test.ext:junit` 也没有别名（它们在 androidTest 侧是 espresso 传递
+    // 带进来的，见上面 `testInstrumentationRunner` 那段注释）。
+    // ⇒ **这三条是裸坐标 + 手写版本号**，与同文件里已有的 `ui-test-junit4`/
+    //   `ui-test-manifest` 是同一种「先例」写法（那两条由 compose BOM 供版本，
+    //   这三条没有 BOM 可依托，只能写死）。
+    //
+    // ## 版本来源（不是凭记忆，是联网核过 / 取本机已解析值）
+    //   · robolectric 4.17 —— `repo1.maven.org/maven2/org/robolectric/robolectric/
+    //     maven-metadata.xml` 的 <release>，且 android-all 有 `16-robolectric-13921718`
+    //     ⇒ 支持 SDK 36，对得上本模块 compileSdk=36。
+    //   · androidx.test:core 1.5.0 / androidx.test.ext:junit 1.1.5 —— **直接取本工程
+    //     已经解析出来的值**（~/.gradle/caches/.../androidx.test/core/1.5.0、
+    //     .../androidx.test.ext/junit/1.1.5，由 espresso 3.5.0 传递链带进来）。
+    //     用现成值而不是"最新"，是为了不引入第 4 个待核实版本。
+    //
+    // ## 刻意不引的
+    //   · `robolectric-shadows-*` 全家桶：robolectric 主 artifact 已含常用 shadow。
+    //   · Robolectric 的 `@Config` 注解：那玩意儿得写进测试源码，而测试源码是
+    //     androidTest/unitTest 共用的 —— 注解在真机上会被忽略但仍是噪音。
+    //     改由 `src/test/resources/robolectric.properties` 全局指定 sdk（见该文件）。
+    //
+    // ⚠ 待办（需邝随行）：把这三条提升为 catalog 别名
+    //   `libs.robolectric` / `libs.androidx.test.core` / `libs.androidx.test.ext.junit`。
+    //   我按硬约束「只改 :ui」没有动 libs.versions.toml —— 那是你的地盘。
+    // ─────────────────────────────────────────────────────────────────────────
+    testImplementation("org.robolectric:robolectric:4.17")
+    testImplementation("androidx.test:core:1.5.0")
+    testImplementation("androidx.test.ext:junit:1.1.5")
+
+    testImplementation(platform(libs.compose.bom))
+    // 注意：这条在 JVM 侧有坑 —— `ui-test-junit4` 是 KMP 坐标，它的根模块只有
+    // metadata / android / jvmStubs 三种 variant，没有真正的 jvm 实现。若 Gradle
+    // 选中 `jvmStubs*`，编译能过但运行时全是抛异常的 stub。下面这条显式指向
+    // `-android` 变体（AAR），AGP 单测会把它解包成 classes.jar 上 classpath，
+    // Robolectric 跑的就是真实现。
+    testImplementation("androidx.compose.ui:ui-test-junit4-android")
 
     // ─────────────────────────────────────────────────────────────────────────
     // 【本轮 · 苏映棠】`:ui` 的 Compose 界面测试（instrumentation）依赖。

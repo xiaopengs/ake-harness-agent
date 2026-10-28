@@ -16,6 +16,7 @@ import com.ake.ui.R
 import com.ake.ui.model.chatTerminalCopyOf
 import com.ake.ui.theme.AkeTheme
 import com.google.common.truth.Truth.assertThat
+import org.junit.Assume
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -50,6 +51,28 @@ import org.junit.runner.RunWith
  * ## 为什么显式钉住 `darkTheme = false`
  *
  * 不钉的话它会跟设备的系统主题走 —— 同一份测试在夜里变红，是最难查的那类 flaky。
+ *
+ * ## ⚠【2026-11 修订】两条像素用例在 Robolectric 下是 **skip，不是 pass**
+ *
+ * 首次真跑（Robolectric 4.17 / SDK 35）的结果：4 条里 2 条红了，都是读像素的那两条：
+ *
+ *      ComposeTimeoutException: Condition still not satisfied after 2000 ms
+ *          at WindowCapture_androidKt.forceRedraw(WindowCapture.android.kt:124)
+ *          ← captureToImage()
+ *
+ * 这不是配置没调对。`captureToImage()` 走的是 Choreographer 帧回调 + PixelCopy，
+ * 两者都要一个真实的 Surface；Robolectric 没有 Surface。我试过
+ * `@GraphicsMode(NATIVE)` + `@LooperMode(PAUSED)`，同样超时 —— **这个宿主根本没有像素**，
+ * 与本文件顶部「为什么非得读到像素」的判断一致，也与 `src/androidTest/README.md`
+ * 里写的边界一致：Robolectric 证明不了真实渲染像素。
+ *
+ * 所以这两条用 `Assume.assumeTrue(...)` 显式声明「当前宿主不具备执行条件」：
+ *   · 在 Robolectric 下 → 报告里是 **skipped**；
+ *   · 在真机/模拟器上 → `java.runtime.name` 含 "Android"，照常执行像素断言。
+ *
+ * ★ 关键区分：**skip ≠ pass**。我没有改阈值、没有改断言、没有换成一个更松的等价物。
+ *   这两条在 `testDebugUnitTest` 里永远不会贡献绿色，只贡献"本环境不可执行"这一事实。
+ *   谁要是看到 15 条全绿就以为像素也验过了 —— 那正是这份注释要防的误读。
  */
 @RunWith(AndroidJUnit4::class)
 class TerminalBannerUiTest {
@@ -85,6 +108,32 @@ class TerminalBannerUiTest {
         return max
     }
 
+    /**
+     * 是否跑在真实 ART 上（真机 / 模拟器）。
+     *
+     * 判据与 `androidx.test.ext.junit.runners.AndroidJUnit4` 自己用的是同一条：
+     * 非 Android 运行时时它会把执行委派给 `org.robolectric.RobolectricTestRunner`。
+     * 这里不直接 `Class.forName("org.robolectric...")`，是因为那个类在 Robolectric 的
+     * sandbox classloader 里，探测结果不如看运行时本身稳。
+     */
+    private fun onRealAndroidRuntime(): Boolean =
+        System.getProperty("java.runtime.name")?.contains("Android", ignoreCase = true) == true
+
+    /**
+     * 像素断言的前置条件：**当前宿主能真的截到像素**。
+     *
+     * 只有真机/模拟器满足。Robolectric 下 `captureToImage()` 必然超时（见类注释）。
+     * 用 `Assume` 而不是把断言删掉/放宽，是为了让"没验到"这件事留在报告里。
+     */
+    private fun assumePixelCaptureAvailable() {
+        Assume.assumeTrue(
+            "这条断言读的是真实渲染像素（Choreographer 帧 + PixelCopy）。" +
+                "Robolectric 没有 Surface，captureToImage() 必然超时 —— 本环境下跳过，" +
+                "不计为通过。真机/模拟器上照常执行。",
+            onRealAndroidRuntime(),
+        )
+    }
+
     private fun setBanner(reason: ChatTerminalReason, onRetry: () -> Unit = {}) {
         rule.setContent {
             AkeTheme(darkTheme = false) {
@@ -100,6 +149,7 @@ class TerminalBannerUiTest {
     //   Space characters in SimpleName 'IN_FLIGHT 用中性色而不是告警暖色' are not allowed
     // 所以这里是 `IN_FLIGHT_用中性色` 而不是更好读的 `IN_FLIGHT 用中性色`。
     fun IN_FLIGHT_用中性色而不是告警暖色() {
+        assumePixelCaptureAvailable()
         setBanner(ChatTerminalReason.IN_FLIGHT)
 
         val warmness = rule.onNodeWithText(bannerText(ChatTerminalReason.IN_FLIGHT), substring = true)
@@ -112,6 +162,7 @@ class TerminalBannerUiTest {
 
     @Test
     fun 对照_告警类终态确实画出暖色() {
+        assumePixelCaptureAvailable()
         setBanner(ChatTerminalReason.POLICY_DENIED)
 
         val warmness = rule.onNodeWithText(bannerText(ChatTerminalReason.POLICY_DENIED), substring = true)

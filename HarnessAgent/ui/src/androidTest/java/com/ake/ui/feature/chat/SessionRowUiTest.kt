@@ -35,6 +35,12 @@ import org.junit.runner.RunWith
  *
  * `RelativeTimeText` 的输出会随 `nowMillis` 与系统语言变化，且它自己有单测。
  * 这里只保证它渲染不炸 —— 顺带也是对 "[SessionRow] 在没有 `nowMillis` 时会崩" 的回归。
+ *
+ * ## ⚠【2026-11】执行宿主：Robolectric，不是真机
+ *
+ * 首跑即绿（4/4），未作任何修改。但它们跑在 Robolectric 下 ——
+ * 证明的是 Compose **语义树与文案**，**不是真实渲染像素**。
+ * 完整边界（能证明什么 / 证明不了什么）见 `src/androidTest/README.md` §1。
  */
 @RunWith(AndroidJUnit4::class)
 class SessionRowUiTest {

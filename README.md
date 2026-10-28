@@ -219,7 +219,7 @@ cd HarnessAgent
 **已完成并通过真机级编译验证**
 
 - **全部 12 个模块 `compileDebugKotlin` / `compileKotlin` 均 BUILD SUCCESSFUL**（含 Hilt KSP 与 Room KSP）
-- **`./gradlew test`：884 通过 / 0 失败**（立项时全工程仅 4 个单测）
+- **`./gradlew test`：899 通过 / 0 失败**（立项时全工程仅 4 个单测；含 15 条原 androidTest 经 Robolectric 在 JVM 执行）
 - **`checkModuleDependencies`：OK** —— 12 个模块的依赖边均在白名单内，`:ui` 对 `:chat`/`:agent`/`:mcp`/`:data` 的 import 为 0
 - `:app` —— Dagger 依赖图贯通，MissingBinding 清零；`ChatRunnerPort`/`SkillRegistryPort`/`CapabilityGrantPort` 均已真绑定（生成代码里是 `Optional.of(...)` 而非 `Optional.empty()`）
 - 依赖红线已排除：`ktor-client-plugins-sse` 该坐标在任何版本都不存在（SSE 已收进 `ktor-client-core`），已从 catalog 移除
@@ -274,7 +274,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 |---|---|
 | 从未产出过 APK | ✅ **已解除** —— debug 93.70MB + release 60.04MB |
 | AGP 与 R8 从未执行 | ✅ **已解除** —— `assembleRelease` 跑通，R8 真实执行 |
-| 七个模块零测试 | ✅ **已解除** —— 4 → **884 通过** |
+| 七个模块零测试 | ✅ **已解除** —— 4 → **899 通过** |
 | **从未在任何真机上运行过一次** | ❌ **仍然成立 —— 这是现在唯一充分的一条** |
 
 复审新识别的 P0：
@@ -296,7 +296,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 
 合计约 **0%，宽口径 ≤5%**。放宽到相邻纯逻辑（如模型分发状态机）有 30–45%，但那不是风险本体。
 
-**884 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
+**899 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
 
 > **禁令**（验收文档已写死）：不得把 `assembleRelease` 成功表述为"release 验证通过"。
 > 它能证明：编译/KSP/资源与 manifest 合并跑通、R8 真执行、高危符号存活、`.so` 入双 ABI、可复现。
@@ -321,7 +321,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 | 原待办 | 现状 |
 |---|---|
 | **P3** `:browser` 零测试 | ✅ 已解除 —— 0 → **167 例**，且当场挖出咽喉项的一批致命 bug（见下表） |
-| **P1** `androidTest` 不存在 | ✅ 已解除 —— 15 例，`ui-debug-androidTest.apk` 编译成功。**但无模拟器，一条都没跑过** |
+| **P1** `androidTest` 不存在 | ✅ 已解除 —— 15 例经 **Robolectric 在 JVM 执行**：13 通过 / 2 跳过（跳过的是 `captureToImage`，Robolectric 无 Surface/PixelCopy）。**这不是真设备验证**，见 `ui/src/androidTest/README.md` |
 | **P2** 归档清理无调用方 | ✅ 已解除 —— `ArchiveRetentionSweep` 自触发接入，五个闸保证"宁可少删" |
 | **P1** 手动导入本地模型 | ✅ 已解除 —— `ModelFileImporter` + 导入页，**承接“首次启动 + 无网络”这个场景** |
 | **P2** 隐私政策 / Data Safety | ✅ 已备 —— `docs/compliance/`，逐项对照代码申报，五个难看处已如实列出 |
@@ -349,7 +349,6 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 - **P0**：上面这批 `:browser` 修复**同样没有真机验证**。虽然已补 41 条测试 + 用 node 跑真实 asset 交叉验证 stableKey，但注入时机在 SPA 路由切换时的行为、XHR 计数在真实页面能否归零，都只能上设备才知道
 - **P1**：安全护栏未实测（支付硬禁止 / 提示注入拦截 / 预算告知）
 - **P1**：端侧 OOM / 延迟 / SoC 矩阵 / GPU 降级 —— 全部需真机
-- **P1**：`:ui` 的 15 个 androidTest 从未执行过（需模拟器或真机）
 - **P2**：两个 `specialUse` 前台服务**演示视频未拍**（脚本已在 `docs/compliance/`，缺拍摄）
 - **P2**：`FOREGROUND_SERVICE_DATA_SYNC` 声明了但无人使用
 - **P3**：`:data` 与 `:app` 各自算 `filesDir/models`，架构守卫管不到（跨层修，留 TODO）

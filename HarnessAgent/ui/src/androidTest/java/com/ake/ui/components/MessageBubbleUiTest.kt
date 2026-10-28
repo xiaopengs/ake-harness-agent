@@ -45,6 +45,12 @@ import org.junit.runner.RunWith
  *
  * 另外单独验了 `failure == null` 那条分支（冷启动读历史时拿不到终态详情）：
  * 那时仍要说人话，只是不给按钮 —— 一行都不一样都会掉 fidelity。
+ *
+ * ## ⚠【2026-11】执行宿主：Robolectric，不是真机
+ *
+ * 首跑即绿（4/4），未作任何修改。但它们跑在 Robolectric 下 ——
+ * 证明的是 Compose **语义树与布局关系**，**不是真实渲染像素**。
+ * 完整边界（能证明什么 / 证明不了什么）见 `src/androidTest/README.md` §1。
  */
 @RunWith(AndroidJUnit4::class)
 class MessageBubbleUiTest {

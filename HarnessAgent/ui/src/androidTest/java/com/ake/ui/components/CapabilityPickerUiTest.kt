@@ -1,6 +1,11 @@
 package com.ake.ui.components
 
 import android.content.Context
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
@@ -10,6 +15,7 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.ake.core.ports.CapabilityRef
@@ -43,6 +49,32 @@ import org.junit.runner.RunWith
  * 代价是对 `CapabilityRow` 的结构敏感：谁要是给它外面又套了一层带 `Checkbox` 的容器，
  * 这里就会错位。真到了那一天，正确的做法是给 `CapabilityRow` 加 `Modifier.testTag`，
  * 而不是继续猜顺序 —— 我没现在就加，是因为不想为了写测试往生产代码里塞钩子。
+ *
+ * ## 【2026-11 修订】首次真跑（Robolectric）暴露的两个问题，都改在这里，没有动断言
+ *
+ * 这两条用例此前**只在 androidTest 里编译过，从没执行过**。放到 Robolectric 下第一次
+ * 真跑，两条都在 `checkboxes()[4]` 上红了：
+ *
+ *      AssertionError: The component with (Role = 'Checkbox')[4] is not displayed!
+ *
+ * 查下来是**测试写法的问题，不是 `CapabilityPicker` 的 bug**，原因有两层：
+ *
+ *   1. Robolectric 的默认视口是 **320dp × 470dp**（实测 `onRoot().getBoundsInRoot()`），
+ *      比任何真机都小。8 行 `CapabilityRow` 铺不完，第 5 行往下全部落在视口外 ——
+ *      Compose 的 `assertIsDisplayed()` 对视口外的节点就是 false，这是它的语义。
+ *   2. 但**这不是 Robolectric 才有的坑**：真机（411×891dp）同样铺不完 8 行。
+ *      生产侧 `CreateAgentScreen` 是把它包在 `Modifier.verticalScroll(rememberScrollState())`
+ *      里的（`CreateAgentScreen.kt:66-67`），用户靠滚动够到后面的行 —— 而这份测试
+ *      当初直接裸渲染 `CapabilityPicker`，**少了生产侧那个滚动宿主**。
+ *
+ * 所以修法是「把测试环境补成生产的样子」：外面套一层同样的 `verticalScroll`，
+ * 断言前对每一行 `performScrollTo()`。断言本身一个字没改 ——
+ * `assertIsDisplayed()` / `assertIsEnabled()` / `assertIsNotEnabled()` 全都还在，
+ * 只是现在每一行都真的被滚进视口再验，而不是靠"恰好放得下"蒙过去。
+ *
+ * ⚠ 执行宿主是 Robolectric，不是真机：这套断言证明的是 Compose **语义树上的
+ *   enabled 状态与文案**，**不是真实渲染像素**。完整边界见
+ *   `src/androidTest/README.md` §1。
  */
 @RunWith(AndroidJUnit4::class)
 class CapabilityPickerUiTest {
@@ -67,12 +99,16 @@ class CapabilityPickerUiTest {
     ) {
         rule.setContent {
             AkeTheme(darkTheme = false) {
-                CapabilityPicker(
-                    options = options,
-                    selected = options.take(selectedCount).map { it.ref }.toSet(),
-                    limit = 6,
-                    onToggle = onToggle,
-                )
+                // 与 CreateAgentScreen 保持一致：外面是 verticalScroll 宿主。
+                // 缺了它，视口外的行既滚不到也断言不到 —— 见类注释里的修订说明。
+                Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+                    CapabilityPicker(
+                        options = options,
+                        selected = options.take(selectedCount).map { it.ref }.toSet(),
+                        limit = 6,
+                        onToggle = onToggle,
+                    )
+                }
             }
         }
     }
@@ -80,6 +116,18 @@ class CapabilityPickerUiTest {
     private fun checkboxes() = rule.onAllNodes(
         SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Checkbox),
     )
+
+    /**
+     * 滚到第 [i] 行再断言。
+     *
+     * `performScrollTo()` 是必要的：8 行在任何视口下都铺不完（见类注释）。
+     * 它对 `onAllNodes` 取到的那一条 SemanticsNodeInteraction 生效，
+     * 所以这里取的是"第 i 个 Checkbox"而不是某段文案 —— 与 `checkboxes()` 的定位口径一致。
+     */
+    private fun assertRowEnabled(i: Int, enabled: Boolean) {
+        val node = checkboxes()[i].performScrollTo().assertIsDisplayed()
+        if (enabled) node.assertIsEnabled() else node.assertIsNotEnabled()
+    }
 
     private fun str(res: Int, vararg args: Any): String =
         ApplicationProvider.getApplicationContext<Context>().getString(res, *args)
@@ -92,7 +140,7 @@ class CapabilityPickerUiTest {
         assertThat(nodes).hasSize(options.size)
 
         nodes.indices.forEach { i ->
-            checkboxes()[i].assertIsDisplayed().assertIsEnabled()
+            assertRowEnabled(i, enabled = true)
         }
         rule.onNodeWithText(str(R.string.cap_limit_reached, 6)).assertDoesNotExist()
     }
@@ -103,15 +151,20 @@ class CapabilityPickerUiTest {
 
         // 已选中的前 6 行仍然可点 —— 取消选项不该被上限卡住
         repeat(6) { i ->
-            checkboxes()[i].assertIsDisplayed().assertIsEnabled()
+            assertRowEnabled(i, enabled = true)
         }
 
         // 未选中的第 7、8 行置灰：这是「没有静默截断」的直接证据
-        checkboxes()[6].assertIsDisplayed().assertIsNotEnabled()
-        checkboxes()[7].assertIsDisplayed().assertIsNotEnabled()
+        assertRowEnabled(6, enabled = false)
+        assertRowEnabled(7, enabled = false)
 
-        // 而且必须说清楚为什么点不了，不能只灰着不解释
-        rule.onNodeWithText(str(R.string.cap_limit_reached, 6)).assertIsDisplayed()
+        // 而且必须说清楚为什么点不了，不能只灰着不解释。
+        // ⚠ 必须先 performScrollTo()：上面对第 7、8 行的断言已经把列表滚到底了，
+        //    顶部那句上限文案此刻在视口外，直接 assertIsDisplayed() 会红
+        //    （这是首次真跑时踩到的第二个点，与类注释里那两个同源）。
+        rule.onNodeWithText(str(R.string.cap_limit_reached, 6))
+            .performScrollTo()
+            .assertIsDisplayed()
     }
 
     @Test
