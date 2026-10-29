@@ -198,12 +198,22 @@ data class AgentCapabilityGrantEntity(
             onDelete = ForeignKey.CASCADE,
             onUpdate = ForeignKey.NO_ACTION,
         ),
+        // ★ v4：会话绑定的云端凭证。SET_NULL —— 凭证被删，会话仍在（目标回落到 LOCAL）。
+        ForeignKey(
+            entity = CloudCredentialEntity::class,
+            parentColumns = ["cred_id"],
+            childColumns = ["cloud_credential_id"],
+            onDelete = ForeignKey.SET_NULL,
+            onUpdate = ForeignKey.NO_ACTION,
+        ),
     ],
     indices = [
         // Q-S1 ★：首页对话列表 —— 未归档，最近消息在前
         Index(name = "idx_chat_sess_active_last", value = ["archived", "last_message_at"]),
         // Q-S2：Agent 详情页的会话列表 + 删人格时 CASCADE 找子行（消 Room warning）
         Index(name = "idx_chat_sess_agent", value = ["agent_id"]),
+        // ★ v4：FK 子列 + 「有哪些会话正在用这个凭证」（docs/08 §6.7 删凭证前的提示）
+        Index(name = "idx_chat_sess_cred", value = ["cloud_credential_id"]),
     ],
 )
 data class ChatSessionEntity(
@@ -239,6 +249,23 @@ data class ChatSessionEntity(
     @ColumnInfo(name = "last_rehydrate_tokens", defaultValue = "0") val lastRehydrateTokens: Int,
 
     @ColumnInfo(name = "archived", defaultValue = "0") val archived: Int,
+
+    // ─────────────────────────── v4 新增 ───────────────────────────
+
+    /**
+     * ★ 本会话的模型目标 —— **「用户选了什么」的事实记录，不是「系统允许什么」的策略源**
+     *   （docs/09 §2.4：策略一旦落库成行，红线①就从类型级降级成配置项级）。
+     *
+     * ★★ 编码必须走 `:core:ports/DialogTargetCodec`（`"LOCAL"` / `"CLOUD:<credId>"`），
+     *     不许另起一套 —— 否则同一个概念会有两种编码，正是历史上出过安全 bug 的形态。
+     */
+    @ColumnInfo(name = "model_target", defaultValue = "'LOCAL'") val modelTarget: String,
+
+    /** 本会话绑定的凭证。FK → cloud_credential(cred_id) ON DELETE SET NULL。 */
+    @ColumnInfo(name = "cloud_credential_id") val cloudCredentialId: String?,
+
+    /** ★ 用户为本会话「同意出云」的时间戳。NULL = 从未同意。 */
+    @ColumnInfo(name = "cloud_consent_at") val cloudConsentAt: Long?,
 ) {
     companion object {
         const val MODE_REPLY: String = "REPLY"
@@ -449,16 +476,34 @@ data class TemplateRegistryEntity(
             onDelete = ForeignKey.SET_NULL,
             onUpdate = ForeignKey.NO_ACTION,
         ),
+        // ★ v4：本次出云用的凭证。SET_NULL —— 凭证被彻底删除后，审计行**仍必须存在**
+        //   （本表回答的是「这台机器有没有把数据送出去过」，缺一行就是合规缺口）。
+        ForeignKey(
+            entity = CloudCredentialEntity::class,
+            parentColumns = ["cred_id"],
+            childColumns = ["credential_id"],
+            onDelete = ForeignKey.SET_NULL,
+            onUpdate = ForeignKey.NO_ACTION,
+        ),
     ],
     indices = [
         // 消 Room 的 FK 子列 warning + 「这条消息 routing 了什么」
         Index(name = "idx_route_message", value = ["chat_message_id"]),
         // 保留策略清理（§5.6：90 天 + 行数上限）
         Index(name = "idx_route_decided_at", value = ["decided_at"]),
-        // 「有没有真的出过云」—— 未来放开云端后的第一查询。
-        // ★ §10.4 判为「可裁」（MVP 恒空表上的纯成本），本文仍建：
-        //   加索引在空表上的成本是零，而「半年后没人知道是有意还是忘了」的代价不是。
         Index(name = "idx_route_decided", value = ["decided", "decided_at"]),
+        // ── ★ v4 新增两条（docs/09 §2.2「索引取舍」）
+        // 冷启 sweep 的扫描面：outcome IN (…) AND updated_at < ?。
+        // sweep 属于 fail-closed 机制的一部分，延迟必须可预测。
+        //
+        // ⚠ 列序取 `updated_at` 而不是 docs/09 §2.2 表格里写的 `decided_at`：
+        //   表格那一格与本文档 §6.3 自相矛盾 —— §6.3 的 `heartbeat()` 专门刷新
+        //   `updated_at` 以防活着的长流被误标 UNKNOWN，**若判据列是 `decided_at`，
+        //   心跳就完全不起作用**（decided_at 落行后永不变）。故以 §6.3 为准。
+        Index(name = "idx_route_outcome", value = ["outcome", "updated_at"]),
+        // ★ 幂等键（docs/09 §6.2）：SQLite 的 UNIQUE 把 NULL 视为彼此不同
+        //   ⇒ 本地路由（键为 NULL）不冲突，与既有 idx_chat_msg_request 同一手法。
+        Index(name = "idx_route_idem", value = ["idempotency_key"], unique = true),
     ],
 )
 data class RouteDecisionEntity(
@@ -469,16 +514,26 @@ data class RouteDecisionEntity(
     @ColumnInfo(name = "session_id") val sessionId: String,
     @ColumnInfo(name = "turn_id") val turnId: String,
 
-    /** LOCAL_ONLY | CLOUD_ASSISTED —— 用户/策略**请求**的目标 */
+    /** 落的是 `InferenceTarget.code`（LOCAL_ONLY / CLOUD_REQUESTED / CLOUD_ASSISTED） */
     @ColumnInfo(name = "requested") val requested: String,
     /** ★ 请求侧的分级集合。没有它，事后无法回答「当时想发什么」（§9-U6） */
     @ColumnInfo(name = "requested_classes_json") val requestedClassesJson: String,
-    /** 实际裁决。MVP 恒 LOCAL_ONLY */
+    /** 实际裁决，同样是 `InferenceTarget.code` */
     @ColumnInfo(name = "decided") val decided: String,
     /** i18n key，UI 必须显示给用户 */
     @ColumnInfo(name = "reason_key") val reasonKey: String,
     @ColumnInfo(name = "allowed_classes_json") val allowedClassesJson: String,
-    /** ★ EgressGate 的结论。恒 LOCAL 时为 null（根本没走出口） */
+
+    /**
+     * ★ EgressGate 的结论 —— **闸裁决轴**（docs/09 §5.2）。
+     *
+     * 常量收口到 `:core:ports/EgressVerdict`，本 Entity **不再自带任何字面量**。
+     * NULL ⟺ 没走到出口这一步（本地路由）/ 或 v3 及以前的历史行。
+     *
+     * ★★ 与 `outcome`（尝试状态轴）是**正交的两个轴**，不得合并：
+     *   `SCREENED + FAILED`（过闸了但网络挂）与 `GATE_DENIED + NOT_SENT`（被拦下、零字节）
+     *   是两个完全不同的事实，压成一个值就是丢信息。
+     */
     @ColumnInfo(name = "egress_gate_verdict") val egressGateVerdict: String?,
 
     @ColumnInfo(name = "redaction_applied", defaultValue = "0") val redactionApplied: Int,
@@ -488,18 +543,78 @@ data class RouteDecisionEntity(
     @ColumnInfo(name = "revoked_at") val revokedAt: Long?,
 
     @ColumnInfo(name = "decided_at") val decidedAt: Long,
+
+    // ─────────────────────────── v4 新增 ───────────────────────────
+
+    /**
+     * ★★ 本次尝试的终态 —— **尝试状态轴**，落 `AuditOutcome.name`（docs/09 §5.2）。
+     *
+     * NULL 只可能是 v3 及以前的历史行（本表今日恒空 ⇒ 真机上不会有，见 S9 自检）。
+     * ★ **UNKNOWN 不是终态**：迟到的 `close()` 允许把它改回 DELIVERED/PARTIAL/FAILED
+     *   （docs/09 §6.1）—— 否则一次被误判的长流式响应就永久变成「不知道发没发」。
+     */
+    @ColumnInfo(name = "outcome") val outcome: String?,
+
+    /** PRE | POST。**决定能不能静默回落**（docs/08 §4.4）。落 `EgressPhase.name`。 */
+    @ColumnInfo(name = "attempt_phase") val attemptPhase: String?,
+
+    /** 同一 turn 内的尝试序号（由 `open()` 在事务内按既有行数推导）。 */
+    @ColumnInfo(name = "attempt_no", defaultValue = "0") val attemptNo: Int,
+
+    /** 上一行 id。NULL ⇒ 首次尝试。 */
+    @ColumnInfo(name = "retry_of") val retryOf: String?,
+
+    /**
+     * ★ 幂等键：`"<turnId>:<decidedAt>"`。
+     *
+     * ⚠ 为什么不是 docs/09 里写的 `"<turnId>:<attemptNo>"`：`RouteContext` **没有**
+     *    attemptNo 字段，且 `EgressPermitSink.open(ctx, decision)` 的签名不在本轮可改范围
+     *    （属 `:core:ports`）。于是改用 `decision.decidedAt` 作为「同一次尝试」的判别：
+     *    重播 ⇒ 同一个 decision ⇒ 同键；重试 ⇒ 新 decision ⇒ 新键 ⇒ 独立审计行。
+     */
+    @ColumnInfo(name = "idempotency_key") val idempotencyKey: String?,
+
+    /** 使用的凭证。FK → cloud_credential(cred_id) ON DELETE SET NULL。**不是 key 本身**。 */
+    @ColumnInfo(name = "credential_id") val credentialId: String?,
+
+    /** ★ `Hosts.normalise(baseUrl)` 的结果。**不是 URL** ⇒ 不可能把 query 里的 key 带进来。 */
+    @ColumnInfo(name = "endpoint_host") val endpointHost: String?,
+
+    @ColumnInfo(name = "model_name") val modelName: String?,
+    /** 服务端返回的 `id`。**唯一的对外取证抓手**（docs/08 §9.4-③）。 */
+    @ColumnInfo(name = "request_id") val requestId: String?,
+
+    /** 实际发出的请求体字节数。与 `payload_bytes` 不一致即为可疑。 */
+    @ColumnInfo(name = "delivered_bytes", defaultValue = "0") val deliveredBytes: Int,
+
+    /** ★ finish_reason 原文（不映射，避免丢各家私有值）。 */
+    @ColumnInfo(name = "finish_reason_raw") val finishReasonRaw: String?,
+
+    /** ★ 策略常量快照。**它是事实记录，不是策略源**（docs/09 §2.4）。 */
+    @ColumnInfo(name = "policy_profile") val policyProfile: String?,
+
+    /** ★ sweep 判据：区分「早就该收敛了」与「还在流式传输」。 */
+    @ColumnInfo(name = "updated_at", defaultValue = "0") val updatedAt: Long,
+
     @ColumnInfo(name = "schema_v", defaultValue = "1") val schemaV: Int,
 ) {
     companion object {
-        const val TARGET_LOCAL: String = "LOCAL_ONLY"
-        const val TARGET_CLOUD: String = "CLOUD_ASSISTED"
-
-        const val EGRESS_PASS: String = "PASS"
-        const val EGRESS_BLOCKED: String = "BLOCKED"
+        /** v3→v4：1 → 2。 */
+        const val SCHEMA_VERSION: Int = 2
 
         /** §5.2：MVP 期间唯一的裁决理由键。 */
         const val REASON_MVP_CLOUD_DISABLED: String = "MVP_CLOUD_DISABLED"
 
-        const val SCHEMA_VERSION: Int = 1
+        // ★★ EGRESS_PASS / EGRESS_BLOCKED 已删除（docs/09 §5.2）。
+        //    历史字面量 "PASS"/"BLOCKED" 由 `RouteDecisionVerdict.normalise()` 读时映射，
+        //    **存量保留、不重写**（docs/09 §5.3：本表今日恒空 ⇒ 重写用的 UPDATE 是死码）。
+
+        /**
+         * ★ 可被 sweep 改写的状态集。
+         *
+         * ★★ 含 UNKNOWN 自身 ⇒ sweep 幂等；也允许迟到的 `close()` 把 UNKNOWN 改回终态。
+         */
+        val SWEEPABLE_OUTCOMES: Set<String> =
+            setOf("PENDING", "SENT", "UNKNOWN")
     }
 }

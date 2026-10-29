@@ -7,6 +7,7 @@ import com.ake.data.persist.db.dao.CapabilityGrantDao
 import com.ake.data.persist.db.dao.ChatMessageDao
 import com.ake.data.persist.db.dao.ChatSessionDao
 import com.ake.data.persist.db.dao.CheckpointDao
+import com.ake.data.persist.db.dao.CloudCredentialDao
 import com.ake.data.persist.db.dao.ConfigDao
 import com.ake.data.persist.db.dao.MemoryDao
 import com.ake.data.persist.db.dao.ModelAssetDao
@@ -22,6 +23,7 @@ import com.ake.data.persist.db.entity.AgentProfileEntity
 import com.ake.data.persist.db.entity.AppSettingsEntity
 import com.ake.data.persist.db.entity.ChatMessageEntity
 import com.ake.data.persist.db.entity.ChatSessionEntity
+import com.ake.data.persist.db.entity.CloudCredentialEntity
 import com.ake.data.persist.db.entity.McpServerEntity
 import com.ake.data.persist.db.entity.MemoryCardEntity
 import com.ake.data.persist.db.entity.ModelAssetEntity
@@ -91,6 +93,8 @@ import com.ake.data.persist.db.entity.TraceEventEntity
         AgentCapabilityGrantEntity::class,
         TemplateRegistryEntity::class,
         RouteDecisionEntity::class,
+        // ── ★ v4 新增 1 张
+        CloudCredentialEntity::class,
     ],
     version = AkeDatabase.VERSION,
     exportSchema = true,
@@ -117,6 +121,9 @@ abstract class AkeDatabase : RoomDatabase() {
     abstract fun templateDao(): TemplateDao
     abstract fun routeDecisionDao(): RouteDecisionDao
 
+    /** ★ v4：云端凭证（A5 裁决：密文落 Room，不落独立文件）。 */
+    abstract fun cloudCredentialDao(): CloudCredentialDao
+
     companion object {
         const val DB_FILE_NAME: String = "ake_agent.db"
 
@@ -125,8 +132,11 @@ abstract class AkeDatabase : RoomDatabase() {
          *
          *  - 2 = 新增 `mcp_server` / `app_settings` 两张配置表（见本文件类注释）。
          *  - 3 = 聊天化 Agent：6 张新表 + 5 处加列 + `memory_card` 重建。
+         *  - 4 = 云端模型推出（docs/09）：`cloud_credential` 新表 +
+         *        `route_decision` 加 13 列 + `chat_session` 加 3 列 + 3 个索引。
+         *        ★ **全 Additive**，无 DROP / RENAME / 重建 / 回填。
          */
-        const val VERSION: Int = 3
+        const val VERSION: Int = 4
 
         /** §4.4 配额硬限。DB 含 -wal/-shm。★ §8.4 重估后**不变**（v3 稳态 ≈34 MB，仍有 ≈7× 余量）。 */
         const val QUOTA_HARD_BYTES: Long = 256L * 1024 * 1024

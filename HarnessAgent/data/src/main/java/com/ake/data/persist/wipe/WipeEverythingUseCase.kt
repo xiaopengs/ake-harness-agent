@@ -12,6 +12,7 @@ import com.ake.core.ports.WipeResult
 import com.ake.data.persist.agentasset.AgentAssetStore
 import com.ake.data.persist.db.AkeDatabase
 import com.ake.data.persist.payload.PayloadStore
+import com.ake.data.persist.store.CloudCredentialStoreImpl
 import com.ake.data.persist.store.MemoryStoreImpl
 import com.ake.data.persist.write.ChatMessageWriter
 import com.ake.data.persist.write.TaskStateWriter
@@ -98,6 +99,8 @@ public class WipeEverythingUseCase(
     private val chatPayloads: PayloadStore,
     /** ★ v3：`filesDir/agents/`（头像等人格资产）。 */
     private val agentAssets: AgentAssetStore,
+    /** ★ v4：云端凭证（`cloud_credential` 表的物理清除）。 */
+    private val credentials: CloudCredentialStoreImpl,
     private val keystoreAlias: String = KEY_ALIAS,
 ) : WipePort {
 
@@ -125,6 +128,16 @@ public class WipeEverythingUseCase(
             writer.stopAndDropQueued()
             chatWriter.stopAndDropQueued()
         }.onFailure { failures += step("stop writers", it) }
+
+        // ②c ★★ v4：凭证的**密码学粉碎**（A5 裁决：密文落 `cloud_credential` 表）。
+        //     放在 ③ 删库**之前**是刻意的：万一 ③ 失败（库文件删不掉），
+        //     ① 已经删了 Keystore 别名 ⇒ 密文在**数学上**永久不可恢复，目的已达成。
+        //     反过来做（先删库）则中途崩了会留下「库没删掉、密钥也没删」的中间态。
+        //     ★ 这是「Room 落点」相对「独立文件」的决定性优势之一：它在
+        //       `WipeEverythingUseCase` 里**不需要新增清除步骤**就被 ①+③ 覆盖，
+        //       而独立文件会多出一条必须被人类记住的路径（docs/09 §4.2 问 3）。
+        runCatching { credentials.purgeAll() }
+            .onFailure { failures += step("cloud_credential.purgeAll", it) }
 
         // ②b ★ 两个 Store 的 clearAll() —— `core/ports` 里那两条 TODO 等的就是这里。
         //     之前这一段是「删 filesDir/mcp 与 filesDir/settings 两个目录」，

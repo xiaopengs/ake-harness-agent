@@ -23,6 +23,27 @@ import androidx.sqlite.execSQL
  * `if (BuildConfig.DEV_DESTRUCTIVE_MIGRATION) builder.fallbackToDestructiveMigration()`，
  * 且 **release 构建绝不允许出现这个 flag**。
  */
+/**
+ * ★★ 纪律（2026-10 · 宋砚秋，docs/09 §1.3）：**表重建一律用 `defer_foreign_keys`。**
+ *
+ * `ChatMigration2To3.MEMORY_CARD_REBUILD` 的头尾是
+ * ```
+ *   PRAGMA foreign_keys = OFF
+ *   … 12 步重建 …
+ *   PRAGMA foreign_keys = ON
+ * ```
+ * ⚠⚠ **它是错的，本轮不改（不在范围），但绝不要把它当范本抄。**
+ *
+ * 实测（SQLite 3.45.1）：`PRAGMA foreign_keys` **在事务内是静默 no-op** ——
+ * 读数不变，且删父行时 `ON DELETE SET NULL` 仍被触发（行为证据，不是读数）。
+ * sqlite.org：`This pragma is a no-op within a transaction`。而 Room 的迁移很可能跑在事务里。
+ *
+ * 它今天没炸，只因为 `memory_card` 是子表、没人 REFERENCES 它。
+ * **下一次重建一张「被别人 REFERENCES 的表」就会炸，而它那条测试仍然亮绿。**
+ *
+ * ⇒ 正确写法见 `CloudMigration3To4.DEFER_FOREIGN_KEYS_ON`（`defer_foreign_keys`
+ *    在事务内**可**切换，且把约束检查推迟到 COMMIT —— 正是重建需要的语义）。
+ */
 object AkeMigrations {
 
     // ──────────────────────────────────────────── 真实迁移
@@ -95,6 +116,20 @@ object AkeMigrations {
 
     val MIGRATION_2_3: Migration = ChatMigration2To3
 
+    // ──────────────────────────────────────────── 真实迁移（3 → 4）
+
+    /**
+     * 3 → 4：云端模型推出（docs/09 §3）。
+     *
+     *  - 1 张新表 `cloud_credential`（凭证元数据 + 密文，A5 裁决落 Room 不落文件）；
+     *  - `route_decision` 加 13 列（审计闭环：outcome / attempt_phase / 幂等键 / 凭证引用…）；
+     *  - `chat_session` 加 3 列（model_target / cloud_credential_id / cloud_consent_at）；
+     *  - 3 个索引。
+     *
+     * ★ **全 Additive**：无 DROP / RENAME / 重建 / 回填。
+     */
+    val MIGRATION_3_4: Migration = CloudMigration3To4
+
     // ──────────────────────────────────────────── 样板（**不进 [ALL]**）
 
     /**
@@ -138,5 +173,5 @@ object AkeMigrations {
      *   把它放在最前面会对上 `Variable 'MIGRATION_1_2' must be initialized`（本轮真编译踩到）。
      *   `arrayOf(...)` 在这里是取值而不是延迟引用 —— 它是 `Array`，不是 `Lazy`。
      */
-    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3)
+    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
 }

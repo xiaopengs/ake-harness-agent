@@ -254,6 +254,16 @@ internal class UnsupportedChatSessionDao : ChatSessionDao {
     override suspend fun delete(sessionId: String): Unit = unsupported("delete")
     override suspend fun deleteByAgent(agentId: String): Int = unsupported("deleteByAgent")
     override suspend fun idsOfAgent(agentId: String): List<String> = unsupported("idsOfAgent")
+    override suspend fun cloudCredentialIdOf(sessionId: String): String? =
+        unsupported("cloudCredentialIdOf")
+    override suspend fun bindCredential(
+        sessionId: String,
+        credId: String?,
+        modelTarget: String,
+        now: Long,
+    ): Int = unsupported("bindCredential")
+    override suspend fun setCloudConsent(sessionId: String, now: Long): Int =
+        unsupported("setCloudConsent")
     override suspend fun oldest(limit: Int): List<String> = unsupported("oldest")
 
     private fun unsupported(name: String): Nothing =

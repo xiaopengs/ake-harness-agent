@@ -90,7 +90,7 @@ L1  内核层          :core:common :core:ports :core:model-api
 | `:mcp` | MCP 客户端、连接管理、工具注册表、Schema 映射 |
 | `:cloudai` | **OpenAI 兼容适配器（L3，纯 JVM）**：URL 拼接、SSE 行解析、请求/响应模型、HTTP 重试。**不含任何策略**；Gradle 白名单刻意不含 `:core:contract` ⇒ `PocketDom` 在其类路径上不存在 |
 | `:inference` | **推理派发（L4，纯 JVM）**：`ModelRouter`、`FallbackPolicy`（PRE/POST 分相）、`EffectiveWindow`（端侧预算与云端窗口统一）、`DialogTarget` 选择与持久化 |
-| `:data` | Room **v3（18 表 / 14 DAO）**、双泳道写入管线、脱敏加密、保留与清理、启动对账、模板 bootstrap |
+| `:data` | Room **v4（20 表；v4 新增 `cloud_credential`，`route_decision` 加 7 列）**、双泳道写入管线、脱敏加密、保留与清理、启动对账、模板 bootstrap、**审计状态机 PENDING→SENT/DENIED/FAILED/UNKNOWN 与冷启 `EgressAuditReconciler`** |
 | `:ui` | Compose 全部页面与状态模型（**不得 import `com.ake.agent/mcp/data/chat`**，只依赖 `core` 契约） |
 | `:app` | Hilt 装配、`ChatServices` 单例投影、前台服务、下载服务、Keystore 加密、入口 |
 
@@ -202,6 +202,7 @@ L1  内核层          :core:common :core:ports :core:model-api
 | [`docs/04-release-gate.md`](docs/04-release-gate.md) | 上线验收：检查清单、风险评估、回归用例、三项裁定、最小真机验证集 |
 | [`docs/08-cloud-model-architecture.md`](docs/08-cloud-model-architecture.md) | **端云双栈架构**：`ModelPort` 不改契约加第二实现、切换粒度、`ModelRouter` 与 PRE/POST 回落分相、**DOM 锁死的四道锁**、凭证抽象、审计闭环、依赖边清单、每条契约的证伪方式 |
 | [`docs/09-cloud-data-and-secrets.md`](docs/09-cloud-data-and-secrets.md) | **云端正数据层**：凭证密文落 Room 的论证（推翻"独立文件"方案）、BaseURL 整体加密、`egressGateVerdict` 三套常量收口、审计状态机与冷启 sweep、迁移 3→4 |
+| [`docs/10-endcloud-bus-analysis.md`](docs/10-endcloud-bus-analysis.md) | **端云通信总线是否需要**：先拆"云端算不算对等 harness"这个伪命题、总线与 DOM 红线为何结构互斥、SyncPlane B1–B4 逐条裁决、阶段触发条件与反触发清单、**今天必须埋的 4 处接口缝隙** |
 
 ---
 
@@ -238,7 +239,7 @@ cd HarnessAgent
 **已完成并通过真机级编译验证**
 
 - **全部 14 个模块 `compileDebugKotlin` / `compileKotlin` 均 BUILD SUCCESSFUL**（含 Hilt KSP 与 Room KSP）
-- **`./gradlew test`：992 通过 / 0 失败 / 0 跳过**（立项时全工程仅 4 个单测；含 15 条原 androidTest 经 Robolectric 在 JVM 执行）
+- **`./gradlew test`：1067 通过 / 0 失败 / 2 跳过**（跳过的是 `:ui` 的 `captureToImage`，Robolectric 无 Surface/PixelCopy，历史已知边界；立项时全工程仅 4 个单测）
 - **`checkModuleDependencies`：OK** —— 14 个模块的依赖边均在白名单内，`:ui` 对 `:chat`/`:agent`/`:mcp`/`:data` 的 import 为 0；`:cloudai` 对 `:core:contract` 的依赖为 **0**（DOM 锁 B 生效）
 - `:app` —— Dagger 依赖图贯通，MissingBinding 清零；`ChatRunnerPort`/`SkillRegistryPort`/`CapabilityGrantPort` 均已真绑定（生成代码里是 `Optional.of(...)` 而非 `Optional.empty()`）
 - 依赖红线已排除：`ktor-client-plugins-sse` 该坐标在任何版本都不存在（SSE 已收进 `ktor-client-core`），已从 catalog 移除
@@ -268,6 +269,25 @@ cd HarnessAgent
 
 1. **`PlainSecret` 的 `value class` 编译产物 `unbox-impl()` 是 public 无参方法、直接返回明文** —— 架构文档把 `useAsBearer` 设计成"唯一读取口"，但实际上有第二个口，反射和 Java 互操作都能调。为省一次装箱换掉安全边界，已改 `final class`，并用 `javap -p` 作外部 oracle 验证 `unbox-impl` 确实消失（不是拿自己的断言自证）。
 2. **架构文档 E6 边 `:inference → :llm` 建不起来** —— 纯 JVM 模块无法依赖 `com.android.library` 模块。已删除，改由 `:app` 注入 `DeviceModelPort`；实测 `:inference` 编译类路径上 `project :llm` 计数为 **0**。
+
+### 第 7 轮产出：数据层落地（Room v3 → v4）
+
+| 项 | 产出 |
+|---|---|
+| 迁移 | **v3 → v4**：新增 `cloud_credential`（**完整 BaseURL 也加密**，只留归一化 host 明文）；`route_decision` 加 7 列（`outcome` / `attempt_phase` / `attempt_no` / `retry_of` / `idempotency_key` / `credential_id` / `endpoint_host`） |
+| 常量收口 | `RouteDecisionVerdict.kt` 把 `EgressVerdict` 与 `AuditOutcome` 拆成**正交两轴** —— 实际是三套常量而非两套 |
+| 审计 | `EgressPermitSinkImpl` + `EgressAuditReconciler` 冷启对账，fail-closed：拿不到 permit 就发不出字节，缺口表现为一行可见的 PENDING/UNKNOWN |
+| 测试 | `:data` 249 → **324**（+75）；`SqliteOracleV4Test` 用 **sqlite3 CLI 作外部 oracle** 复核迁移结果，不是拿自己的断言自证 |
+
+> **没有复制既有的坑**：`ChatMigration2To3` 里的 `PRAGMA foreign_keys=OFF` 在事务内是静默 no-op（宋砚秋用 SQLite 实证），v4 改用 `defer_foreign_keys`。既有 2→3 那个 bug 本轮未改，但已在代码里留注释指认，防止被后人当范本抄。
+
+### 端云通信总线：裁决是「今天不做，但缝隙现在就埋」
+
+见 [`docs/10-endcloud-bus-analysis.md`](docs/10-endcloud-bus-analysis.md)（676 行）。结论不是"以后再说"，而是有判据的分阶段：
+
+- **"两个对等 harness 之间的总线"是伪命题**：云端九项 harness 要素（循环 / 工具 / 状态机 / 轨迹 / 策略 / 执行权 / 资源仲裁 / 预算压缩 / 信任隔离）**一项都没有**，只是一个无状态补全端点的 HTTP 适配器。
+- **总线与 DOM 红线结构上互斥**：总线要成立必须能双向发起，而红线钉死"端侧唯一执行权"。因此升级到阶段 2 的触发条件里，明确写进了「**DOM 红线被显式推翻**」——它不会被顺手做掉。
+- **但接口缝隙今天就埋**（4 处，3 处是纯加法）：`CloudPeerKind` 单变体 sealed、`RoutingDecision.decisionSchemaV` 落库、`EgressCoordinator` Port、`DialogTargetCodec` 未知态改 `Unrecognized`。理由很简单：现在埋最便宜——`:app` 尚无 `:cloudai`/`:inference` 依赖，`:chat` 仍绑 `LocalOnlyRoutingPort`，`EgressCoordinator` 还只存在于注释里。
 
 ---
 
@@ -309,7 +329,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 |---|---|
 | 从未产出过 APK | ✅ **已解除** —— debug 93.70MB + release 60.04MB |
 | AGP 与 R8 从未执行 | ✅ **已解除** —— `assembleRelease` 跑通，R8 真实执行 |
-| 七个模块零测试 | ✅ **已解除** —— 4 → **992 通过** |
+| 七个模块零测试 | ✅ **已解除** —— 4 → **1067 通过** |
 | **从未在任何真机上运行过一次** | ❌ **仍然成立 —— 这是现在唯一充分的一条** |
 
 复审新识别的 P0：
@@ -331,7 +351,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 
 合计约 **0%，宽口径 ≤5%**。放宽到相邻纯逻辑（如模型分发状态机）有 30–45%，但那不是风险本体。
 
-**992 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
+**1067 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
 
 > **禁令**（验收文档已写死）：不得把 `assembleRelease` 成功表述为"release 验证通过"。
 > 它能证明：编译/KSP/资源与 manifest 合并跑通、R8 真执行、高危符号存活、`.so` 入双 ABI、可复现。
@@ -361,16 +381,19 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 | **P1** 手动导入本地模型 | ✅ 已解除 —— `ModelFileImporter` + 导入页，**承接“首次启动 + 无网络”这个场景** |
 | **P2** 隐私政策 / Data Safety | ✅ 已备 —— `docs/compliance/`，逐项对照代码申报，五个难看处已如实列出 |
 
-**第 6 轮新增（全部未解除）**
+**第 6–7 轮新增**
 
 | 待办 | 级别 | 说明 |
 |---|---|---|
-| **用户今天还切不了模型** | **P0** | 三块都没做：`:data` v3→v4 迁移、设置页切换 UI、`:app` 组合根装配接线。本轮只交付契约 + 两个模块 |
+| **用户今天还切不了模型** | **P0** | `:data` v3→v4 **已完成**；仍缺两件：设置页切换 UI、`:app` 组合根装配接线（`ModelRouter` 尚未拿到 `DeviceModelPort` 与云端实现，`:chat` 仍绑 `LocalOnlyRoutingPort`） |
 | **`PRE` 回落「必须告知」无 API 承载** | **P0** | `FallbackPolicy` 只有 `mustSayAlreadySent`（POST 语义）。PRE 回落时"已回落到本地"全靠 UI 自觉，没有类型约束 ⇒ **可静默降级**。待裁：加 `mustAnnounceFallback`，或把回落结论改成 sealed outcome 逼调用方表态 |
 | `FirstByteTimeout` 归 POST 是推断 | P1 | 依据是"请求体确实已被服务端收下"，但没发 `Expect: 100-continue`，ktor 也不确认接收 ⇒ 存在"服务端零接收、我们却告诉用户已发出"的窗口。**只能靠 mitmproxy 抓包证伪**，是最可能被真机推翻的一格 |
-| `:data` 迁移 3→4 未落 | P1 | 设计已出（`docs/09`）：`cloud_credential` 表、BaseURL 整体加密、`egressGateVerdict` 三套常量收口、审计状态机。代码未写 |
+| `:data` 迁移 3→4 | ✅ **已解除** | 已落地：`cloud_credential`、`route_decision` 加 7 列、`RouteDecisionVerdict` 正交拆分、`EgressAuditReconciler` 冷启对账；`:data` 249 → 324（含 sqlite3 CLI 外部 oracle） |
 | `ChatMigration2To3` 的 `PRAGMA foreign_keys=OFF` 是静默 no-op | P2 | 宋砚秋用 SQLite 实证：该 PRAGMA 在事务内不生效。**今天无害**（`memory_card` 是子表），下一轮重建任何父表会炸，**且它那条测试仍会亮绿**。应改 `defer_foreign_keys` |
 | `route_decision`「恒为空」是推理而非实测 | P2 | 整套存量迁移策略建立在"表里没有历史行"上。需真机 `COUNT(*)` 证伪；若非 0，说明存在未发现的写入路径，`docs/09` §5 要整节重做 |
+| **4 处总线接口缝隙未埋** | **P1** | `docs/10` 裁定**不要押后**：`CloudPeerKind` 单变体 sealed、`RoutingDecision.decisionSchemaV` 落库、`EgressCoordinator` Port（唯一硬依赖，先定签名）、`DialogTargetCodec` 未知态改 `Unrecognized`。现在埋最便宜——`:app` 尚无 `:cloudai`/`:inference` 依赖，`:chat` 仍绑 `LocalOnlyRoutingPort` |
+| **云端端点零钉扎** | **P1** | 模型分发侧有 pinned SPKI 验签，但**云端 endpoint 没有** ⇒ 审计记录了"发给谁"，却没保证"真发给那个人"。这是唯一一条"记了账但账可能记错对象"的裂缝 |
+| 「出境的是 D1 还是 D2」待复核 | P2 | 顾图南标注**不确定**：今天真正出境的是对话文本（D1）而非 D2。若判为 D2，`docs/08` §7 的 permit 语义要从"每轮显式授权"改成"类别白名单授权" —— 这不是措辞问题，是授权粒度问题 |
 
 ### `:browser` 补测挖出的真 bug（咽喉项 M10）
 

@@ -8,6 +8,8 @@ import com.ake.core.ports.AppendMessage
 import com.ake.core.ports.ChatMessageView
 import com.ake.core.ports.ChatSessionStorePort
 import com.ake.core.ports.ChatSessionSummary
+import com.ake.core.ports.DialogTarget
+import com.ake.core.ports.DialogTargetCodec
 import com.ake.core.ports.LoopMode
 import com.ake.core.ports.MessageKind
 import com.ake.core.ports.MessageRole
@@ -126,6 +128,11 @@ public class ChatSessionStoreImpl internal constructor(
             lastKvCacheTokens = 0,
             lastRehydrateTokens = 0,
             archived = 0,
+            // ★ v4：新建会话的目标恒为「本机」，且**必须走 DialogTargetCodec 的词汇**
+            //   （"LOCAL"）—— 不许在库里出现第二套编码（docs/09 §2.4）。
+            modelTarget = DialogTargetCodec.encode(DialogTarget.Device),
+            cloudCredentialId = null,
+            cloudConsentAt = null,
         )
         return runCatching { sessions.insert(row) }
             .fold(

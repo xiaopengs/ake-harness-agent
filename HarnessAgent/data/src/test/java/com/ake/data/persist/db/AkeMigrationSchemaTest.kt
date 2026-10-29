@@ -204,12 +204,79 @@ class AkeMigrationSchemaTest {
 
     @Test
     fun versionAndStatementsAreWired() {
-        assertThat(AkeDatabase.VERSION).isEqualTo(3)
+        assertThat(AkeDatabase.VERSION).isEqualTo(4)
         assertThat(AkeMigrations.ALL.map { "${it.startVersion}->${it.endVersion}" })
-            .containsExactly("1->2", "2->3")
+            .containsExactly("1->2", "2->3", "3->4")
             .inOrder()
-        // ★ ALL 必须包含 2→3，否则真机上根本不会跑这段迁移
+        // ★ ALL 必须包含 2→3 与 3→4，否则真机上根本不会跑这两段迁移。
+        //   v4 的逐条断言在 `CloudMigration3To4Test`（本文件仍只盯 v3 的既有纪律）。
         assertThat(AkeMigrations.ALL.toList()).contains(ChatMigration2To3)
+        assertThat(AkeMigrations.ALL.toList()).contains(CloudMigration3To4)
+    }
+
+    // ─────────────────────────────── ⑦ ★ v3 → v4（docs/09 §3.5）
+
+    private val v4: DbSchema = DbSchema.load(4)
+
+    /**
+     * ★ 旧表**只能增列**：v3 的每一张表在 v4 都必须还在、旧列一个都不能少也不能改。
+     *
+     * 这是「升级不丢数据」在**结构**层面的表达（docs/09 §3.4 论证①）。
+     */
+    @Test
+    fun v3TablesOnlyGainedColumns() {
+        for (old in v3.tables) {
+            val now = v4.table(old.name)
+                ?: error("v4 里丢了旧表 ${old.name} —— 迁移绝不能删表")
+            for (f in old.fields) {
+                val kept = now.field(f.name)
+                    ?: error("旧表 ${old.name} 的列 ${f.name} 在 v4 里消失了")
+                assertThat(kept.affinity).isEqualTo(f.affinity)
+                assertThat(kept.notNull).isEqualTo(f.notNull)
+                assertThat(kept.defaultValue).isEqualTo(f.defaultValue)
+            }
+        }
+    }
+
+    @Test
+    fun v4AddedColumnsMatchRoomSchema() {
+        val alters = CloudMigration3To4.ADD_COLUMNS.mapNotNull { Sql.parseAlterAddColumn(it) }
+        assertThat(alters).hasSize(16)
+
+        for (alter in alters) {
+            val table = v4.table(alter.table)
+                ?: error("4.json 里没有表 ${alter.table}")
+            val field = table.field(alter.column)
+                ?: error("4.json 的表 ${alter.table} 里没有列 ${alter.column} —— 迁移加了一个 Entity 不认识的列")
+            assertThat(alter.shape()).isEqualTo(ColumnShape.of(field))
+        }
+    }
+
+    /**
+     * ★★ **FK 意图对齐**（docs/09 §3.5 第 4 条）—— 这是既有测试的一个**盲点**：
+     *
+     * `Sql.parseAlterAddColumn` 会把 `REFERENCES` 子句切掉再比列形状 ⇒
+     * 「迁移里写了外键」这件事**根本没人盯**。写漏一条 REFERENCES，真机上
+     * 外键约束不会成立，而本文件所有断言仍然全绿。
+     */
+    @Test
+    fun v4ForeignKeyIntentsAreDeclaredInRoomSchema() {
+        val referencing = CloudMigration3To4.ADD_COLUMNS.filter { it.contains("REFERENCES") }
+        assertThat(referencing).hasSize(2)
+
+        for (sql in referencing) {
+            val parsed = Sql.parseAlterAddColumn(sql)
+                ?: error("无法解析带 REFERENCES 的 ALTER：$sql")
+            val owner = v4.table(parsed.table)
+                ?: error("4.json 里没有表 ${parsed.table}")
+            val fk = owner.foreignKeys.firstOrNull { parsed.column in it.childColumns }
+                ?: error(
+                    "4.json 的表 ${parsed.table} 没有声明 ${parsed.column} 的外键 —— " +
+                        "迁移写了 REFERENCES 但 Entity 没写（或反之）",
+                )
+            assertThat(fk.parentTable).isEqualTo("cloud_credential")
+            assertThat(fk.onDelete).isEqualTo("SET NULL")
+        }
     }
 
     // ─────────────────────────────── schema 读取（一个够用的小 JSON 解析器）
@@ -249,7 +316,19 @@ class AkeMigrationSchemaTest {
                             createSql = im["createSql"] as String,
                         )
                     }
-                    Table(name, m["createSql"] as String, fields, indices)
+                    // ★ v4：外键意图也要能被比对（见 v4ForeignKeyIntentsAreDeclaredInRoomSchema）
+                    val foreignKeys = ((m["foreignKeys"] as? List<*>) ?: emptyList<Any>()).map { f ->
+                        val fm = f as Map<*, *>
+                        ForeignKey(
+                            parentTable = fm["table"] as String,
+                            onDelete = fm["onDelete"] as String,
+                            onUpdate = fm["onUpdate"] as String,
+                            childColumns = (fm["columns"] as List<*>).map { it as String },
+                            parentColumns = ((fm["referencedColumns"] as? List<*>)
+                                ?: (fm["referenceColumns"] as List<*>)).map { it as String },
+                        )
+                    }
+                    Table(name, m["createSql"] as String, fields, indices, foreignKeys)
                 }
                 return DbSchema((db["version"] as Double).toInt(), tables)
             }
@@ -269,11 +348,21 @@ class AkeMigrationSchemaTest {
         val createSql: String,
         val fields: List<Field>,
         val indices: List<Index>,
+        val foreignKeys: List<ForeignKey> = emptyList(),
     ) {
         val createSqlNormalized: String = Sql.normalize(createSql.replace("\${TABLE_NAME}", name))
         fun field(column: String): Field? = fields.firstOrNull { it.name == column }
         fun index(indexName: String): Index? = indices.firstOrNull { it.name == indexName }
     }
+
+    /** Room schema JSON 里的 `foreignKeys[]` 条目。 */
+    private class ForeignKey(
+        val parentTable: String,
+        val onDelete: String,
+        val onUpdate: String,
+        val childColumns: List<String>,
+        val parentColumns: List<String>,
+    )
 
     private class Field(
         val name: String,

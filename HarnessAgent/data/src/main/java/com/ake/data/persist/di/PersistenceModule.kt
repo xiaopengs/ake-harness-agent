@@ -11,6 +11,8 @@ import com.ake.data.BuildConfig
 import com.ake.core.ports.AgentProfileStorePort
 import com.ake.core.ports.CapabilityGrantPort
 import com.ake.core.ports.CheckpointStorePort
+import com.ake.core.ports.CloudCredentialPort
+import com.ake.core.ports.EgressPermitSink
 import com.ake.core.ports.ChatSessionStorePort
 import com.ake.core.ports.DeviceHealthPort
 import com.ake.core.ports.McpServerStorePort
@@ -26,6 +28,7 @@ import com.ake.core.ports.TraceStorePort
 import com.ake.core.ports.WipePort
 import com.ake.data.persist.agentasset.AgentAssetStore
 import com.ake.data.persist.db.AkeDatabase
+import com.ake.data.persist.db.DbTransaction
 import com.ake.data.persist.modeldist.ArchiveRetentionSweep
 import com.ake.data.persist.db.AkeMigrations
 import com.ake.data.persist.db.AkePragmaConfig
@@ -42,9 +45,12 @@ import com.ake.data.persist.modeldist.ModelManifestImporter
 import com.ake.data.persist.modeldist.ModelManifestParser
 import com.ake.data.persist.modeldist.ModelManifestSource
 import com.ake.data.persist.payload.PayloadStore
+import com.ake.data.persist.recovery.EgressAuditReconciler
 import com.ake.data.persist.recovery.TaskReconciler
 import com.ake.data.persist.redact.PersistenceRedactionGate
 import com.ake.data.persist.store.AgentProfileStoreImpl
+import com.ake.data.persist.store.CloudCredentialStoreImpl
+import com.ake.data.persist.store.EgressPermitSinkImpl
 import com.ake.data.persist.store.CapabilityGrantStoreImpl
 import com.ake.data.persist.store.CheckpointStoreImpl
 import com.ake.data.persist.store.ChatSessionStoreImpl
@@ -186,6 +192,30 @@ public abstract class PersistenceBindingsModule {
     @Binds
     @Singleton
     public abstract fun bindSettingsStore(impl: SettingsStoreImpl): SettingsStorePort
+
+    // ────────────────────────────────────────────────────────────────────────
+    // ★ v4：云端凭证与出境许可（docs/09 §4 / §6）
+    //
+    // ★★ 装配落 `:data` 而不是 `:app`：`CloudCredentialStoreImpl` 同时需要 DAO 与
+    //    `FieldCipher`，两者都在 `:data` ⇒ 放这里**零新增依赖边**，且 `:app` 零改动
+    //    （MVP 复用既有 Keystore 别名 `ake.trace.dek.v1`，docs/09 §4.5）。
+    //
+    //    ⚠ 若 `:app` 侧将来也绑了这两个 Port，Hilt 会直接报 `[Dagger/DuplicateBindings]`
+    //      ⇒ 那种情况下删掉 `:app` 那一份，不要删这里的（`WipeEverythingUseCase`
+    //      的清除链路依赖本模块能看见 DAO）。
+    // ────────────────────────────────────────────────────────────────────────
+
+    /** ★ 凭证生命周期 Port（密文落 `cloud_credential` 表，A5 裁决）。 */
+    @Binds
+    @Singleton
+    public abstract fun bindCloudCredentialStore(
+        impl: CloudCredentialStoreImpl,
+    ): CloudCredentialPort
+
+    /** ★ 出境许可落点（先落 PENDING 再发字节，fail-closed）。 */
+    @Binds
+    @Singleton
+    public abstract fun bindEgressPermitSink(impl: EgressPermitSinkImpl): EgressPermitSink
 
     /**
      * 「一键清除全部痕迹」的执行契约。
@@ -751,6 +781,51 @@ public abstract class PersistenceBindingsModule {
         public fun provideRouteDecisionSink(db: AkeDatabase, clock: Clock): RouteDecisionSink =
             RouteDecisionSink(dao = db.routeDecisionDao(), clock = clock)
 
+        /** ★ v4：云端凭证（A5：密文落 Room；MVP 复用既有 Keystore 别名）。 */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideCloudCredentialStore(
+            db: AkeDatabase,
+            cipher: FieldCipher,
+            clock: Clock,
+        ): CloudCredentialStoreImpl = CloudCredentialStoreImpl(
+            dao = db.cloudCredentialDao(),
+            cipher = cipher,
+            clock = clock,
+        )
+
+        /** ★ v4：审计行的冷启收敛器。 */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideEgressAuditReconciler(
+            db: AkeDatabase,
+            clock: Clock,
+            metrics: PersistenceMetrics,
+        ): EgressAuditReconciler = EgressAuditReconciler(
+            dao = db.routeDecisionDao(),
+            clock = clock,
+            metrics = metrics,
+        )
+
+        /** ★ v4：出境许可落点。 */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideEgressPermitSink(
+            db: AkeDatabase,
+            reconciler: EgressAuditReconciler,
+            clock: Clock,
+        ): EgressPermitSinkImpl = EgressPermitSinkImpl(
+            tx = DbTransaction.of(db),
+            routeDao = db.routeDecisionDao(),
+            sessions = db.chatSessionDao(),
+            credentials = db.cloudCredentialDao(),
+            reconciler = reconciler,
+            clock = clock,
+        )
+
         /**
          * Agent 级能力授权。
          *
@@ -784,6 +859,7 @@ public abstract class PersistenceBindingsModule {
             chatWriter: ChatMessageWriter,
             @Named(DIR_CHAT) chatPayloads: PayloadStore,
             agentAssets: AgentAssetStore,
+            credentials: CloudCredentialStoreImpl,
         ): WipeEverythingUseCase = WipeEverythingUseCase(
             context = context,
             db = db,
@@ -796,6 +872,7 @@ public abstract class PersistenceBindingsModule {
             chatWriter = chatWriter,
             chatPayloads = chatPayloads,
             agentAssets = agentAssets,
+            credentials = credentials,
         )
     }
 }

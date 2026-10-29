@@ -169,6 +169,31 @@ interface ChatSessionDao {
     @Query("SELECT id FROM chat_session WHERE agent_id = :agentId")
     suspend fun idsOfAgent(agentId: String): List<String>
 
+    // ─────────────────────────── v4（docs/09 §2.4）───────────────────────────
+
+    /**
+     * ★ `EgressPermitSink.open()` 用它推出「这一轮要用哪个凭证 / 发到哪个 host」。
+     *
+     * `open(ctx, decision)` 的签名里没有 credentialRef（属 `:core:ports`，本轮不可改）
+     * ⇒ 端点信息只能从**会话已登记的目标**取，这是唯一合法的来源。
+     */
+    @Query("SELECT cloud_credential_id FROM chat_session WHERE id = :sessionId")
+    suspend fun cloudCredentialIdOf(sessionId: String): String?
+
+    /** ★ 会话级目标：绑定凭证。NULL ⇒ 解绑（回落 LOCAL）。 */
+    @Query(
+        """
+        UPDATE chat_session
+           SET cloud_credential_id = :credId, model_target = :modelTarget, updated_at = :now
+         WHERE id = :sessionId
+        """,
+    )
+    suspend fun bindCredential(sessionId: String, credId: String?, modelTarget: String, now: Long): Int
+
+    /** ★ 用户为本会话同意出云的时间戳。 */
+    @Query("UPDATE chat_session SET cloud_consent_at = :now WHERE id = :sessionId")
+    suspend fun setCloudConsent(sessionId: String, now: Long): Int
+
     /** §8 清理：只挑最老的会话做 payload 降级，按 last_message_at 排序。 */
     @Query(
         """
