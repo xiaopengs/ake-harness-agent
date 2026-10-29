@@ -1,21 +1,34 @@
 # Ake Harness Agent — 端侧浏览器智能体
 
-一个**完全运行于 Android 设备本地**的 GUI Agent 应用：用自然语言下达网页任务，由端侧大模型驱动 App 内嵌的浏览器内核自动完成，**推理、执行、数据全部不出机，不依赖任何云端服务**。
+一个**端侧优先**的 Android GUI Agent 应用：用自然语言下达网页任务，由端侧大模型驱动 App 内嵌的浏览器内核自动完成。
+
+网页任务**永远在设备本地推理**——页面内容、表单输入、Cookie 不出机，这条边界由类型系统与 Gradle 依赖白名单双重守住，不是一个可以关掉的开关。**纯对话**场景可选接入云端模型（OpenAI 兼容协议，用户自填 BaseURL / Key / 模型名），由用户在设置里显式切换。
 
 > 例：*「在某电商站搜 XX，按销量排序，把前三条的商品名、价格、店铺名整理出来」* —— App 自动导航、检索、翻页、抽取，并结构化输出结果。
 
 ---
 
-## 一、为什么不走云端
+## 一、端侧优先，云端可选
 
 | 维度 | 端侧方案 | 云端方案 |
 |---|---|---|
-| 隐私 | 页面内容、表单输入、Cookie 全程留在设备 | 需上传页面与截图 |
+| 隐私 | 页面内容、表单输入、Cookie 全程留在设备 | 需上传对话内容 |
 | 可用性 | 断网可用 | 强依赖网络 |
 | 成本 | 零推理费用 | 按 token 计费 |
 | 代价 | 受内存/算力约束，模型能力弱于云端大模型 | — |
 
 端侧的代价是真实的：2–3B 级模型在长上下文推理、复杂规划上明显弱于云端模型。因此本项目的架构重心不是"堆能力"，而是**把有限的上下文窗口和算力用在刀刃上**——见「关键设计决策」。
+
+**第 6 轮加入云端切换，但没有放弃第一条。** 边界按任务性质切，而不是按用户设置切：
+
+| 任务 | 可用后端 | 边界怎么保证 |
+|---|---|---|
+| 浏览器 / 网页任务 | **只有端侧**，云端不可选 | 三层：① 任务入口与对话入口是**两个不同类型**，编译器不接受把页面上下文交给云端请求；② `:cloudai` 模块的 Gradle 白名单**刻意不含 `:core:contract`** ⇒ `PocketDom` 在它的类路径上根本不存在；③ `PromptContext` 用 sealed 表达"这一轮带不带页面"，穷尽性检查逼调用方表态 |
+| 纯对话 | 端侧 / 云端，用户自选 | 会话级记忆后端，UI 每轮标注当前模型 |
+
+> 换句话说：**"能不能上云"不是配置项，是代码形状问题。** 你没法通过改一个 flag 让网页内容出境——那段代码编译不过。
+
+云端只实现 **OpenAI 兼容单适配器**（`chat/completions` + SSE），DeepSeek / 通义 / Kimi / OpenAI / 自建网关通用。**零新增第三方坐标**：ktor 与 kotlinx.serialization 本就在依赖图里，引官方 SDK 换不来任何能力，只会加体积。
 
 ---
 
@@ -39,10 +52,12 @@
 ## 三、架构：六层单向依赖
 
 ```
-L6  界面 / 组合根   :ui :app        Compose 页面、Hilt 装配、前台服务
-L5  对话编排        :chat           ChatLoop、技能路由、推理焦点、复水、出云闸
-L4  Agent 编排      :agent          Agent Loop、状态机、上下文预算、策略护栏
-L3  能力层          :llm :browser :mcp :data
+L6  界面 / 组合根   :ui :app           Compose 页面、Hilt 装配、前台服务
+L5  对话编排        :chat              ChatLoop、技能路由、推理焦点、复水、出云闸
+L4  循环 / 派发     :agent :inference   Agent Loop、上下文预算、策略护栏
+                                       ModelRouter 派发、回落分相、窗口统一
+L3  能力层          :llm :cloudai :browser :mcp :data
+                                       LiteRT-LM / OpenAI 兼容 / WebView / MCP / Room
 L2  领域层          :core:contract
 L1  内核层          :core:common :core:ports :core:model-api
                    依赖方向严格自顶向下，不允许反向
@@ -73,6 +88,8 @@ L1  内核层          :core:common :core:ports :core:model-api
 | `:agent` | Agent Loop、十二终态状态机、上下文预算、提示注入隔离、策略引擎、`UiFacingPorts` 实现 |
 | `:chat` | **聊天会话编排（L5）**：`ChatLoop` 单轮编排、`InferenceFocus` 推理焦点仲裁、`SkillRegistry`/`SkillRouter`、`ChatRehydrator` 复水、`ModeProfile` 三档九表、`ChatEgress` 出云闸 |
 | `:mcp` | MCP 客户端、连接管理、工具注册表、Schema 映射 |
+| `:cloudai` | **OpenAI 兼容适配器（L3，纯 JVM）**：URL 拼接、SSE 行解析、请求/响应模型、HTTP 重试。**不含任何策略**；Gradle 白名单刻意不含 `:core:contract` ⇒ `PocketDom` 在其类路径上不存在 |
+| `:inference` | **推理派发（L4，纯 JVM）**：`ModelRouter`、`FallbackPolicy`（PRE/POST 分相）、`EffectiveWindow`（端侧预算与云端窗口统一）、`DialogTarget` 选择与持久化 |
 | `:data` | Room **v3（18 表 / 14 DAO）**、双泳道写入管线、脱敏加密、保留与清理、启动对账、模板 bootstrap |
 | `:ui` | Compose 全部页面与状态模型（**不得 import `com.ake.agent/mcp/data/chat`**，只依赖 `core` 契约） |
 | `:app` | Hilt 装配、`ChatServices` 单例投影、前台服务、下载服务、Keystore 加密、入口 |
@@ -183,6 +200,8 @@ L1  内核层          :core:common :core:ports :core:model-api
 | [`HarnessAgent/mcp/MCP_BRIDGE.md`](HarnessAgent/mcp/MCP_BRIDGE.md) | `:app` 侧 Hilt 转发桥代码 |
 | [`docs/03-build-and-deploy.md`](docs/03-build-and-deploy.md) | 构建部署：CI 流水线、签名与混淆、模型分发策略、版本策略、故障排查 |
 | [`docs/04-release-gate.md`](docs/04-release-gate.md) | 上线验收：检查清单、风险评估、回归用例、三项裁定、最小真机验证集 |
+| [`docs/08-cloud-model-architecture.md`](docs/08-cloud-model-architecture.md) | **端云双栈架构**：`ModelPort` 不改契约加第二实现、切换粒度、`ModelRouter` 与 PRE/POST 回落分相、**DOM 锁死的四道锁**、凭证抽象、审计闭环、依赖边清单、每条契约的证伪方式 |
+| [`docs/09-cloud-data-and-secrets.md`](docs/09-cloud-data-and-secrets.md) | **云端正数据层**：凭证密文落 Room 的论证（推翻"独立文件"方案）、BaseURL 整体加密、`egressGateVerdict` 三套常量收口、审计状态机与冷启 sweep、迁移 3→4 |
 
 ---
 
@@ -218,9 +237,9 @@ cd HarnessAgent
 
 **已完成并通过真机级编译验证**
 
-- **全部 12 个模块 `compileDebugKotlin` / `compileKotlin` 均 BUILD SUCCESSFUL**（含 Hilt KSP 与 Room KSP）
-- **`./gradlew test`：899 通过 / 0 失败**（立项时全工程仅 4 个单测；含 15 条原 androidTest 经 Robolectric 在 JVM 执行）
-- **`checkModuleDependencies`：OK** —— 12 个模块的依赖边均在白名单内，`:ui` 对 `:chat`/`:agent`/`:mcp`/`:data` 的 import 为 0
+- **全部 14 个模块 `compileDebugKotlin` / `compileKotlin` 均 BUILD SUCCESSFUL**（含 Hilt KSP 与 Room KSP）
+- **`./gradlew test`：992 通过 / 0 失败 / 0 跳过**（立项时全工程仅 4 个单测；含 15 条原 androidTest 经 Robolectric 在 JVM 执行）
+- **`checkModuleDependencies`：OK** —— 14 个模块的依赖边均在白名单内，`:ui` 对 `:chat`/`:agent`/`:mcp`/`:data` 的 import 为 0；`:cloudai` 对 `:core:contract` 的依赖为 **0**（DOM 锁 B 生效）
 - `:app` —— Dagger 依赖图贯通，MissingBinding 清零；`ChatRunnerPort`/`SkillRegistryPort`/`CapabilityGrantPort` 均已真绑定（生成代码里是 `Optional.of(...)` 而非 `Optional.empty()`）
 - 依赖红线已排除：`ktor-client-plugins-sse` 该坐标在任何版本都不存在（SSE 已收进 `ktor-client-core`），已从 catalog 移除
 
@@ -233,6 +252,22 @@ cd HarnessAgent
 | 编排 | **新增 `:chat` 模块**（L5）：3308 行主代码 + 2168 行专测（106 例） |
 | 界面 | 23 个新文件 / 3700 行：对话列表、聊天页（真流式渲染）、创建 Agent、模板市场、能力多选 |
 | 引擎 | `maxNumTokens` 分档夹紧、`initialMessages` 复水、`generateStream` 真流式（回调经 Channel 隔离） |
+
+### 第 6 轮产出：端云双栈（**只完成地基，尚不可用**）
+
+用户要求"能自己切换云端模型"。本轮完成的是**契约层与两个新模块**；**UI、数据迁移、组合根装配都还没做，所以今天打开 App 是切不了的**。这一点必须写在最前面，避免把地基误读成功能。
+
+| 层 | 产出 |
+|---|---|
+| 设计 | [`docs/08-cloud-model-architecture.md`](docs/08-cloud-model-architecture.md)（1340 行）+ [`docs/09-cloud-data-and-secrets.md`](docs/09-cloud-data-and-secrets.md)（1412 行） |
+| 新模块 | `:cloudai`（L3，纯 JVM，OpenAI 兼容 `chat/completions` + SSE）+ `:inference`（L4，纯 JVM，`ModelRouter`/`FallbackPolicy`/`EffectiveWindow`）⇒ 模块数 **12 → 14** |
+| 契约 | `PlainSecret` 由 `value class` 改 `final class`；`CloudFailure` 17 个变体；`InferenceTarget` 改 sealed 以编译期绑死 permit |
+| 测试 | **+93**（`:cloudai` 42 / `:inference` 51），全量 899 → **992**，0 失败 0 跳过 |
+
+**本轮修掉的两个真问题**（不是补齐，是发现）：
+
+1. **`PlainSecret` 的 `value class` 编译产物 `unbox-impl()` 是 public 无参方法、直接返回明文** —— 架构文档把 `useAsBearer` 设计成"唯一读取口"，但实际上有第二个口，反射和 Java 互操作都能调。为省一次装箱换掉安全边界，已改 `final class`，并用 `javap -p` 作外部 oracle 验证 `unbox-impl` 确实消失（不是拿自己的断言自证）。
+2. **架构文档 E6 边 `:inference → :llm` 建不起来** —— 纯 JVM 模块无法依赖 `com.android.library` 模块。已删除，改由 `:app` 注入 `DeviceModelPort`；实测 `:inference` 编译类路径上 `project :llm` 计数为 **0**。
 
 ---
 
@@ -274,7 +309,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 |---|---|
 | 从未产出过 APK | ✅ **已解除** —— debug 93.70MB + release 60.04MB |
 | AGP 与 R8 从未执行 | ✅ **已解除** —— `assembleRelease` 跑通，R8 真实执行 |
-| 七个模块零测试 | ✅ **已解除** —— 4 → **899 通过** |
+| 七个模块零测试 | ✅ **已解除** —— 4 → **992 通过** |
 | **从未在任何真机上运行过一次** | ❌ **仍然成立 —— 这是现在唯一充分的一条** |
 
 复审新识别的 P0：
@@ -296,7 +331,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 
 合计约 **0%，宽口径 ≤5%**。放宽到相邻纯逻辑（如模型分发状态机）有 30–45%，但那不是风险本体。
 
-**899 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
+**992 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
 
 > **禁令**（验收文档已写死）：不得把 `assembleRelease` 成功表述为"release 验证通过"。
 > 它能证明：编译/KSP/资源与 manifest 合并跑通、R8 真执行、高危符号存活、`.so` 入双 ABI、可复现。
@@ -325,6 +360,17 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 | **P2** 归档清理无调用方 | ✅ 已解除 —— `ArchiveRetentionSweep` 自触发接入，五个闸保证"宁可少删" |
 | **P1** 手动导入本地模型 | ✅ 已解除 —— `ModelFileImporter` + 导入页，**承接“首次启动 + 无网络”这个场景** |
 | **P2** 隐私政策 / Data Safety | ✅ 已备 —— `docs/compliance/`，逐项对照代码申报，五个难看处已如实列出 |
+
+**第 6 轮新增（全部未解除）**
+
+| 待办 | 级别 | 说明 |
+|---|---|---|
+| **用户今天还切不了模型** | **P0** | 三块都没做：`:data` v3→v4 迁移、设置页切换 UI、`:app` 组合根装配接线。本轮只交付契约 + 两个模块 |
+| **`PRE` 回落「必须告知」无 API 承载** | **P0** | `FallbackPolicy` 只有 `mustSayAlreadySent`（POST 语义）。PRE 回落时"已回落到本地"全靠 UI 自觉，没有类型约束 ⇒ **可静默降级**。待裁：加 `mustAnnounceFallback`，或把回落结论改成 sealed outcome 逼调用方表态 |
+| `FirstByteTimeout` 归 POST 是推断 | P1 | 依据是"请求体确实已被服务端收下"，但没发 `Expect: 100-continue`，ktor 也不确认接收 ⇒ 存在"服务端零接收、我们却告诉用户已发出"的窗口。**只能靠 mitmproxy 抓包证伪**，是最可能被真机推翻的一格 |
+| `:data` 迁移 3→4 未落 | P1 | 设计已出（`docs/09`）：`cloud_credential` 表、BaseURL 整体加密、`egressGateVerdict` 三套常量收口、审计状态机。代码未写 |
+| `ChatMigration2To3` 的 `PRAGMA foreign_keys=OFF` 是静默 no-op | P2 | 宋砚秋用 SQLite 实证：该 PRAGMA 在事务内不生效。**今天无害**（`memory_card` 是子表），下一轮重建任何父表会炸，**且它那条测试仍会亮绿**。应改 `defer_foreign_keys` |
+| `route_decision`「恒为空」是推理而非实测 | P2 | 整套存量迁移策略建立在"表里没有历史行"上。需真机 `COUNT(*)` 证伪；若非 0，说明存在未发现的写入路径，`docs/09` §5 要整节重做 |
 
 ### `:browser` 补测挖出的真 bug（咽喉项 M10）
 

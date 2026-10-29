@@ -862,7 +862,140 @@ public enum class ChatTerminalReason {
 // 六、端云协同（Q4：本轮恒裁决 LOCAL，但接口与审计链路必须打通）
 // ─────────────────────────────────────────────────────────────────────────────
 
-public enum class InferenceTarget { LOCAL_ONLY, CLOUD_ASSISTED }
+/**
+ * ★★ 推理目标 —— **sealed，不是 enum**（§11-A3 的落地）。
+ *
+ * ## 为什么必须是 sealed 而不是 enum
+ *
+ * 主理人红线：**不许用运行时 if 守边界**。
+ * 「允许出云」这件事如果是一个 enum 值（`CLOUD_ASSISTED`），
+ * 那「这次出云到底有没有许可」就只能在运行时靠 `require(permit != null)` 兜
+ * —— 而 `require` 抛的是 `IllegalArgumentException`，**它出现在半年后某个调用点上，
+ * 表现形式是一次崩溃，而不是一次编译失败**。
+ *
+ * sealed + [CloudAssisted] 携带 [EgressPermit] ⇒
+ * **「想上云但没审计行」这种状态在类型上就构造不出来**（编译期绑死）。
+ *
+ * ## ★★ 三个变体，不是一个 enum 的两个值（这是一处被迫的偏差，必读）
+ *
+ * 架构 08 原文只给了两个变体：`LocalOnly` 与 `CloudAssisted(permit)`。
+ * **直接照抄会与 §7.2 形成循环依赖**：
+ *
+ * ```
+ *   §7.2  EgressPermitSink.open(ctx, decision) → permit
+ *   §5.7  RoutingDecision.target : InferenceTarget
+ *   §5.7  InferenceTarget.CloudAssisted(permit)
+ *
+ *   ⇒ 要 open() 就得先有一个 RoutingDecision；
+ *     要构造 target = CloudAssisted(permit) 就得先有 permit；
+ *     而 permit 正是 open() 的产物。
+ *   ⇒ 死锁：一个 `decide()` 里带着 permit 的决策**永远构造不出来**。
+ * ```
+ *
+ * 于是拆出一个 permit-free 的意图变体 [CloudRequested]：
+ *
+ * ```
+ *   RouteContext.requested   : InferenceTarget  ∈ { LocalOnly, CloudRequested }   ← 持久化形态
+ *   RoutingDecision.target   : InferenceTarget  ∈ { LocalOnly, CloudAssisted }    ← 运行时授权形态
+ * ```
+ *
+ * 分工与 §2.4 是一致的：**「选了什么」与「被授权成什么」本来就是两件事**，
+ * 前者要能落库（permit 不可持久化，它依赖进程内的 audit row id 与一次性许可次数）。
+ *
+ * ## 落库码
+ *
+ * `CloudAssisted` 的 permit **不落库**（它是一次性的运行时凭据）。
+ * 因此从库里读回 `CLOUD_ASSISTED` 只能还原成 [CloudRequested] —— 这是**有意的**：
+ * 库里存的是「当时裁决成了云端」，不是「现在还被允许出云」。
+ */
+public sealed interface InferenceTarget {
+
+    /** 稳定落库码。 */
+    public val code: String
+
+    /**
+     * ★ 兼容别名（**待拆**）：迁移前 `:data` 落库用的是旧 enum 的 `.name`。
+     *
+     * ⚠ 拆除条件：`:data` 的 v4 迁移（宋砚秋）落地后，
+     *   `RouteDecisionSink.record` 改用 `decision.target.code`，
+     *   并删除本成员。留着就是「看起来能用」的陷阱。
+     */
+    @Deprecated(
+        message = "改用 InferenceTarget.code；DAO 侧落库码由 InferenceTarget.codeOf 解析",
+        replaceWith = ReplaceWith("code"),
+    )
+    public val name: String get() = code
+
+    /** 本机内推理。 */
+    public data object LocalOnly : InferenceTarget {
+        override val code: String get() = CODE_LOCAL_ONLY
+    }
+
+    /**
+     * ★ 「**想**出云」这个意图。**没有 permit ⇒ 还不具备出云能力**。
+     *
+     * 这是 [RouteContext.requested] 一侧的取值：持久化形态，permit-free。
+     */
+    public data object CloudRequested : InferenceTarget {
+        override val code: String get() = CODE_CLOUD_REQUESTED
+    }
+
+    /**
+     * ★★ 「**允许**出云」这件事**必须携带一张 permit**。
+     *
+     * 构造 [CloudAssisted] 的唯一办法就是给一个 permit，
+     * 而 permit 只能由 [EgressPermitSink.open]（已落库）产出。
+     * ⇒ 「想上云但没审计行」这种状态**构造不出来**。
+     */
+    public data class CloudAssisted(val permit: EgressPermit) : InferenceTarget {
+        override val code: String get() = CODE_CLOUD_ASSISTED
+    }
+
+    public companion object {
+        public const val CODE_LOCAL_ONLY: String = "LOCAL_ONLY"
+        public const val CODE_CLOUD_REQUESTED: String = "CLOUD_REQUESTED"
+        public const val CODE_CLOUD_ASSISTED: String = "CLOUD_ASSISTED"
+
+        /**
+         * 落库码 → 目标。★ 无法识别返回 `null`（fail-closed：认不出来 ⇒ 不按云端处理）。
+         *
+         * ⚠ [CODE_CLOUD_ASSISTED] 还原成 [CloudRequested]：**permit 不落库**，
+         *   库里的这行只说明「当时裁决成了云端」。
+         */
+        public fun codeOf(raw: String?): InferenceTarget? = when (raw) {
+            CODE_LOCAL_ONLY -> LocalOnly
+            CODE_CLOUD_ASSISTED, CODE_CLOUD_REQUESTED -> CloudRequested
+            else -> null
+        }
+
+        // ── 兼容别名（★ 待拆，见文件头部说明）─────────────────────────────
+        //
+        // `:data` / `:chat` 里既有的 `InferenceTarget.LOCAL_ONLY` / `.CLOUD_ASSISTED`
+        // 引用靠这两个别名继续编译。它们指向的是**意图形态**（permit-free），
+        // 语义与迁移前在这两处是一致的：
+        //   · `RouteDecisionSink.shouldAudit` 比较的是「请求了什么 / 裁决了什么」
+        //   · `ChatLoop` 构造 `requested` 时本来也没有 permit
+        //
+        // ⚠ 拆除条件：`:data` 的 v4 迁移（宋砚秋）与 `:chat` 的 P5 接线各自落地后，
+        //   这两个别名必须删除 —— 留着就是「看起来能用」的陷阱。
+
+        @Deprecated(
+            message = "改用 InferenceTarget.LocalOnly",
+            replaceWith = ReplaceWith("InferenceTarget.LocalOnly"),
+        )
+        public val LOCAL_ONLY: InferenceTarget get() = LocalOnly
+
+        @Deprecated(
+            message = "请求出云改用 InferenceTarget.CloudRequested；" +
+            "已获许可的出云用 InferenceTarget.CloudAssisted(permit)",
+            replaceWith = ReplaceWith("InferenceTarget.CloudRequested"),
+        )
+        public val CLOUD_ASSISTED: InferenceTarget get() = CloudRequested
+
+        /** 「permit-free 的取值集合」，给 `requested` 的遍历用。`CloudAssisted` 不在其中。 */
+        public val entries: List<InferenceTarget> = listOf(LocalOnly, CloudRequested)
+    }
+}
 
 /** 数据分级（上游 §6.2）。库侧只有「类别白名单」与「体积」两种表达，★ 没有任何一列能装原文。 */
 public enum class DataClass { RED, AMBER, GREEN, INBOUND }
@@ -871,12 +1004,108 @@ public data class RouteContext(
     val agentId: String,
     val sessionId: String,
     val turnId: String,
+    /**
+     * ★ 本轮**请求**的目标。
+     *
+     * ⚠ 它表达的是意图，不是授权 —— 取值只能是 `LocalOnly` / `CloudRequested`
+     *   （`CloudAssisted` 需要 permit，而 permit 是 `decide()` **之后**才有的，
+     *   见 [InferenceTarget] 头部的循环依赖说明）。
+     */
     val requested: InferenceTarget,
     val userGrantedThisTurn: Boolean,
     val estimatedContextTokens: Int,
     val needsLongContext: Boolean,
     val payloadClasses: Set<DataClass>,
-)
+    /**
+     * ★ 任务性质。**有默认值 ⇒ 既有调用点零改动**；新调用点必须显式给。
+     *
+     * ★★ [TaskKind.PageTask] 一旦取这个值，路由实现**必须**返回 `LocalOnly`
+     * （由唯一实现 + 测试 + 抓包共同保证，§5.7）。
+     */
+    val kind: TaskKind = TaskKind.PureDialog,
+    /**
+     * ★ 页面元数据。**不含 DOM 原文**（与 `PromptContext.WithPageContext` 同一手法）。
+     */
+    val page: PageRef? = null,
+) {
+    public companion object {
+        /** 纯对话。 */
+        public fun pureDialog(
+            agentId: String,
+            sessionId: String,
+            turnId: String,
+            requested: InferenceTarget,
+            userGrantedThisTurn: Boolean,
+            estimatedContextTokens: Int,
+            needsLongContext: Boolean,
+            payloadClasses: Set<DataClass>,
+        ): RouteContext = RouteContext(
+            agentId = agentId,
+            sessionId = sessionId,
+            turnId = turnId,
+            requested = requested,
+            userGrantedThisTurn = userGrantedThisTurn,
+            estimatedContextTokens = estimatedContextTokens,
+            needsLongContext = needsLongContext,
+            payloadClasses = payloadClasses,
+            kind = TaskKind.PureDialog,
+            page = null,
+        )
+
+        /**
+         * ★ 页面任务。★ `page` **必填** —— 「造一个 PageTask 的 ctx」必须显式走这里，
+         *   不能靠改字段蒙混。
+         */
+        public fun pageTask(
+            agentId: String,
+            sessionId: String,
+            turnId: String,
+            requested: InferenceTarget,
+            userGrantedThisTurn: Boolean,
+            estimatedContextTokens: Int,
+            needsLongContext: Boolean,
+            payloadClasses: Set<DataClass>,
+            page: PageRef,
+        ): RouteContext = RouteContext(
+            agentId = agentId,
+            sessionId = sessionId,
+            turnId = turnId,
+            requested = requested,
+            userGrantedThisTurn = userGrantedThisTurn,
+            estimatedContextTokens = estimatedContextTokens,
+            needsLongContext = needsLongContext,
+            payloadClasses = payloadClasses,
+            kind = TaskKind.PageTask,
+            page = page,
+        )
+
+        /** ★ 不变式：PageTask 必须带 page 元数据。由 D5 断言盯住。 */
+        public fun isWellFormed(ctx: RouteContext): Boolean =
+            ctx.kind !is TaskKind.PageTask || ctx.page != null
+    }
+}
+
+/**
+ * ★ 任务性质（§5.7）。
+ *
+ * ## 为什么是 sealed 而不是 `RouteContext` 上加 `allowCloud: Boolean`
+ *
+ * 后者正是主理人明令禁止的形态：boolean 配置项的结局必然是「某个调用点忘了判」，
+ * 而它**没有任何编译期信号**。sealed ⇒ `when` 穷尽性会逼每一个路由实现表态。
+ */
+public sealed interface TaskKind {
+    public data object PureDialog : TaskKind
+
+    /**
+     * ★★ 页面任务（会接触 DOM）。一旦取这个值，路由实现**必须**返回 `LocalOnly`。
+     */
+    public data object PageTask : TaskKind
+}
+
+/**
+ * ★ 页面元数据。★ **不含 DOM 原文** —— 让「顺手把原文塞进来」在字段上就无处可放。
+ */
+public data class PageRef(val host: String, val domChars: Int, val elementCount: Int)
 
 public data class RoutingDecision(
     val target: InferenceTarget,
@@ -914,4 +1143,23 @@ public data class ScreenedPayload(val bytes: Int)
 /** ★ 唯一的出云出口（接口与审计链路本轮打通；MVP 恒不走出口）。 */
 public interface EgressGate {
     public fun screen(payload: OutboundPayload, decision: RoutingDecision): Outcome<ScreenedPayload>
+}
+
+/**
+ * ★ 全仓**唯一一份**出境裁决常量（§7.5，收口「不一致 C」）。
+ *
+ * 迁移前存在两套互不相认的字面量：
+ *  · `:data` 的 `RouteDecisionEntity.EGRESS_PASS` / `EGRESS_BLOCKED`
+ *  · `:chat` 的 `ChatEgress.VERDICT_SCREENED` / `VERDICT_GATE_DENIED`
+ * MVP 下两边都没被写进库（恒 null）所以没爆；一旦上云，`:chat` 会往库里写一个
+ * DAO 层与前端统计都不认识的枚举值 —— 这正是「两份等价实现」的翻版，只是这次是常量。
+ *
+ * ⇒ 两套**同时删除**，改引用本对象。由 D3 断言（扫全仓字面量）盯住。
+ */
+public object EgressVerdict {
+    public const val SCREENED: String = "SCREENED"
+    public const val GATE_DENIED: String = "GATE_DENIED"
+    public const val NOT_SENT: String = "NOT_SENT"
+    public const val DELIVERED: String = "DELIVERED"
+    public const val PARTIAL: String = "PARTIAL"
 }

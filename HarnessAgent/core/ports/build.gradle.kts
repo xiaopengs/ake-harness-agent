@@ -11,9 +11,40 @@ plugins {
 
 dependencies {
     api(project(":core:common"))
-    // Port 的入参/返回类型是 contract 的领域对象。
-    // ⚠ 反过来的方向（contract 依赖 ports）是错的，不要加。
-    api(project(":core:contract"))
+
+    /**
+     * ★★ 2026-10 收紧（架构 08 §5.3）：`:core:contract` 由 `api` 改为 `implementation`。
+     *
+     * ## 为什么必须改
+     *
+     * `PocketDom` 定义在 `:core:contract`。架构 08 §5.3 的 DOM 锁 B 声称：
+     * 「`:cloudai` 的依赖白名单刻意不含 `:core:contract` ⇒ `PocketDom` 在其类路径上
+     *  根本不存在 ⇒ 这是结构级的锁，不是纪律」。
+     *
+     * **这个结论在 `api` 下不成立。** `api` 会把依赖**透传到下游的编译期类路径**，
+     * 于是 `:cloudai` 只要声明了 `implementation(project(":core:ports"))`，
+     * 就能 `import com.ake.core.contract.PocketDom` 并**正常编译** ——
+     * Gradle 边上确实没有 `:core:contract`，但符号照样可见。
+     * 实测：改之前 `:cloudai` 里写 `val x: PocketDom? = null` ⇒ `BUILD SUCCESSFUL`；
+     *       改之后 ⇒ `e: Unresolved reference 'PocketDom'`。
+     *
+     * ⇒ 这条边改成 `implementation` 之后，锁 B 才真的成为「结构上不可能」。
+     *
+     * ## 影响面（已核实为零）
+     *
+     * 用到 `com.ake.core.contract.*` 的模块**全部**（`:llm` `:browser` `:data` `:chat`
+     * `:ui` `:app` `:agent`）都已经**自己显式声明**了 `project(":core:contract")`
+     * 这条 Gradle 边 ⇒ 收紧后无人受损（`checkModuleDependencies` 与
+     * `:core:ports` 主/测编译均绿）。
+     */
+    implementation(project(":core:contract"))
+
+    /**
+     * ★ 新增边（架构 08 §2.4 的偏差，见 `Dialog.kt` 头部）：
+     * `DialogModelPort` / `DeviceModelPort` 是 `ModelPort` 的子接口，Port 总表必须看得见它。
+     */
+    api(project(":core:model-api"))
+
     api(libs.coroutines.core)
 
     testImplementation(libs.bundles.testUnit)

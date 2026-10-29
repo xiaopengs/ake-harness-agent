@@ -42,14 +42,17 @@ val archCoreModules = setOf(
     ":core:ports",
     ":core:model-api",
 )
-val archLeafModules = setOf(":llm", ":browser", ":agent", ":mcp", ":data", ":ui", ":chat")
+val archLeafModules = setOf(":llm", ":browser", ":agent", ":mcp", ":data", ":ui", ":chat", ":cloudai", ":inference")
 
 // ① 允许的 Gradle 依赖边（键 = 模块 path，值 = 允许的上游 path）
 val archAllowedEdges: Map<String, Set<String>> = buildMap {
     put(":core:common", emptySet())
     put(":core:model-api", setOf(":core:common"))
     put(":core:contract", setOf(":core:common"))
-    put(":core:ports", setOf(":core:common", ":core:contract"))
+    // ★ 2026-10 新增边 `:core:ports → :core:model-api`（架构 08 §2.4 的落点偏差，
+    //   见 `core/ports/.../Dialog.kt` 头部说明）：`DialogModelPort` / `DeviceModelPort`
+    //   是 `ModelPort` 的子接口，Port 总表必须看得见它。
+    put(":core:ports", setOf(":core:common", ":core:contract", ":core:model-api"))
     // 实现层只认 core 契约 —— 彼此之间不得横向依赖
     //
     // ★ `:llm → :data`（2026-10 · P1 模型分发接线）：`:llm` 是模型文件的所有者，
@@ -75,6 +78,19 @@ val archAllowedEdges: Map<String, Set<String>> = buildMap {
     //   （§2.2 理由 2）。这条边经源码断言 ② 收紧为「:chat 只能看见 :agent 的 public API
     //   与 core 契约」，且 :chat 编译期必须同时通过 `:chat:compileDebugKotlin`。
     put(":chat", archCoreModules + ":agent")
+    // ★ `:cloudai`（L3，架构 08 §8.1）—— OpenAI 兼容适配器。
+    //
+    //   ★★ **刻意不含 `:core:contract`**。这就是 §5.3 的 DOM 锁 B：
+    //       `PocketDom` 定义在 `:core:contract`，不声明这条边（配合
+    //       `:core:ports` 已收紧为 `implementation`）⇒ 该类符号在 `:cloudai`
+    //       的编译类路径上**不存在**，「把 DOM 送云端」在结构上写不出来。
+    put(":cloudai", setOf(":core:common", ":core:model-api", ":core:ports"))
+    // ★ `:inference`（L4，架构 08 §8.1）—— ModelRouter / FallbackPolicy / 分相。
+    //
+    //   ★ **E6（`:inference → :llm`）已按主理人裁决删除**：纯 JVM 模块无法依赖
+    //     `com.android.library` 模块（`:llm`），且与 §8.3 自相矛盾。
+    //     ⇒ 端侧实现由 `:app` 组合根以 `DeviceModelPort` 接口注入（依赖倒置）。
+    put(":inference", archCoreModules + ":cloudai")
     // 组合根：唯一能看见全部实现层的模块
     put(":app", archCoreModules + archLeafModules)
 }
@@ -98,6 +114,26 @@ val archForbiddenImports: Map<String, Set<String>> = mapOf(
     ":chat" to setOf(
         "com.ake.mcp.", "com.ake.browser.",
         "com.ake.data.persist.db.", "androidx.room.", "com.ake.ui.",
+    ),
+    // =========================================================================
+    // 架构 08 §8.3 —— 本轮两个新模块的源码 import 黑名单
+    // =========================================================================
+    //
+    // ★ `:cloudai` —— 双重保险中的第二道（第一道是 Gradle 白名单里没有
+    //   `:core:contract`）。即便有人先加了 Gradle 边，这里仍会红。
+    ":cloudai" to setOf(
+        // ★ DOM 锁 B 的第二道
+        "com.ake.core.contract.",
+        // 不得看见任何业务/实现层
+        "com.ake.agent.", "com.ake.browser.", "com.ake.chat.",
+        "com.ake.data.", "androidx.room.", "com.ake.ui.", "com.ake.llm.",
+    ),
+    // ★ `:inference` —— Router 只认 `DeviceModelPort` 接口，
+    //   不得直接 import LiteRT 的任何类型（与「:agent 不得碰 Room」同一收紧手法）。
+    ":inference" to setOf(
+        "com.ake.data.persist.db.", "androidx.room.", "com.ake.ui.",
+        "com.ake.browser.",
+        "com.google.ai.edge.litertlm.",
     ),
 )
 

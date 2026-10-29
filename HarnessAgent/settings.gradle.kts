@@ -79,3 +79,6 @@ include(":data")
 include(":chat")
 include(":ui")
 include(":app")
+
+include(":cloudai")
+include(":inference")
