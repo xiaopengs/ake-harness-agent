@@ -13,6 +13,7 @@ import com.ake.core.modelapi.ModelRuntimeState
 import com.ake.core.modelapi.ModelSession
 import com.ake.core.modelapi.SessionSpec
 import com.ake.core.ports.DeviceHealthPort
+import com.ake.core.ports.DeviceModelPort
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Contents
@@ -81,7 +82,20 @@ import javax.inject.Singleton
 public class LiteRtModelPort @Inject constructor(
     private val appContext: Context,
     private val deviceHealth: DeviceHealthPort,
-) : ModelPort {
+) : DeviceModelPort {
+
+    // ══════════════════════════════════════════════════════════════════════
+    // ★ 2026-10：`ModelPort` → `DeviceModelPort`（docs/08 §2.4）
+    //
+    // 目的**只是**让 `:app` 能把它注入 `DefaultModelRouter(device = …)`。
+    // `DeviceModelPort` 是 `ModelPort` 的子接口，`capabilities` 有默认实现
+    // ⇒ **本类零新增成员、推理逻辑一行未动**。
+    //
+    // ⚠ TODO（不在本轮）：`capabilities` 目前仍是 `ModelCapabilities.DEVICE_DEFAULT`。
+    //   真实值应来自加载后的 KV cache 上限（`EngineConfig.maxNumTokens`）与
+    //   `deviceHealth.memoryTier`。接上之后 `EffectiveWindow.forPrompt(Device)`
+    //   才是「真实档位」而不是「默认档位」。改它要动 load 路径 ⇒ 留给下一轮。
+    // ══════════════════════════════════════════════════════════════════════
 
     private val singleThread: CoroutineDispatcher = Executors
         .newSingleThreadExecutor { r -> Thread(r, THREAD_NAME) }

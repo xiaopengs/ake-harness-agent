@@ -54,6 +54,11 @@ dependencies {
     // ── L4：上下文组装 / 预算 / 压缩 / 闸 1 闸 2 / TokenStream 接缝（L5 → L4 向下依赖）
     implementation(project(":agent"))
 
+    // ── L4：推理派发 / 路由（2026-10 端云接线）
+    //   `ChatServices` 用它替换 `LocalOnlyRoutingPort`（恒 LOCAL_ONLY、从未放行过）。
+    //   纯 JVM 模块 ⇒ 不引入任何 Android / LiteRT 类型。
+    implementation(project(":inference"))
+
     implementation(libs.coroutines.android)
     implementation(libs.javax.inject)
 

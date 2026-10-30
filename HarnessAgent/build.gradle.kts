@@ -77,7 +77,11 @@ val archAllowedEdges: Map<String, Set<String>> = buildMap {
     //   「UI 显示一套预算、主循环跑另一套」是本项目已反复警告过的一致性灾难
     //   （§2.2 理由 2）。这条边经源码断言 ② 收紧为「:chat 只能看见 :agent 的 public API
     //   与 core 契约」，且 :chat 编译期必须同时通过 `:chat:compileDebugKotlin`。
-    put(":chat", archCoreModules + ":agent")
+    // ★ `:chat → :inference`（2026-10 · 端云接线）：`ChatServices` 不再硬绑
+    //   `LocalOnlyRoutingPort`，改用 `:inference` 的 `DialogRoutingPort`。
+    //   `:inference` 是 L4 纯 JVM、不含 Android 依赖 ⇒ 这条边不会把 `:chat`
+    //   拖进任何 LiteRT 类型（由下面的 import 黑名单收紧）。
+    put(":chat", archCoreModules + ":agent" + ":inference")
     // ★ `:cloudai`（L3，架构 08 §8.1）—— OpenAI 兼容适配器。
     //
     //   ★★ **刻意不含 `:core:contract`**。这就是 §5.3 的 DOM 锁 B：

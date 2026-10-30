@@ -154,6 +154,11 @@ internal class FakeChatSessionDao : ChatSessionDao {
 
     override suspend fun cloudCredentialIdOf(sessionId: String): String? = credentialOf[sessionId]
 
+    /** sessionId → 落库文本（`LOCAL` / `CLOUD:<ref>`）。NULL = 该会话**从未登记过**目标。 */
+    val targetOf = LinkedHashMap<String, String?>()
+
+    override suspend fun modelTargetOf(sessionId: String): String? = targetOf[sessionId]
+
     override suspend fun bindCredential(
         sessionId: String,
         credId: String?,
@@ -161,6 +166,7 @@ internal class FakeChatSessionDao : ChatSessionDao {
         now: Long,
     ): Int {
         credentialOf[sessionId] = credId
+        targetOf[sessionId] = modelTarget
         return 1
     }
 

@@ -223,6 +223,7 @@ internal class UnsupportedChatSessionDao : ChatSessionDao {
     override fun observeRecent(limit: Int): Flow<List<ChatSessionEntity>> = unsupported("observeRecent")
     override fun observeByAgent(agentId: String): Flow<List<ChatSessionEntity>> = unsupported("observeByAgent")
     override suspend fun byId(id: String): ChatSessionEntity? = unsupported("byId")
+    override suspend fun modelTargetOf(sessionId: String): String? = unsupported("modelTargetOf")
     override suspend fun touchForNewMessage(
         sessionId: String,
         now: Long,

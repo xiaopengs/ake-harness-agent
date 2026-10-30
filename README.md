@@ -239,7 +239,7 @@ cd HarnessAgent
 **已完成并通过真机级编译验证**
 
 - **全部 14 个模块 `compileDebugKotlin` / `compileKotlin` 均 BUILD SUCCESSFUL**（含 Hilt KSP 与 Room KSP）
-- **`./gradlew test`：1067 通过 / 0 失败 / 2 跳过**（跳过的是 `:ui` 的 `captureToImage`，Robolectric 无 Surface/PixelCopy，历史已知边界；立项时全工程仅 4 个单测）
+- **`./gradlew test`：1125 通过 / 0 失败 / 2 跳过**（跳过的是 `:ui` 的 `captureToImage`，Robolectric 无 Surface/PixelCopy，历史已知边界；立项时全工程仅 4 个单测）
 - **`checkModuleDependencies`：OK** —— 14 个模块的依赖边均在白名单内，`:ui` 对 `:chat`/`:agent`/`:mcp`/`:data` 的 import 为 0；`:cloudai` 对 `:core:contract` 的依赖为 **0**（DOM 锁 B 生效）
 - `:app` —— Dagger 依赖图贯通，MissingBinding 清零；`ChatRunnerPort`/`SkillRegistryPort`/`CapabilityGrantPort` 均已真绑定（生成代码里是 `Optional.of(...)` 而非 `Optional.empty()`）
 - 依赖红线已排除：`ktor-client-plugins-sse` 该坐标在任何版本都不存在（SSE 已收进 `ktor-client-core`），已从 catalog 移除
@@ -329,7 +329,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 |---|---|
 | 从未产出过 APK | ✅ **已解除** —— debug 93.70MB + release 60.04MB |
 | AGP 与 R8 从未执行 | ✅ **已解除** —— `assembleRelease` 跑通，R8 真实执行 |
-| 七个模块零测试 | ✅ **已解除** —— 4 → **1067 通过** |
+| 七个模块零测试 | ✅ **已解除** —— 4 → **1125 通过** |
 | **从未在任何真机上运行过一次** | ❌ **仍然成立 —— 这是现在唯一充分的一条** |
 
 复审新识别的 P0：
@@ -351,7 +351,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 
 合计约 **0%，宽口径 ≤5%**。放宽到相邻纯逻辑（如模型分发状态机）有 30–45%，但那不是风险本体。
 
-**1067 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
+**1125 个 JVM 单测 + release 构建通过，验证的是输入与制品，没有一个验证过程。**
 
 > **禁令**（验收文档已写死）：不得把 `assembleRelease` 成功表述为"release 验证通过"。
 > 它能证明：编译/KSP/资源与 manifest 合并跑通、R8 真执行、高危符号存活、`.so` 入双 ABI、可复现。
@@ -385,13 +385,14 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 
 | 待办 | 级别 | 说明 |
 |---|---|---|
-| **用户今天还切不了模型** | **P0** | `:data` v3→v4 **已完成**；仍缺两件：设置页切换 UI、`:app` 组合根装配接线（`ModelRouter` 尚未拿到 `DeviceModelPort` 与云端实现，`:chat` 仍绑 `LocalOnlyRoutingPort`） |
-| **`PRE` 回落「必须告知」无 API 承载** | **P0** | `FallbackPolicy` 只有 `mustSayAlreadySent`（POST 语义）。PRE 回落时"已回落到本地"全靠 UI 自觉，没有类型约束 ⇒ **可静默降级**。待裁：加 `mustAnnounceFallback`，或把回落结论改成 sealed outcome 逼调用方表态 |
+| **云端仍未进入真生成路径** | **P0** | ★ 今天最重要的发现。已完成：`:data` v4、`:app` 组合根装配（`ModelRouter` 拿到 device/local/remote 三实现）、`:chat` 解除 `LocalOnly*` 硬绑、设置页切换 UI、模型徽标。但 **`ChatLoop` 仍只持有端侧 `model: ModelPort`**，`openSession → ModelSession.generate` 全程不经过 `ModelRouter`；而 `DialogModelPort.openDialog` 的 `permit` 必填、`ChatLoop` 手上也没有 `RouteContext`（缺 `turnId`/`payloadClasses`）⇒ **"路由判定放行云端"与"真的用云端生成"之间还差一段接线**。→ 用户选了云端，今天仍由端侧出字 |
+| **新会话不继承用户选的默认后端** | **P0** | `chat_session.model_target` 的列默认值是 `'LOCAL'`，`DialogTargetStore` 只有「按 sessionId 读写」。用户设置页选了云端，**新建的会话仍是本地** ⇒ 静默不一致（与红线同类错误，只是没有出境维度）。需要「全局默认目标」的落点（单行表或 `app_preference`），涉及 v5 迁移 |
+| **`PRE` 回落「必须告知」** | ✅ **已解除** | 三段闭环：`FallbackPolicy.mustAnnounceFallback`（裁决）→ `EgressAnnouncementSink`（唯一出口，`:app` 缺绑即 `MissingBinding` 编译失败）→ `AnnouncementCenter` 同时实现 `TurnEgressNoticeSource`（UI 唯一读取口）。`FallbackAnnouncement` 补 `failure`/`turnId`/`sessionId`，告知能挂到具体一轮。★ `ALREADY_SENT ⇒ producedBy=REMOTE`：请求体确实出境了，不许用"失败了"掩盖"已出境" |
 | `FirstByteTimeout` 归 POST 是推断 | P1 | 依据是"请求体确实已被服务端收下"，但没发 `Expect: 100-continue`，ktor 也不确认接收 ⇒ 存在"服务端零接收、我们却告诉用户已发出"的窗口。**只能靠 mitmproxy 抓包证伪**，是最可能被真机推翻的一格 |
 | `:data` 迁移 3→4 | ✅ **已解除** | 已落地：`cloud_credential`、`route_decision` 加 7 列、`RouteDecisionVerdict` 正交拆分、`EgressAuditReconciler` 冷启对账；`:data` 249 → 324（含 sqlite3 CLI 外部 oracle） |
 | `ChatMigration2To3` 的 `PRAGMA foreign_keys=OFF` 是静默 no-op | P2 | 宋砚秋用 SQLite 实证：该 PRAGMA 在事务内不生效。**今天无害**（`memory_card` 是子表），下一轮重建任何父表会炸，**且它那条测试仍会亮绿**。应改 `defer_foreign_keys` |
 | `route_decision`「恒为空」是推理而非实测 | P2 | 整套存量迁移策略建立在"表里没有历史行"上。需真机 `COUNT(*)` 证伪；若非 0，说明存在未发现的写入路径，`docs/09` §5 要整节重做 |
-| **4 处总线接口缝隙未埋** | **P1** | `docs/10` 裁定**不要押后**：`CloudPeerKind` 单变体 sealed、`RoutingDecision.decisionSchemaV` 落库、`EgressCoordinator` Port（唯一硬依赖，先定签名）、`DialogTargetCodec` 未知态改 `Unrecognized`。现在埋最便宜——`:app` 尚无 `:cloudai`/`:inference` 依赖，`:chat` 仍绑 `LocalOnlyRoutingPort` |
+| 4 处总线接口缝隙 | ✅ **3/4 已埋** | `CloudPeerKind` 单变体 sealed、`EgressCoordinator` Port、`DialogTargetCodec.Unrecognized` 均已落地（`Unrecognized` 落地时实际让 **3 处**编译红，文档预估 2 处）。**剩 1 处**：`RoutingDecision.decisionSchemaV` 只在类型层，落库列需 v5 迁移 —— 与「v4 迁移已验收冻结」冲突，暂缓 |
 | **云端端点零钉扎** | **P1** | 模型分发侧有 pinned SPKI 验签，但**云端 endpoint 没有** ⇒ 审计记录了"发给谁"，却没保证"真发给那个人"。这是唯一一条"记了账但账可能记错对象"的裂缝 |
 | 「出境的是 D1 还是 D2」待复核 | P2 | 顾图南标注**不确定**：今天真正出境的是对话文本（D1）而非 D2。若判为 D2，`docs/08` §7 的 permit 语义要从"每轮显式授权"改成"类别白名单授权" —— 这不是措辞问题，是授权粒度问题 |
 

@@ -54,6 +54,21 @@ public class DefaultModelRouter(
         return when (target) {
             is DialogTarget.Device -> Outcome.Ok(localDialog)
 
+            /**
+             * ★★ docs/10 §6.2-D 的产物：**不猜**。
+             *
+             * 落库文本认不出来 ⇒ 返回 Err，让上层提示用户重新选一次目标。
+             * 若在这里「猜成 Device」，用户会看到一个目标被悄悄改掉的会话，
+             * 而这件事**没有任何记录** —— 那正是这条缝隙要消灭的东西。
+             */
+            is DialogTarget.Unrecognized -> Outcome.Err(
+                AppError(
+                    code = CODE_UNRECOGNIZED_TARGET,
+                    reasonKey = "err_router_unrecognized_target",
+                    severity = Severity.MEDIUM,
+                ),
+            )
+
             is DialogTarget.Remote -> if (!creds.exists(target.credentialRef)) {
                 Outcome.Err(
                     AppError(
@@ -91,6 +106,9 @@ public class DefaultModelRouter(
 
     public companion object {
         public const val CODE_NO_TARGET: String = "ROUTER_NO_TARGET"
+
+        /** ★ 落库文本无法识别（docs/10 §6.2-D）。UI 必须提示「请重新选择目标」。 */
+        public const val CODE_UNRECOGNIZED_TARGET: String = "ROUTER_UNRECOGNIZED_TARGET"
     }
 }
 

@@ -1,8 +1,10 @@
 package com.ake.inference
 
+import com.ake.core.ports.AnnouncementKind
 import com.ake.core.ports.AuditOutcome
 import com.ake.core.ports.CloudFailure
 import com.ake.core.ports.EgressPhase
+import com.ake.core.ports.FallbackAnnouncement
 
 // =============================================================================
 // ★★ 降级判定 —— **全仓只有这一份**（架构 08 §4.4 / §4.5）
@@ -109,6 +111,57 @@ public object FallbackPolicy {
      */
     public fun mustSayAlreadySent(failure: CloudFailure): Boolean =
         failure.phase == EgressPhase.POST
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // ★★ P0：PRE 回落「必须告知」的承载（2026-10 主理人裁决）
+    //
+    // ## 缺口
+    //
+    // §4.4 要求 PRE 阶段「允许回落 ∧ 必须告知」。此前 API 上只有
+    // [mustSayAlreadySent]（"已经发给 host"），它**只对 POST 有意义** ——
+    // PRE 回落那句「未上云，已由本机完成」没有任何承载 ⇒ 全靠 UI 自觉 ⇒ 可静默降级。
+    //
+    // ## 承载的形状：三段，缺一不可
+    //
+    //  ① [mustAnnounceFallback] —— 判据（这个失败形态**要不要**说）；
+    //  ② [announcementFor]      —— 内容（说**什么**：i18n key + 归一化 host）；
+    //  ③ [com.ake.core.ports.EgressAnnouncementSink] —— **出口**（谁去说）。
+    //
+    // ## ★ 为什么「给个 Boolean 字段」不够
+    //
+    // 字段可以被忽略：调用方拿到 `mustAnnounce = true` 然后什么都不做，
+    // 编译期不会有任何反应。于是承载必须让「说」这件事**发生在拿到结果之前**，
+    // 并且让「不说」在装配期就红 ⇒ 见 [DefaultEgressCoordinator]：
+    // 它在返回 `FellBackToLocal` **之前**先调 sink，而 sink 由 `:app` 用 Hilt 绑
+    // ⇒ 缺绑 = `[Dagger/MissingBinding]` = 编译失败。
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /** ★ 这个失败形态**是否必须**告知用户「已回落到本机」。等价于「决议是回落」。 */
+    public fun mustAnnounceFallback(failure: CloudFailure): Boolean =
+        actionFor(failure) == FallbackAction.FALLBACK_TO_DEVICE
+
+    /**
+     * ★ 生成告知内容。
+     *
+     * @param host 已过 `Hosts.normalise` 的端点 host；PRE 阶段允许为空（确实没发出去）。
+     */
+    public fun announcementFor(
+        failure: CloudFailure,
+        host: String?,
+        turnId: String? = null,
+        sessionId: String? = null,
+    ): FallbackAnnouncement =
+        FallbackAnnouncement(
+            failure = failure,
+            kind = if (mustSayAlreadySent(failure)) {
+                AnnouncementKind.ALREADY_SENT
+            } else {
+                AnnouncementKind.FELL_BACK_TO_LOCAL
+            },
+            host = host,
+            turnId = turnId,
+            sessionId = sessionId,
+        )
 
     /** §7.3：写进 `route_decision.outcome` 的终态。 */
     public fun auditOutcome(failure: CloudFailure): AuditOutcome = when (failure) {

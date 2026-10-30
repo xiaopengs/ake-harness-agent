@@ -149,4 +149,55 @@ class DomLockCloudTest {
         assertThat(deltas).isEmpty()
         assertThat(transport.calls).isEqualTo(0)
     }
+
+    // ═══ 3. ★★ 端到端：字节数 ═══
+
+    /**
+     * ★★ **bytesSent == 0**（主理人指定判据）。
+     *
+     * 页面上下文 + 合法 permit + 合法端点 ⇒ **一个字节都没发出去**。
+     *
+     * ★ 这里断言的是 `bytesSent`（请求体真实长度），不是布尔「有没有调」——
+     *   后者无法区分「发了 0 字节」与「根本没进传输层」，而前者可以。
+     */
+    @Test
+    fun pageContextSendsExactlyZeroBytes() = runBlocking {
+        val transport = ScriptedTransport()
+
+        val r = port(transport).openDialog(testSpec(), testPermit(), page)
+
+        assertThat(r).isInstanceOf(Outcome.Err::class.java)
+        assertThat(transport.bytesSent).isEqualTo(0)
+        assertThat(transport.calls).isEqualTo(0)
+    }
+
+    /**
+     * ★★ 反证（必须存在，否则 `bytesSent == 0` 可能只是计数器没接）。
+     *
+     * 同样的端口、同样的 permit，只把 `PromptContext` 换成 `TextOnly`
+     * ⇒ **字节真的出去了**，且数量等于请求体长度。
+     */
+    @Test
+    fun textOnlySendsARealNonZeroBody() = runBlocking {
+        val transport = ScriptedTransport(failWith = CloudTransportOutcome.ConnectFailed)
+
+        val opened = port(transport).openDialog(testSpec(), testPermit(), PromptContext.TextOnly)
+        assertThat(opened).isInstanceOf(Outcome.Ok::class.java)
+
+        (opened as Outcome.Ok).value.generateStream(testRequest("hello cloud")) { }
+
+        assertThat(transport.calls).isEqualTo(1)
+        assertThat(transport.bytesSent).isGreaterThan(0)
+        // ★ 字节数必须等于请求体长度（不是「> 0」这种能被 1 个字节糊弄的判据）
+        assertThat(transport.bytesSent).isEqualTo(
+            CloudRequestBody.build(
+                cfg = FakeCredentials().exposedConfig(),
+                spec = testSpec(),
+                currentTurn = "hello cloud",
+                maxOutputTokens = 256,
+                stream = true,
+                jsonConstraint = false,
+            ).toByteArray(Charsets.UTF_8).size,
+        )
+    }
 }

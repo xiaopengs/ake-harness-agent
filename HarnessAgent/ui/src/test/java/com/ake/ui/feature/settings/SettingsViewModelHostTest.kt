@@ -1,12 +1,17 @@
 package com.ake.ui.feature.settings
 
 import com.ake.core.common.Hosts
+import com.ake.ui.testsupport.FakeChatSessionStore
+import com.ake.ui.testsupport.FakeCloudCredentials
+import com.ake.ui.testsupport.FakeDialogTargetStore
 import com.ake.ui.testsupport.FakeSettingsStore
 import com.ake.ui.testsupport.FixedBudgets
 import com.ake.ui.testsupport.FixedDeviceHealth
 import com.ake.ui.testsupport.NoopPrivacy
+import com.ake.ui.spi.CloudEndpointProbe
 import com.ake.ui.testsupport.runUiTest
 import com.google.common.truth.Truth.assertThat
+import java.util.Optional
 import com.google.common.truth.Truth.assertWithMessage
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -191,8 +196,22 @@ class SettingsViewModelHostTest {
 
     // ─────────────────────────────────────────────── 内部
 
-    private fun vm(store: FakeSettingsStore = FakeSettingsStore()): SettingsViewModel =
-        SettingsViewModel(NoopPrivacy, store, FixedDeviceHealth(), FixedBudgets())
+    private fun vm(
+        store: FakeSettingsStore = FakeSettingsStore(),
+        creds: FakeCloudCredentials = FakeCloudCredentials(),
+        targets: FakeDialogTargetStore = FakeDialogTargetStore(),
+        sessions: FakeChatSessionStore = FakeChatSessionStore(),
+        probe: CloudEndpointProbe? = null,
+    ): SettingsViewModel = SettingsViewModel(
+        privacy = NoopPrivacy,
+        settings = store,
+        health = FixedDeviceHealth(),
+        budgets = FixedBudgets(),
+        creds = creds,
+        targets = targets,
+        sessions = sessions,
+        probe = Optional.ofNullable(probe),
+    )
 
     private companion object {
 

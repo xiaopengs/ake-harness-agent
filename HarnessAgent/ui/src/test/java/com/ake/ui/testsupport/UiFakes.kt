@@ -1,6 +1,7 @@
 package com.ake.ui.testsupport
 
 import com.ake.core.common.AppError
+import com.ake.core.common.LogLevel
 import com.ake.core.common.Outcome
 import com.ake.core.contract.RiskClass
 import com.ake.core.contract.StepAction
@@ -11,12 +12,33 @@ import com.ake.core.ports.AgentProfileDraft
 import com.ake.core.ports.AgentProfileStorePort
 import com.ake.core.ports.AgentProfileSummary
 import com.ake.core.ports.AgentTemplate
+import com.ake.core.common.LogSink
+import com.ake.core.modelapi.ModelLoadConfig
+import com.ake.core.modelapi.ModelRuntimeState
+import com.ake.core.modelapi.ModelSession
+import com.ake.core.modelapi.SessionSpec
 import com.ake.core.ports.AppendMessage
 import com.ake.core.ports.BatteryState
 import com.ake.core.ports.CapabilityGrantPort
 import com.ake.core.ports.CapabilityKind
 import com.ake.core.ports.CapabilityRef
 import com.ake.core.ports.ChatEvent
+import com.ake.core.ports.CloudCredentialPort
+import com.ake.core.ports.CredentialRef
+import com.ake.core.ports.DialogModelPort
+import com.ake.core.ports.DialogTarget
+import com.ake.core.ports.DialogTargetStore
+import com.ake.core.ports.EgressPermit
+import com.ake.core.ports.EndpointConfig
+import com.ake.core.ports.ModelCapabilities
+import com.ake.core.ports.ModelRouter
+import com.ake.core.ports.PlainSecret
+import com.ake.core.ports.PromptContext
+import com.ake.core.ports.TlsMode
+import com.ake.ui.spi.CloudEndpointProbe
+import com.ake.ui.spi.CloudProbeResult
+import com.ake.ui.spi.TurnEgressNotice
+import com.ake.ui.spi.TurnEgressNoticeSource
 import com.ake.core.ports.ChatMessageView
 import com.ake.core.ports.ChatRunnerPort
 import com.ake.core.ports.ChatSessionStorePort
@@ -492,4 +514,178 @@ public fun template(
         signatureKeyId = null,
         scan = TrustScanVerdict.pass(now = TEST_NOW, version = 1),
     ),
+)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 云端推理（`:core:ports` 的假实现）
+//
+// ★ 这几个 fake 的共同纪律：**不在 fake 里替被测代码做决定**。
+//   它们只负责「把某个答案原样交回去」，以及「记下被调用过几次、参数是什么」。
+//   一旦 fake 内部开始判断（比如“Router 返回设备侧”），被测的 UI 逻辑就变成了
+//   在断言 fake 自己的聪明 —— 那正是 ':app' ColdStartWiringTest 上一版被一枪打死的原因。
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 记账式 `CloudCredentialPort`。
+ *
+ * ★ `upserts` 记的是 `(ref, cfg)`，`secrets` 单独记 `PlainSecret` 本体 ——
+ *   分开存是有意的：断言「Key 有没有被转手」时，`PlainSecret.toString()` 必须是 `***`，
+ *   而不是顺手把明文搬出来。
+ */
+public class FakeCloudCredentials(
+    initial: Map<CredentialRef, Pair<EndpointConfig, String>> = emptyMap(),
+) : CloudCredentialPort {
+
+    public val upserts: MutableList<Pair<CredentialRef, EndpointConfig>> = mutableListOf()
+    public val deletes: MutableList<CredentialRef> = mutableListOf()
+    /** ★ 收下的 secret 本体。断言时只允许 `toString()`，不调 `useAsBearer`。 */
+    public val secrets: MutableList<PlainSecret> = mutableListOf()
+    public var enableDeletion: Boolean = true
+
+    private val store: LinkedHashMap<CredentialRef, EndpointConfig> =
+        LinkedHashMap(initial.mapValues { it.value.first })
+
+    private val refsFlow = MutableStateFlow(store.keys.toList())
+
+    override suspend fun upsert(ref: CredentialRef, cfg: EndpointConfig, secret: PlainSecret): Outcome<Unit> {
+        upserts += ref to cfg
+        secrets += secret
+        store[ref] = cfg
+        refsFlow.value = store.keys.toList()
+        return Outcome.Ok(Unit)
+    }
+
+    override fun refs(): Flow<List<CredentialRef>> = refsFlow
+
+    override suspend fun configOf(ref: CredentialRef): Outcome<EndpointConfig> =
+        store[ref]?.let { Outcome.Ok(it) }
+            ?: Outcome.Err(AppError.unknown("err_cred_not_found"))
+
+    override suspend fun secretOf(ref: CredentialRef): Outcome<PlainSecret> =
+        secrets.lastOrNull()?.let { Outcome.Ok(it) }
+            ?: Outcome.Err(AppError.unknown("err_cred_not_found"))
+
+    override suspend fun delete(ref: CredentialRef): Outcome<Unit> {
+        deletes += ref
+        if (!enableDeletion) return Outcome.Err(AppError.unknown("err_wipe_failed"))
+        store.remove(ref)
+        refsFlow.value = store.keys.toList()
+        return Outcome.Ok(Unit)
+    }
+
+    override suspend fun exists(ref: CredentialRef): Boolean = store.containsKey(ref)
+}
+
+/** 记账式 `DialogTargetStore`。★ `selects` 逐次记录 —— 「写没写」与「写了几次」要能分开断言。 */
+public class FakeDialogTargetStore(
+    initial: Map<String, DialogTarget> = emptyMap(),
+) : DialogTargetStore {
+
+    public val selects: MutableList<Pair<String, DialogTarget>> = mutableListOf()
+    public var selectResult: Outcome<Unit> = Outcome.Ok(Unit)
+    public val ofCalls: MutableList<String> = mutableListOf()
+
+    private val map: LinkedHashMap<String, DialogTarget> = LinkedHashMap(initial)
+
+    override suspend fun of(sessionId: String): DialogTarget? {
+        ofCalls += sessionId
+        return map[sessionId]
+    }
+
+    override suspend fun select(sessionId: String, target: DialogTarget): Outcome<Unit> {
+        selects += sessionId to target
+        if (selectResult !is Outcome.Ok) return selectResult
+        map[sessionId] = target
+        return Outcome.Ok(Unit)
+    }
+}
+
+/**
+ * 一个只会报告自己的 `DialogModelPort`。
+ *
+ * @param locality 它自称在哪 —— 测试用它模拟「路由器此刻给出的答案」。
+ */
+public class FakeDialogPort(
+    override val capabilities: ModelCapabilities = ModelCapabilities.DEVICE_DEFAULT,
+    public var routerResult: Outcome<DialogModelPort>? = null,
+) : DialogModelPort {
+
+    override suspend fun load(config: ModelLoadConfig): Outcome<Unit> = Outcome.Ok(Unit)
+    override suspend fun unload(): Outcome<Unit> = Outcome.Ok(Unit)
+    override val runtimeState: Flow<ModelRuntimeState> = flowOf(ModelRuntimeState.Unloaded)
+    override suspend fun openSession(spec: SessionSpec): Outcome<ModelSession> =
+        Outcome.Err(AppError.unknown("err_no_session"))
+    override fun estimateTokens(text: String): Int = text.length / 3
+
+    override suspend fun openDialog(
+        spec: SessionSpec,
+        permit: EgressPermit?,
+        context: PromptContext,
+    ): Outcome<ModelSession> = Outcome.Err(AppError.unknown("err_dialog_closed"))
+}
+
+/**
+ * 记账式 `ModelRouter`。
+ *
+ * ★ 默认返回 `Err(NO_TARGET)` 而不是某种「合理默认值」：
+ *   `DefaultModelRouter` 遇到没登记的目标就**不猜**（见 `Dialog.kt`），
+ *   fake 跟着这一条走，UI 才不会在没有数据时把一个假答案当真的。
+ *
+ * @param port 要交出去的那个端口；为 null 时返回 [err]。
+ */
+public class FakeModelRouter(
+    public var port: DialogModelPort? = null,
+    public var err: Outcome<DialogModelPort> = Outcome.Err(AppError.unknown("err_no_target")),
+) : ModelRouter {
+
+    public val calls: MutableList<String> = mutableListOf()
+
+    override suspend fun dialogFor(sessionId: String): Outcome<DialogModelPort> {
+        calls += sessionId
+        return port?.let { Outcome.Ok(it) } ?: err
+    }
+}
+
+/** 「由测试决定吐什么事件」的回落 / 出境事实源。 */
+public class FakeTurnEgressNoticeSource(
+    initial: List<TurnEgressNotice> = emptyList(),
+) : TurnEgressNoticeSource {
+
+    public val flow: MutableStateFlow<List<TurnEgressNotice>> = MutableStateFlow(initial)
+
+    override fun notices(sessionId: String): Flow<List<TurnEgressNotice>> = flow
+}
+
+/** 「按剧本给答案」的自检。记录每一次调用，用来断言到底发没发请求。 */
+public class ScriptedCloudProbe(
+    public var result: CloudProbeResult = CloudProbeResult.NotWired,
+) : CloudEndpointProbe {
+
+    public val calls: MutableList<Pair<String, Int>> = mutableListOf()
+
+    override suspend fun probe(endpoint: EndpointConfig, secret: PlainSecret): CloudProbeResult {
+        // ★ 只记 host 与掩码长度，不记内容：fake 自己也不该成为一条泄漏路径。
+        calls += endpoint.hostOf() to secret.toString().length
+        return result
+    }
+}
+
+/** ★ 截获日志。负向断言要能证明「这条路确实打了日志」，就不能只提供一个空捕获。 */
+public class CapturingLogSink : LogSink {
+    public val lines: MutableList<Pair<String, String>> = mutableListOf()
+
+    override fun log(level: LogLevel, tag: String, message: String, cause: Throwable?) {
+        lines += tag to message
+    }
+}
+
+public fun cloudEndpoint(
+    baseUrl: String = "https://api.example.com/v1",
+    modelName: String = "test-model",
+): EndpointConfig = EndpointConfig(
+    baseUrl = baseUrl,
+    modelName = modelName,
+    tlsMode = TlsMode.REQUIRED,
+    declaredContextWindow = null,
+    label = modelName,
 )

@@ -10,6 +10,7 @@ import com.ake.core.common.RedactionGate
 import com.ake.core.common.SystemClock
 import com.ake.core.modelapi.ModelPort
 import com.ake.core.ports.DeviceHealthPort
+import com.ake.core.ports.DeviceModelPort
 import com.ake.core.ports.ModelLifecyclePort
 import com.ake.llm.LiteRtModelLifecycle
 import com.ake.llm.LiteRtModelPort
@@ -76,6 +77,20 @@ public abstract class CoreBindingsModule {
     @Binds
     @Singleton
     public abstract fun bindModelPort(impl: LiteRtModelPort): ModelPort
+
+    /**
+     * ★ 推理引擎 → `DeviceModelPort`（docs/08 §2.4 / E6 删除后的落地）。
+     *
+     * `LiteRtModelPort` 现在 `implements DeviceModelPort`，于是它可以被注入
+     * `DefaultModelRouter(device = …)` —— 这是 `:inference`（纯 JVM，看不见 `:llm`）
+     * 拿到端侧实现的**唯一通道**。
+     *
+     * 同一个 `LiteRtModelPort` 绑成两个 key（`ModelPort` / `DeviceModelPort`）不会
+     * 造出两个实例：Dagger 对 `@Singleton` 的 `@Binds` 复用同一个 provider。
+     */
+    @Binds
+    @Singleton
+    public abstract fun bindDeviceModelPort(impl: LiteRtModelPort): DeviceModelPort
 
     /** 模型生命周期：下载 → 校验 → 加载 → 卸载 */
     @Binds

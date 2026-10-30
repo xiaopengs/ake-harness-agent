@@ -33,6 +33,7 @@ import com.ake.core.ports.MessageRole
 import com.ake.core.ports.MessageStatus
 import com.ake.ui.R
 import com.ake.ui.model.ChatTurnFailure
+import com.ake.ui.model.ModelBadge
 import com.ake.ui.model.SkillCardUi
 import com.ake.ui.model.chatTerminalCopyOf
 import com.ake.ui.model.messageStatusLabelRes
@@ -79,6 +80,16 @@ public fun MessageBubble(
     statusOverride: MessageStatus? = null,
     failure: ChatTurnFailure? = null,
     skillCard: SkillCardUi? = null,
+    /**
+     * ★ 这条回答是**哪里**产出的（端侧 / 云端 / 不知道）。
+     *
+     * `null` ⇒ 一次都没算出来（例如还没有登记过目标的会话刚开始）。
+     * 「没有 badge」与「badge 说端侧」必须一眼分开 —— 前者是还没答案，后者是一个答案。
+     */
+    badge: ModelBadge? = null,
+    /** ★ 本轮若发生过回落 / 出境失败，整份事实传进来。
+     *  它的渲染不是"可选点缀" —— 有就必须出镜，一次都不能被丢掉。 */
+    egressNotice: com.ake.ui.spi.TurnEgressNotice? = null,
     onRetry: () -> Unit = {},
     onOpenTask: ((String) -> Unit)? = null,
 ) {
@@ -173,6 +184,7 @@ public fun MessageBubble(
                         },
                     )
                 }
+                ModelBadgeChip(badge)
             }
             Spacer(Modifier.height(4.dp))
 
@@ -208,8 +220,68 @@ public fun MessageBubble(
                     }
                 }
             }
+
+            // ★ 回落 / 出境告知挂在气泡下面：用户看到的是「这一条回答」，
+            //   原因贴在它身上才对得上。放到页面顶部，往回翻历史时它就是一条没有来由的残句。
+            egressNotice?.let { EgressNoticeFoot(it) }
         }
     }
+}
+
+/**
+ * ★ PRE 回落 / POST 失败的告知 —— §4.2「禁止静默回落」在屏幕上的全部内容。
+ *
+ * 由两部分组成，缺一不可：
+ *  · 标题 —— 说清楚「出了什么事」；
+ *  · 下一步 —— 说清楚「你的数据到底出去没有」。
+ *
+ * 只给标题的话，用户知道失败了，却不知道这次失败意味着他的话有没有出境 ——
+ * 而「我以为在本地 / 实际已出境」正是本项目最贵的一种错觉。
+ */
+@Composable
+private fun EgressNoticeFoot(notice: com.ake.ui.spi.TurnEgressNotice) {
+    val copy = com.ake.ui.model.cloudFailureCopyOf(notice.failure)
+    Spacer(Modifier.height(6.dp))
+    Text(
+        text = stringResource(copy.titleRes),
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.SemiBold,
+        color = AkeColors.RiskSensitive,
+    )
+    Text(
+        text = com.ake.ui.model.formatCloudCopy(stringResource(copy.nextRes), notice.host),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/**
+ * ★★ 「这条回答是谁写的」。
+ *
+ * ## 为什么它跟状态徽标并排，却不能合并成一个
+ *
+ * 状态徽标答的是「这条说完了没有」，本徽标答的是「它在哪儿被算出来的」。
+ * 两件事各自独立：一条由云端产出的回答可以说完也可以失败 ——
+ * 合并成一个就必然有人丢掉一半信息。
+ *
+ * ## ★ 为什么 `[ModelBadge.Unregistered]` / `[ModelBadge.Unavailable]` 也要画出来
+ *
+ * 「不知道」是一种**必须被看见**的状态。把它画成空白，用户会默认答案是「本机」——
+ * 那正是 §4.2 禁止的那种不可察觉的假象：**界面什么都不说，比说错更糟**。
+ */
+@Composable
+private fun ModelBadgeChip(badge: ModelBadge?) {
+    val (text, color) = when (badge) {
+        null -> return
+        ModelBadge.Unregistered -> stringResource(R.string.badge_unregistered) to AkeColors.RiskSensitive
+        is ModelBadge.Device -> stringResource(R.string.badge_device) to MaterialTheme.colorScheme.outline
+        // ★ 云端那一档必须带上模型名与归一化 host —— 「云端」两个字不说明发给谁了。
+        is ModelBadge.Remote -> stringResource(R.string.badge_remote, badge.modelName, badge.host) to
+            AkeColors.RiskExternal
+        is ModelBadge.Unavailable -> stringResource(R.string.badge_unavailable) to AkeColors.RiskSensitive
+    }
+    Spacer(Modifier.width(6.dp))
+    Tag(text = text, color = color)
 }
 
 /**

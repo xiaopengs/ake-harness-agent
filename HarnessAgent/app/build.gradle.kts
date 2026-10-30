@@ -351,6 +351,14 @@ dependencies {
     //   它注入的是 `Optional<ChatRunnerPort>`，本条边不影响那条纪律。
     implementation(project(":chat"))
     implementation(project(":ui"))
+    // ★ 2026-10：端云推理装配（docs/08 §8.2 / docs/10 §6.3）。
+    //   `:app` 是**唯一**能同时看见 `:llm`（端侧引擎）与 `:cloudai`（云端适配器）
+    //   的地方 ⇒ E6 删除之后，`ModelRouter` 的装配**只能**落在这里（依赖倒置）。
+    //   `:inference` 被传递进来，是为了让 `ChatServices` 能拿到 `DialogRoutingPort`。
+    implementation(project(":inference"))
+    // ★ `:cloudai` 也需显式声明：`:inference` 用 `implementation` 引入它，
+    //   不会传递。组合根要 `new OpenAiCompatibleDialogPort(...)` 就必须看得见它。
+    implementation(project(":cloudai"))
 
     implementation(platform(libs.compose.bom))
     implementation(libs.bundles.compose)

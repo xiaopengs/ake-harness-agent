@@ -7,8 +7,7 @@ import com.ake.agent.planner.SystemCharterText
 import com.ake.chat.ctx.ChatHistoryCollector
 import com.ake.chat.ctx.ModeProfileRegistry
 import com.ake.chat.egress.ChatEgress
-import com.ake.chat.egress.LocalOnlyEgressGate
-import com.ake.chat.egress.LocalOnlyRoutingPort
+import com.ake.chat.egress.CloudCapableEgressGate
 import com.ake.chat.loop.ChatLoop
 import com.ake.chat.loop.ChatRehydrator
 import com.ake.chat.loop.InferenceFocusArbiter
@@ -16,11 +15,13 @@ import com.ake.chat.skill.BrowserTaskSkill
 import com.ake.chat.skill.ChatSkillRegistry
 import com.ake.chat.skill.SkillHandler
 import com.ake.core.common.Clock
+import com.ake.core.common.Outcome
 import com.ake.core.common.RedactionGate
 import com.ake.core.modelapi.ModelPort
 import com.ake.core.ports.AgentProfileStorePort
 import com.ake.core.ports.CapabilityGrantPort
 import com.ake.core.ports.ChatSessionStorePort
+import com.ake.core.ports.CloudCredentialPort
 import com.ake.core.ports.DeviceHealthPort
 import com.ake.core.ports.EgressGate
 import com.ake.core.ports.HumanGate
@@ -29,6 +30,7 @@ import com.ake.core.ports.PolicyPort
 import com.ake.core.ports.RoutingPort
 import com.ake.core.ports.TaskRunnerPort
 import com.ake.core.ports.TraceStorePort
+import com.ake.inference.DialogRoutingPort
 
 /**
  * # `:chat` 的装配（对齐 `:agent/ports/UiFacingPorts.kt` 的既有打法）
@@ -40,8 +42,8 @@ import com.ake.core.ports.TraceStorePort
  * | `ChatRunnerPort` | [ChatLoop] | 一次轮次的唯一入口 |
  * | `SkillRegistryPort` | [ChatSkillRegistry] | 注册表 + 两级授权 + 二阶防御 |
  * | `InferenceFocus` | [InferenceFocusArbiter] | **进程级单例**，F3 的正确性组件 |
- * | `RoutingPort` | [LocalOnlyRoutingPort] | MVP 恒 `LOCAL_ONLY` |
- * | `EgressGate` | [LocalOnlyEgressGate] | 唯一出口，类型断言 + 拒绝一切出网 |
+ * | `RoutingPort` | `DialogRoutingPort`（`:inference`） | ★ 2026-10 接线：纯对话可判 `CloudRequested`；页面任务恒 `LocalOnly` |
+ * | `EgressGate` | [CloudCapableEgressGate] | 唯一出口，真做 D2/D0 分级（替代从未放行过的 `LocalOnlyEgressGate`） |
  * | `ChatSessionStorePort` / `AgentProfileStorePort` / `TemplateStorePort` | **不在本模块** | 已由 `:data` 实现 |
  *
  * ## 为什么这里有一个手写装配类而不是一堆 `@Provides`
@@ -97,7 +99,52 @@ public class ChatServices(
      */
     private val globalGate: ChatSkillRegistry.GlobalSkillGate =
         ChatSkillRegistry.GlobalSkillGate.DENY_NON_BUILTIN,
+    /**
+     * ★ 2026-10 接线：路由实现。传 `null` ⇒ 用 [DialogRoutingPort]（默认）。
+     *
+     * 生产由 `:app` 传 `CloudInferenceModule` 里那一个（注入了真实 `CloudCredentialPort`）。
+     */
+    private val routingOverride: RoutingPort? = null,
+    /** ★ 同上：出境闸。传 `null` ⇒ [CloudCapableEgressGate]。 */
+    private val egressGateOverride: EgressGate? = null,
+    /**
+     * ★ 凭证存在性判定。路由需要它来决定「想上云但没凭证」时是否放行。
+     * 缺省视为**没有任何凭证**（deny-by-default）。
+     */
+    private val credentials: CloudCredentialPort? = null,
 ) {
+
+    /** ★ 没有凭证时的兜底：`exists()` 恒 false ⇒ 想上云也会被判成本地。 */
+    private object NoCredentials : CloudCredentialPort {
+        private fun missing(ref: com.ake.core.ports.CredentialRef): Outcome<Nothing> =
+            Outcome.Err(
+                com.ake.core.common.AppError(
+                    code = com.ake.core.ports.CloudFailureCodes.CREDENTIAL_MISSING,
+                    reasonKey = "err_cloud_cred_missing",
+                    severity = com.ake.core.common.Severity.LOW,
+                ),
+            )
+
+        override suspend fun upsert(
+            ref: com.ake.core.ports.CredentialRef,
+            cfg: com.ake.core.ports.EndpointConfig,
+            secret: com.ake.core.ports.PlainSecret,
+        ): Outcome<Unit> = Outcome.Ok(Unit)
+
+        override fun refs(): kotlinx.coroutines.flow.Flow<List<com.ake.core.ports.CredentialRef>> =
+            kotlinx.coroutines.flow.flowOf(emptyList())
+
+        override suspend fun configOf(ref: com.ake.core.ports.CredentialRef):
+            Outcome<com.ake.core.ports.EndpointConfig> = missing(ref)
+
+        override suspend fun secretOf(ref: com.ake.core.ports.CredentialRef):
+            Outcome<com.ake.core.ports.PlainSecret> = missing(ref)
+
+        override suspend fun delete(ref: com.ake.core.ports.CredentialRef): Outcome<Unit> =
+            Outcome.Ok(Unit)
+
+        override suspend fun exists(ref: com.ake.core.ports.CredentialRef): Boolean = false
+    }
 
     private val estimate: (String) -> Int = { model.estimateTokens(it) }
 
@@ -107,9 +154,23 @@ public class ChatServices(
 
     public val focus: InferenceFocus = InferenceFocusArbiter(clock)
 
-    public val routing: RoutingPort = LocalOnlyRoutingPort(clock)
+    /**
+     * ★★ 路由（2026-10 接线）：默认已是 `:inference` 的 [DialogRoutingPort]。
+     *
+     * ## 为什么默认值换掉了 `LocalOnlyRoutingPort`
+     *
+     * `LocalOnlyRoutingPort.decide()` 恒返 `LocalOnly` ⇒
+     * ① `route_decision` 表**永远不会有行**（审计链路从未被真正走过一次）；
+     * ② `EgressGate` 的三道检查是死代码。
+     * 保留默认参数是为了**既有单测零改动**，但生产由 `:app` 显式传
+     * `CloudInferenceModule.provideDialogRoutingPort()` 产出的那一个（**单例**）。
+     *
+     * @param credits 判定「用户是否真的登记过凭证」用。缺省 `exists = false`
+     *   ⇒ 纯对话也走本地（deny-by-default）。
+     */
+    public val routing: RoutingPort = routingOverride ?: DialogRoutingPort(clock, credentials ?: NoCredentials)
 
-    public val egressGate: EgressGate = LocalOnlyEgressGate()
+    public val egressGate: EgressGate = egressGateOverride ?: CloudCapableEgressGate()
 
     private val chatEgress: ChatEgress = ChatEgress(routing, egressGate, audit, clock)
 

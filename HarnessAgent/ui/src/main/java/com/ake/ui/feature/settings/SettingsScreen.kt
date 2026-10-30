@@ -73,6 +73,25 @@ public fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
             Spacer(Modifier.height(8.dp))
         }
 
+        // ── 推理后端（端侧 / 云端）★ 本轮新增：切换入口在这里
+        CloudBackendCard(
+            ui = ui.cloud,
+            urlValue = viewModel.urlDraft.value,
+            keyValue = viewModel.apiKey.value,
+            onChoose = viewModel::chooseBackend,
+            onBaseUrlChange = viewModel::onBaseUrlChange,
+            onModelNameChange = viewModel::onModelNameChange,
+            onLabelChange = viewModel::onLabelChange,
+            onKeyChange = viewModel::onApiKeyChange,
+            onSave = viewModel::saveCloudCredential,
+            onProbe = viewModel::testConnection,
+            onApplyChoice = viewModel::applyBackendChoice,
+            onDelete = viewModel::deleteCloudCredential,
+            onDismissMessage = viewModel::dismissCloudMessage,
+        )
+
+        Spacer(Modifier.height(12.dp))
+
         // ── 域名白名单（真生效）
         SectionCard(
             "域名白名单",

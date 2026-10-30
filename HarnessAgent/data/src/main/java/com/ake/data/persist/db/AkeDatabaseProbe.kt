@@ -27,16 +27,19 @@ package com.ake.data.persist.db
  * ## ★ S9：「`route_decision` 今日恒空」这条推理的可证伪出口
  *
  * docs/09 §1.2-N1 由三条代码事实推出「全量设备上本表行数为 0」：
- *  ① `LocalOnlyRoutingPort.decide()` 必返 `LocalOnly`；
+ *  ① ~~`LocalOnlyRoutingPort.decide()` 必返 `LocalOnly`~~ **已于 2026-10 失效**：
+ *     `:chat/ChatServices` 的 `routing` 已换成 `:inference` 的 `DialogRoutingPort`
+ *     （docs/10 §6.3 接线）。纯对话 + 用户选了云端 ⇒ 现在**会**判 `CloudRequested`
+ *     ⇒ `route_decision` **开始有行** ⇒ S9「本表恒空」的预测正式过期。
  *  ② 没有任何 UI 入口能表达"想出云"；
  *  ③ `forceAudit` 装配时根本没绑（`PersistenceModule.provideRouteDecisionSink` 不传它）。
  *
  * **这是 docs/09 全文唯一靠推理而非实测的前提**，而 §5.3「存量保留字面量、不重写」
  * 的全部取舍都建立在它之上 ⇒ 必须有一个出口能直接推翻它。下面这两句 SQL 就是那个出口。
  *
- * ⚠ 预期值会**过期**：`:inference/DefaultModelRouter` 已经能产出 `CloudRequested`，
- *    一旦 `:chat` 接到它，本表就会开始有行。那时 S9 的**预测**失效，但
- *    §5.3 的**结论**仍然成立（新行写的都是规范值，`PASS`/`BLOCKED` 永远不会再被写入）。
+ * ★ **预测已过期（2026-10）**：`:chat` 已接到 `DialogRoutingPort`，本表开始有行。
+ *    ⇒ 本探针的语义从「证明恒空」变成「**量**有多少行、是否全是规范值」。
+ *    §5.3 的**结论**仍然成立（新行写的都是规范值，`PASS`/`BLOCKED` 永远不再被写入）。
  */
 public object AkeDatabaseProbe {
 

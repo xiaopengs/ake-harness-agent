@@ -7,6 +7,9 @@ import com.ake.core.ports.CapabilityKind
 import com.ake.core.ports.CapabilityRef
 import com.ake.ui.model.CapabilityPresence
 import com.ake.ui.runtime.UiHumanGate
+import com.ake.ui.model.ModelBadgeSource
+import com.ake.ui.testsupport.FakeCloudCredentials
+import com.ake.ui.testsupport.FakeDialogTargetStore
 import com.ake.ui.testsupport.FakeChatSessionStore
 import com.ake.ui.testsupport.FakeGrants
 import com.ake.ui.testsupport.FakeProfiles
@@ -113,5 +116,11 @@ class ChatViewModelCapabilityPresenceTest {
         savedStateHandle = SavedStateHandle(
             mapOf(ChatViewModel.ARG_SESSION_ID to "session-1"),
         ),
+        badgeSource = ModelBadgeSource(
+            maybeRouter = Optional.empty(),
+            targets = FakeDialogTargetStore(),
+            creds = FakeCloudCredentials(),
+        ),
+        notices = Optional.empty(),
     )
 }

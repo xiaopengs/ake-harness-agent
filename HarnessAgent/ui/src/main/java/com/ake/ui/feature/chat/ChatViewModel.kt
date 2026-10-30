@@ -14,12 +14,17 @@ import com.ake.core.ports.ChatRunnerPort
 import com.ake.core.ports.ChatSessionStorePort
 import com.ake.core.ports.ChatTerminalReason
 import com.ake.core.ports.ChatTurnRequest
+import com.ake.core.ports.MessageRole
 import com.ake.core.ports.MessageStatus
 import com.ake.ui.model.CapabilityPresence
 import com.ake.ui.model.ChatTurnFailure
+import com.ake.ui.model.ModelBadge
+import com.ake.ui.model.ModelBadgeSource
 import com.ake.ui.model.SkillCardUi
 import com.ake.ui.model.capabilityPresenceOf
 import com.ake.ui.runtime.UiHumanGate
+import com.ake.ui.spi.TurnEgressNotice
+import com.ake.ui.spi.TurnEgressNoticeSource
 import com.ake.ui.util.readableError
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -120,8 +125,29 @@ public data class ChatUi(
     val capabilityPresence: CapabilityPresence = CapabilityPresence.UNKNOWN,
     /** 落库 / 事件流的失败原因（`AppError.reasonKey` 或异常信息）。 */
     val errorText: String? = null,
+    /**
+     * ★★ 每条 assistant 消息的产出来源，按 `turnId` 索引。
+     *
+     * `null` 不在值域里 —— 查不到就必须落到 [ModelBadge.Unregistered]，
+     * 不允许「查不到就当端侧」。会话里的沉默会被读成承诺。
+     */
+    val badges: Map<String, ModelBadge> = emptyMap(),
+    /**
+     * ★ 回落 / 出境事实，按 `turnId` 索引。**有值就必须有文案出现在那条气泡上**。
+     */
+    val notices: Map<String, TurnEgressNotice> = emptyMap(),
 ) {
-    /** 这一条是不是"正在生成中的那条"，供气泡决定是否画光标。 */
+    /**
+     * 这条消息的产出来源。
+     *
+     * ★ 查不到时给 [ModelBadge.Unregistered] 而不是 null：
+     * 「没算出来」和「算出是本机」在用户眼里差一个数量级 —— 前者不知道该不该担心。
+     */
+    public fun badgeOf(message: ChatMessageView): ModelBadge =
+        badges[message.turnId] ?: ModelBadge.Unregistered
+
+    public fun noticeOf(message: ChatMessageView): TurnEgressNotice? = notices[message.turnId]
+
     public fun isLive(id: String): Boolean = streaming && id == liveMessageId
 
     /**
@@ -164,10 +190,18 @@ public class ChatViewModel @Inject constructor(
     private val gate: UiHumanGate,
     private val clock: Clock,
     savedStateHandle: SavedStateHandle,
+    /** ★ 每条回答「是哪里产出的」的来源（`ModelRouter` 未绑定时退到登记的意图）。 */
+    private val badgeSource: ModelBadgeSource,
+    /**
+     * ★ 回落 / 出境事实的下发。**缺它 ⇒ 「必须告知用户」这一句没人说出口**
+     * ⇒ 静默降级的窗口就还开着（`core:ports` 目前的契约缺口，见 `EgressNotice.kt`）。
+     */
+    notices: Optional<TurnEgressNoticeSource>,
 ) : ViewModel() {
 
     private val runner: ChatRunnerPort? = runner.orElse(null)
     private val grants: CapabilityGrantPort? = grants.orElse(null)
+    private val noticeSource: TurnEgressNoticeSource? = notices.orElse(null)
 
     private val _ui = MutableStateFlow(ChatUi(runnerMissing = this.runner == null))
     public val ui: StateFlow<ChatUi> = _ui.asStateFlow()
@@ -219,6 +253,7 @@ public class ChatViewModel @Inject constructor(
 
         if (sid != null) {
             bindMessages(sid)
+            bindEgressFacts(sid)
             viewModelScope.launch { resolveAgentOfSession(sid) }
         } else if (aid != null) {
             loadAgent(aid)
@@ -227,7 +262,57 @@ public class ChatViewModel @Inject constructor(
         } else {
             _ui.update { it.copy(loadingHistory = false, errorText = "err_chat_no_session") }
         }
+        viewModelScope.launch { recomputeBadges() }
     }
+
+    // ──────────────────────────────────────────────── 模型徽标与回落告知
+
+    /**
+     * ★★ 订阅本会话的回落 / 出境事实。
+     *
+     * 为什么它与徽标在同一个入口消费：两者回答的是同一个问题的两半 ——
+     * 「这条是谁写的」与「写的过程里数据出去过没有」。分两处订阅，就可能出现
+     * 「告知说走了云端、徽标却画着本机」这种自相矛盾的界面。
+     *
+     * ★ 但徽标**不依赖**它 —— 见 [recomputeBadges]：`noticeSource` 为空时（今天的状态）
+     * 徽标必须照常算出来，否则「看不见的路由承诺」又变成看不见了。
+     */
+    private fun bindEgressFacts(sessionId: String) {
+        val source = noticeSource ?: return
+        viewModelScope.launch {
+            source.notices(sessionId).collect { list ->
+                _ui.update { it.copy(notices = list.associateBy { it.turnId }) }
+                recomputeBadges()
+            }
+        }
+    }
+
+    /**
+     * 重算每一轮的产出来源。
+     *
+     * ★ 每次消息变化都重算，而不是算一次存着：凭证被删掉、目标被改写的下一秒，
+     *   正确答案就变了 —— 一个缓存着的「云端」会在那一刻变成假的。
+     *
+     * @return 写进状态的个数（用于自检这条链路真的跑了，而不是攒了个空 map 也当成功）
+     */
+    public suspend fun recomputeBadges(): Int {
+        val sid = _ui.value.sessionId ?: return 0
+        val notices = _ui.value.notices
+        val turnIds = (messages.turnIds() + notices.keys).distinct()
+        val badges = LinkedHashMap<String, ModelBadge>(turnIds.size)
+        for (turnId in turnIds) {
+            badges[turnId] = badgeSource.badgeFor(sid, notices[turnId])
+        }
+        _ui.update { it.copy(badges = badges) }
+        return badges.size
+    }
+
+    /** 当前显示的消息列表。 */
+    private val messages: List<ChatMessageView> get() = _ui.value.messages
+
+    /** ★ 只有助手消息配拥有徽标 —— 用户自己打的字不是模型产出的，挂徽标就是假的。 */
+    private fun List<ChatMessageView>.turnIds(): List<String> =
+        filter { it.role == MessageRole.ASSISTANT }.map { it.turnId }
 
     // ──────────────────────────────────────────────── 输入与发送
 
@@ -508,6 +593,8 @@ public class ChatViewModel @Inject constructor(
                 stuck = if (converged.isEmpty()) s.stuck else s.stuck - converged,
             )
         }
+        // ★ 新增一轮就要给那一轮算出徽标 —— 寄托给用户下一次 recollect 太晚了。
+        viewModelScope.launch { recomputeBadges() }
     }
 
     private fun loadAgent(agentId: String) {

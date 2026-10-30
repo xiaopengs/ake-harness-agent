@@ -15,6 +15,7 @@ import com.ake.core.ports.CloudCredentialPort
 import com.ake.core.ports.EgressPermitSink
 import com.ake.core.ports.ChatSessionStorePort
 import com.ake.core.ports.DeviceHealthPort
+import com.ake.core.ports.DialogTargetStore
 import com.ake.core.ports.McpServerStorePort
 import com.ake.core.ports.MemoryStorePort
 import com.ake.core.ports.ModelAssetStorePort
@@ -50,6 +51,7 @@ import com.ake.data.persist.recovery.TaskReconciler
 import com.ake.data.persist.redact.PersistenceRedactionGate
 import com.ake.data.persist.store.AgentProfileStoreImpl
 import com.ake.data.persist.store.CloudCredentialStoreImpl
+import com.ake.data.persist.store.DialogTargetStoreImpl
 import com.ake.data.persist.store.EgressPermitSinkImpl
 import com.ake.data.persist.store.CapabilityGrantStoreImpl
 import com.ake.data.persist.store.CheckpointStoreImpl
@@ -216,6 +218,16 @@ public abstract class PersistenceBindingsModule {
     @Binds
     @Singleton
     public abstract fun bindEgressPermitSink(impl: EgressPermitSinkImpl): EgressPermitSink
+
+    /**
+     * ★ 会话级模型目标（落 `chat_session.model_target` 列，**持久化**）。
+     *
+     * ⚠ 不要换成 `:inference` 的 `InMemoryDialogTargetStore`：那个是**单测替身**，
+     *   重启即丢 ⇒ 用户选了云端模型下次冷启动变回端侧（静默降级）。
+     */
+    @Binds
+    @Singleton
+    public abstract fun bindDialogTargetStore(impl: DialogTargetStoreImpl): DialogTargetStore
 
     /**
      * 「一键清除全部痕迹」的执行契约。
@@ -807,6 +819,24 @@ public abstract class PersistenceBindingsModule {
             dao = db.routeDecisionDao(),
             clock = clock,
             metrics = metrics,
+        )
+
+        /**
+         * ★ v4：会话级模型目标的落点（`chat_session.model_target`）。
+         *
+         * ★★ 必须**持久化**，不能用 `:inference` 的 `InMemoryDialogTargetStore`：
+         *    内存实现重启即丢 ⇒ 用户选了云端模型，下次冷启动静默变回端侧。
+         *    那是「用户以为在用 A，实际在用 B」，与本轮红线同一类错误。
+         */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideDialogTargetStore(
+            db: AkeDatabase,
+            clock: Clock,
+        ): DialogTargetStoreImpl = DialogTargetStoreImpl(
+            sessions = db.chatSessionDao(),
+            clock = clock,
         )
 
         /** ★ v4：出境许可落点。 */

@@ -1115,7 +1115,23 @@ public data class RoutingDecision(
     val allowedClasses: Set<DataClass>,
     val redactionApplied: Boolean,
     val decidedAt: Long,
-)
+    /**
+     * ★ 决策语义的版本（docs/10 §6.2-B 缝隙）。
+     *
+     * 落库 ⇒ 将来改判据时能区分新旧行（docs/09 §3 全 additive 思路）：
+     * 「这行为什么是 CLOUD_REQUESTED」在 v1 与 v2 下可能答案不同，
+     * 没有版本号就只能靠 `decided_at` 猜。
+     *
+     * ⚠ **当前落库状态**：v4 的 `CloudMigration3To4` SQL 已验收冻结，
+     *   `route_decision` 尚未加 `decision_schema_v` 列 ⇒ 本字段**只在进程内传递**，
+     *   落列需等 v5 迁移（已上报主理人）。在此之前它是「形状已定、通道待开」。
+     */
+    val decisionSchemaV: Int = DECISION_SCHEMA_V1,
+) {
+    public companion object {
+        public const val DECISION_SCHEMA_V1: Int = 1
+    }
+}
 
 /** ★ 唯一的出云决策入口。默认 deny。任何失败 / 异常 ⇒ LOCAL_ONLY。 */
 public interface RoutingPort {

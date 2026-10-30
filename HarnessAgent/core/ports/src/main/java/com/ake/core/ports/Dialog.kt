@@ -217,8 +217,25 @@ public sealed interface DialogTarget {
 
     /**
      * ★ `credentialRef` 而不是 key：**目标里装不下密钥**（§5）。
+     *
+     * @param peerKind ★ docs/10 §6.2-A 缝隙：对端的**形态**。
+     *   默认 [PEER_KIND_DEFAULT] ⇒ 既有构造点零改动；今天只有一个取值。
      */
-    public data class Remote(val credentialRef: CredentialRef) : DialogTarget
+    public data class Remote(
+        val credentialRef: CredentialRef,
+        val peerKind: CloudPeerKind = PEER_KIND_DEFAULT,
+    ) : DialogTarget
+
+    /**
+     * ★★ 落库文本**无法识别**（docs/10 §6.2-D 缝隙）。
+     *
+     * ★ 它不是「猜成 [Device]」，是「承认不认识」。
+     *
+     * 把未知文本静默降级成 Device 在今天是安全的（宁可本地），但用户会看到
+     * 「这个会话莫名变成本地了」而**没有任何解释**。未来若加了第三态，
+     * 旧数据/新版本读旧行会被静默降级 —— 那种错误**没有任何人能发现**。
+     */
+    public data class Unrecognized(val raw: String) : DialogTarget
 }
 
 /**
@@ -252,22 +269,36 @@ public interface DialogTargetStore {
 public object DialogTargetCodec {
 
     public const val PREFIX_REMOTE: String = "CLOUD:"
+    public const val VALUE_DEVICE: String = "LOCAL"
 
     public fun encode(target: DialogTarget): String = when (target) {
-        is DialogTarget.Device -> "LOCAL"
+        is DialogTarget.Device -> VALUE_DEVICE
         is DialogTarget.Remote -> PREFIX_REMOTE + target.credentialRef.id
+        /**
+         * ★ 未知态**原样写回**：它本来就是从库里读出来的那段文本，
+         *   再写回去不会丢失信息；改成 `LOCAL` 则会把「曾经不认识」这件事抹掉。
+         */
+        is DialogTarget.Unrecognized -> target.raw
     }
 
     /**
-     * ★ fail-closed：无法识别的文本一律按 [DialogTarget.Device] 处理
+     * ★ fail-closed：无法识别的文本一律判成 [DialogTarget.Unrecognized]
      * （认不出来的目标 ⇒ 不出网，而不是猜一个端点）。
+     *
+     * ⚠ **与 v1 的差别**：过去返回 `Device`。`Device` 会让上层**照常出本地推理**，
+     *   于是「脏数据」表现为「能用但目标不对」；`Unrecognized` 让上层返回 Err，
+     *   表现为「这条会话需要你重新选一次目标」—— 后者才是对用户诚实的。
+     *
+     * @param raw 落库文本。`null` / 空 / 纯空白 ⇒ [DialogTarget.Device]
+     *   （「没登记过」是合法状态，不是脏数据）。
      */
     public fun decode(raw: String?): DialogTarget {
         val s = raw?.trim().orEmpty()
         if (s.isEmpty()) return DialogTarget.Device
-        if (!s.startsWith(PREFIX_REMOTE)) return DialogTarget.Device
+        if (s == VALUE_DEVICE) return DialogTarget.Device
+        if (!s.startsWith(PREFIX_REMOTE)) return DialogTarget.Unrecognized(s)
         val ref = s.removePrefix(PREFIX_REMOTE).trim()
-        if (ref.isEmpty()) return DialogTarget.Device
+        if (ref.isEmpty()) return DialogTarget.Unrecognized(s)
         return DialogTarget.Remote(CredentialRef(ref))
     }
 }

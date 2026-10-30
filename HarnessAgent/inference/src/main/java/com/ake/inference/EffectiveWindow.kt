@@ -22,6 +22,15 @@ public object EffectiveWindow {
         is DialogTarget.Device -> local
         // ★★ 云端**不**按设备档位夹 —— 但两端都不能越过声明窗口本身
         is DialogTarget.Remote -> EndpointConfig.clampWindow(cloud)
+
+        /**
+         * ★ 目标认不出来（docs/10 §6.2-D）⇒ 按**最保守**的那一侧算：端侧档位。
+         *
+         * 理由：预算是「这次最多喂多少」。给一个未知目标发**更大**的预算
+         * 是往不安全方向猜；给更小的预算只是少喂一点，代价对称且可控。
+         * ★ 注意：这只决定预算，**不**决定去哪 —— 去哪由 `DefaultModelRouter` 拒绝。
+         */
+        is DialogTarget.Unrecognized -> local
     }
 
     /**
@@ -38,6 +47,14 @@ public object EffectiveWindow {
         is DialogTarget.Remote -> EndpointConfig.clampWindow(declared)
             .coerceAtMost(EndpointConfig.MAX_CONTEXT_WINDOW)
             .coerceAtMost(HARD_CAP)
+
+        /**
+         * ★ 未知目标 ⇒ 按**端侧**算（与 [forPrompt] 同一条理由：往保守方向猜）。
+         *
+         * 「重放」是云端独有的概念；目标不明时不该假设存在一条出境通道，
+         * 因此不加 `HARD_CAP`（没有重放 ⇒ 没有重放上限可言）。
+         */
+        is DialogTarget.Unrecognized -> EndpointConfig.clampWindow(declared)
     }
 
     /** §2.8 ②：硬顶 16384。 */

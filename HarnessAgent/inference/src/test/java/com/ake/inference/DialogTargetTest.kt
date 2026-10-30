@@ -1,6 +1,7 @@
 package com.ake.inference
 
 import com.ake.core.common.Outcome
+import com.ake.core.ports.CloudPeerKind
 import com.ake.core.ports.CredentialRef
 import com.ake.core.ports.DialogTarget
 import com.ake.core.ports.DialogTargetCodec
@@ -60,13 +61,53 @@ class DialogTargetTest {
 
     // ═══ 2. 编解码：fail-closed ═══
 
+    /**
+     * ★ docs/10 §6.2-D：**不再**静默降级成 Device。
+     *
+     *  · `null` / 空 / 纯空白 ⇒ `Device`（「没登记过」是合法状态，不是脏数据）；
+     *  · 认不出的文本         ⇒ `Unrecognized`（承认不认识，交回上层报错）。
+     */
     @Test
-    fun unparsableTextFailsClosedToDevice() {
-        val garbage = listOf(null, "", "   ", "GARBAGE", "cloud_svc-a", "LOCALX", "CLOUD:", "CLOUD:   ")
-
-        for (raw in garbage) {
+    fun unparsableTextBecomesUnrecognizedNotDevice() {
+        val empty = listOf(null, "", "   ")
+        for (raw in empty) {
             assertThat(DialogTargetCodec.decode(raw)).isEqualTo(DialogTarget.Device)
         }
+
+        val garbage = listOf("GARBAGE", "cloud_svc-a", "LOCALX", "CLOUD:", "CLOUD:   ")
+        for (raw in garbage) {
+            val d = DialogTargetCodec.decode(raw)
+            assertThat(d).isInstanceOf(DialogTarget.Unrecognized::class.java)
+        }
+    }
+
+    /** ★ 未知态写回时**原样保留**，不许被抹成 `LOCAL`。 */
+    @Test
+    fun unrecognizedRoundTripsWithoutLosingTheEvidence() {
+        val d = DialogTargetCodec.decode("GARBAGE")
+
+        assertThat(DialogTargetCodec.encode(d)).isEqualTo("GARBAGE")
+    }
+
+    /** ★★ 未知目标 ⇒ 路由器**报错**，不许猜成端侧（docs/10 §6.2-D 的落点）。 */
+    @Test
+    fun routerRefusesAnUnrecognizedTargetInsteadOfGuessing() = runTest {
+        val store = InMemoryDialogTargetStore()
+        store.select("s1", DialogTargetCodec.decode("GARBAGE"))
+        val router = DefaultModelRouter(
+            device = FakeDevice(),
+            localDialog = LocalDialogAdapter(FakeDevice()),
+            remote = FakeCloudDialog(),
+            targets = store,
+            creds = FakeCredentials(),
+            permits = FakePermitSink(),
+        )
+
+        val r = router.dialogFor("s1")
+
+        assertThat(r).isInstanceOf(Outcome.Err::class.java)
+        assertThat((r as Outcome.Err).error.code)
+            .isEqualTo(DefaultModelRouter.CODE_UNRECOGNIZED_TARGET)
     }
 
     @Test
@@ -91,8 +132,11 @@ class DialogTargetTest {
     fun remoteTargetCanOnlyCarryACredentialReference() {
         val fields = DialogTarget.Remote::class.java.declaredFields
 
-        assertThat(fields.map { it.name }).containsExactly("credentialRef")
-        assertThat(fields.map { it.type }).containsExactly(CredentialRef::class.java)
+        // ★ `peerKind` 是 docs/10 §6.2-A 的对端形态（默认 `CompletionEndpoint`），
+        //   它与「密钥」无关 ⇒ 字段白名单里必须显式包含它，否则这条守卫会误报。
+        assertThat(fields.map { it.name }).containsExactly("credentialRef", "peerKind")
+        assertThat(fields.map { it.type })
+            .containsExactly(CredentialRef::class.java, CloudPeerKind::class.java)
         assertThat(CredentialRef::class.java.declaredFields.map { it.name }).containsExactly("id")
         // id 是「引用名」，不是密文本身：它只被当作 key 用，不参与任何加密/拼装
         assertThat(CredentialRef::class.java.declaredFields.map { it.type })

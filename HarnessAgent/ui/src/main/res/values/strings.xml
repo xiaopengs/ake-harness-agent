@@ -327,4 +327,105 @@
     <string name="err_manifest_import_invalid">这份 manifest 校验没通过：它要么不是官方签发的，要么格式不对。请向模型提供方索取配套的 manifest.json —— 没有它，客户端无从确认该期待一份什么样的文件。</string>
     <string name="err_manifest_import_downgrade">这份 manifest 比机器里已有的那份旧，已经拦下了。旧版本有可能指向一个已经被停用的模型。想装旧版模型不需要旧的 manifest —— 请拿最新的一份，它里面本来就带着历史版本。</string>
 
+    <!--
+      ★★ 云端推理后端（架构 08 §4 / §6）—— 本轮新增。
+
+      这一块的文案有两条硬性判据，改任何一个字之前先读 `ui/model/CloudFailureCopy.kt`：
+
+        ① PRE / POST 是**分水岭**，不是错误等级。
+           PRE  = 一个字节都没出去 ⇒ 允许回落到本机，但**必须**出现「已改由本机模型回答」；
+           POST = 请求体已经发出 ⇒ **禁止**回落，且**必须**出现「已经发给 <归一化 host>」。
+
+        ② 失败文案里**绝不出现** Key 或完整 URL —— 只出现 `Hosts.normalise` 之后的裸域名。
+           自建网关常把 key 放在 query 里（`?key=xxx`），完整 URL 本身就是秘密。
+
+      下面每一组 `_t` / `_n`（标题 / 下一步）都各自互异，由 `CloudFailureCopyTest` 盯住：
+      两条不同形态的失败共用同一句话时，那句必然对其中一半是假的。
+    -->
+
+    <!-- 设置页 · 推理后端切换 -->
+    <string name="cloud_section_title">推理后端</string>
+    <string name="cloud_section_subtitle">端侧：全程在本机，一个字节都不出设备。云端：你自己填的服务端点 —— 一旦选它，对话正文就会离开这台设备。</string>
+    <string name="cloud_dom_lock_note">浏览器 / 网页任务强制走端侧 —— 这不是选项，也不接受被配置项覆盖。</string>
+    <string name="cloud_choice_device">端侧（本机模型）</string>
+    <string name="cloud_choice_remote">云端（自选模型）</string>
+    <string name="cloud_field_base_url">BaseURL</string>
+    <string name="cloud_field_base_url_placeholder">https://api.example.com/v1</string>
+    <string name="cloud_field_model">模型名</string>
+    <string name="cloud_field_model_placeholder">deepseek-chat</string>
+    <string name="cloud_field_label">备注名（给自己看的）</string>
+    <string name="cloud_field_key">API Key</string>
+    <string name="cloud_key_hint">这一格始终掩码显示：它不会被写进任何日志、任何报错，也不会被 savedInstanceState 还原。</string>
+    <string name="cloud_action_save">保存并启用云端</string>
+    <string name="cloud_action_use_device">改回端侧</string>
+    <string name="cloud_saved">已加密保存。它只对新开的会话生效 —— 正在进行的会话换不了后端。</string>
+    <string name="cloud_err_key_empty">还没填 API Key。</string>
+    <string name="cloud_err_model_empty">还没填模型名。</string>
+    <string name="cloud_err_url_no_host">这个地址读不出域名。请写成 example.com，或带协议写成 https://example.com。</string>
+    <string name="cloud_host_line">端点（归一化 host）：%1$s</string>
+    <string name="cloud_stored_list">已保存的服务</string>
+    <string name="cloud_stored_item">%1$s · %2$s</string>
+    <string name="cloud_none_stored">还没有保存过任何云端服务。</string>
+    <string name="cloud_missing_binding">云端后端还没接进来（借记层未提供绑定）。现在只能显示开关的位置，保存与自检一概不假装能用。</string>
+
+    <!-- 连通性自检的状态机：未测 / 测试中 / 可用 / 失败 / 未接入 -->
+    <string name="cloud_probe_idle">还没测过</string>
+    <string name="cloud_probe_testing">正在自检…（真的会发出一个短请求）</string>
+    <string name="cloud_probe_ok">可用：%1$s 接受了这次握手。</string>
+    <string name="cloud_probe_not_wired">自检还没接上：需要推理层提供一次真请求的 probe。现在只能确认能不能存进去。</string>
+    <string name="cloud_probe_action">测一下连通性</string>
+
+    <!-- 会话页 · 模型徽标（每条 assistant 消息都要能回答“这条是哪里来的”） -->
+    <string name="badge_device">本机端侧</string>
+    <string name="badge_remote">云端 · %1$s · %2$s</string>
+    <string name="badge_unregistered">未登记后端</string>
+    <string name="badge_unavailable">后端不可用</string>
+    <string name="badge_note_unregistered">这个会话还没有登记过推理后端 —— 它既没答应留在本机，也没答应出网，所以这里不替它猜。</string>
+    <string name="badge_note_unavailable">确定不了这条回答是在本机还是云端产出的（%1$s）。宁可承认不知道，也不给一个看起来肯定的答案。</string>
+
+    <!--
+      PRE 组（一个字节都没发出去 ⇒ 允许回落，但必须说出来）。
+      ★ 每一句 `_n` 都必须含「本机模型」；任何一句出现「已经发给」即判死刑 ——
+        那等于把一次真实失败说成一次出境。
+    -->
+    <string name="err_cloud_no_permit_t">这次拿不到出网许可</string>
+    <string name="err_cloud_no_permit_n">一个字节都没有离开这台设备 —— 这一条已改由本机模型回答。</string>
+    <string name="err_cloud_cred_missing_t">云端凭证已经不在本机</string>
+    <string name="err_cloud_cred_missing_n">多半是被「一键清除」删掉了。数据没有出去，这一条已改由本机模型回答。</string>
+    <string name="err_cloud_connect_failed_t">连不上你填的那个端点</string>
+    <string name="err_cloud_connect_failed_n">重试一次仍然失败，于是正文没有发出去 —— 这一条已改由本机模型回答。请检查地址与网络。</string>
+    <string name="err_cloud_auth_rejected_t">服务端拒绝了这次调用（401 / 403）</string>
+    <string name="err_cloud_auth_rejected_n">它是在读正文之前拒的，所以你的话没有离开这台设备。已改由本机模型回答，请回到设置页核对 API Key。</string>
+    <string name="err_cloud_proxy_auth_t">代理要求单独的身份验证（407）</string>
+    <string name="err_cloud_proxy_auth_n">请求被挡在代理层，正文没能发出去 —— 这一条已改由本机模型回答。</string>
+    <string name="err_cloud_insecure_endpoint_t">这个端点不允许出网：只接受 https</string>
+    <string name="err_cloud_insecure_endpoint_n">明文 http 会把正文摊在链路上，已按规则拦下（一个字节都没发）。已改由本机模型回答。</string>
+    <string name="err_cloud_page_context_refused_t">这一轮带了网页内容，只能留在本机处理</string>
+    <string name="err_cloud_page_context_refused_n">浏览器与网页任务强制走端侧，不会因为你选了云端而例外 —— 已改由本机模型回答。</string>
+
+    <!--
+      POST 组（请求体已经发出 ⇒ 禁止回落，且必须把“已经发给谁”说出口）。
+      ★ 每一句 `_n` 都必须含「已经发给 %1$s」，`%1$s` 是 `Hosts.normalise` 之后的裸域名。
+    -->
+    <string name="err_cloud_model_not_found_t">服务端说没有这个模型</string>
+    <string name="err_cloud_model_not_found_n">已经发给 %1$s —— 它是在收下正文之后才报的错。请回到设置页核对模型名。</string>
+    <string name="err_cloud_context_too_long_t">服务端说装不下这么多内容</string>
+    <string name="err_cloud_context_too_long_n">已经发给 %1$s —— 正文已经出境了。可以先压缩掉一部分历史，或换一个窗口更大的端点。</string>
+    <string name="err_cloud_rate_limited_t">服务端说这次来得太密（429）</string>
+    <string name="err_cloud_rate_limited_n">已经发给 %1$s —— 限流是在收下正文之后触发的。稍等再试，或者换一个端点。</string>
+    <string name="err_cloud_server_error_t">服务端返回了错误（5xx）</string>
+    <string name="err_cloud_server_error_n">已经发给 %1$s —— 这是它那边出的问题，重试一次等于让这段话再出境一次。</string>
+    <string name="err_cloud_first_byte_timeout_t">服务端收下了正文，却一直没开口</string>
+    <string name="err_cloud_first_byte_timeout_n">已经发给 %1$s —— 一个字都没回来，不等于没发出去：正文已经在它的服务器上了。</string>
+    <string name="err_cloud_stream_idle_timeout_t">回答流在中途停住了</string>
+    <string name="err_cloud_stream_idle_timeout_n">已经发给 %1$s —— 已经回来的那部分留着，但没说完就是没说完。</string>
+    <string name="err_cloud_stream_truncated_t">回答被截断了：没收到结束标记</string>
+    <string name="err_cloud_stream_truncated_n">已经发给 %1$s —— 收到的半段留着，请不要把它当成完整答案用。</string>
+    <string name="err_cloud_deadline_exceeded_t">超过了这一轮的时间上限</string>
+    <string name="err_cloud_deadline_exceeded_n">已经发给 %1$s —— 超时之前回来的部分留着，要补全就得再发一次。</string>
+    <string name="err_cloud_empty_delta_t">服务端回了个空回复</string>
+    <string name="err_cloud_empty_delta_n">已经发给 %1$s —— 它正常收下了正文，却没有产出任何内容。这里不会拿本机的一段去补这个空。</string>
+    <string name="err_cloud_malformed_response_t">服务端返回的不是能读懂的格式</string>
+    <string name="err_cloud_malformed_response_n">已经发给 %1$s —— 多半是错误页或非 JSON 响应。可以检查一下端点路径填对没有。</string>
+
 </resources>

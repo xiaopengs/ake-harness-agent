@@ -148,6 +148,10 @@ public fun ChatScreen(
                     failure = stuck?.failure
                         ?: ui.failure?.takeIf { it.turnId == msg.turnId || it.turnId == null },
                     skillCard = ui.skillCardOf(msg),
+                    // ★ 这条是谁写的 —— 每条助手消息都要答得上这个问题。
+                    badge = ui.badgeOf(msg),
+                    // ★ 回落 / 出境失败。有就必须出镜，一次都不能被丢掉。
+                    egressNotice = ui.noticeOf(msg),
                     onOpenTask = onOpenTask,
                     onRetry = viewModel::retry,
                     modifier = Modifier.padding(bottom = 6.dp),

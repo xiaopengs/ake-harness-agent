@@ -19,7 +19,9 @@ import org.junit.Test
  * ## 为什么必须做这件事
  *
  * docs/09 里「本表恒空」是由三条代码事实**推**出来的，不是看出来的：
- *  ① `LocalOnlyRoutingPort.decide()` 必返 `LocalOnly`；
+ *  ① ~~`LocalOnlyRoutingPort.decide()` 必返 `LocalOnly`~~ **已于 2026-10 失效**：
+ *     `ChatServices.routing` 已换成 `:inference` 的 `DialogRoutingPort`，
+ *     纯对话 + 选了云端 ⇒ 会判 `CloudRequested` ⇒ 本表开始有行。
  *  ② 没有任何 UI 入口能表达"想出云"；
  *  ③ `forceAudit` 在 `PersistenceModule` 装配时根本没绑（注释说绑 `BuildConfig.DEBUG`，代码没绑）。
  *

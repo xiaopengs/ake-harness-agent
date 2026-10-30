@@ -11,6 +11,7 @@ import com.ake.core.ports.CapabilityGrantPort
 import com.ake.core.ports.CapabilityKind
 import com.ake.core.ports.ChatRunnerPort
 import com.ake.core.ports.ChatSessionStorePort
+import com.ake.core.ports.CloudCredentialPort
 import com.ake.core.ports.DeviceHealthPort
 import com.ake.core.ports.HumanGate
 import com.ake.core.ports.PolicyPort
@@ -20,6 +21,7 @@ import com.ake.core.ports.ToolPermissionStorePort
 import com.ake.core.ports.TraceStorePort
 import com.ake.chat.egress.ChatEgress
 import com.ake.data.persist.store.RouteDecisionSink
+import com.ake.inference.DialogRoutingPort
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -121,6 +123,15 @@ public object ChatPortsModule {
          * 「路由审计表永远是空的」，而空表无法证明链路通（V5 用例直接失败）。
          */
         routeSink: RouteDecisionSink,
+        /**
+         * ★ 2026-10 端云接线：**必须显式传**。
+         *
+         * 不传 ⇒ `ChatServices` 回落到「默认路由 + 无凭证」 ⇒ 纯对话也恒判
+         * `LocalOnly` ⇒ 用户选了云端却永远走本地（**静默降级**，正是本轮红线）。
+         * 由 `CloudInferenceModule` 提供（注入了真实 `CloudCredentialPort` 的单例）。
+         */
+        routing: DialogRoutingPort,
+        credentials: CloudCredentialPort,
     ): ChatServices = ChatServices(
         model = model,
         health = health,
@@ -147,6 +158,11 @@ public object ChatPortsModule {
         // ★ 用 `:data` 落盘同一份脱敏闸（`:app` 的 CoreModule 已绑定，底层 FieldCipher 一致），
         //   而不是 `SCRUB_ONLY` 默认值：技能产出的网页原文要按与消息落盘同一套规则裁。
         redactionGate = redactionGate,
+        // ★ 参数名是 `routingOverride` 而非 `routing`：`ChatServices` 刻意用「Override」
+        //   后缀表达「这是对本类默认装配的覆盖」，默认 null ⇒ 用内置 `DialogRoutingPort`。
+        //   2026-10-31 修复：此处曾写 `routing =`，与构造参数名不一致导致 :app 编译失败。
+        routingOverride = routing,
+        credentials = credentials,
         globalGate = ChatSkillRegistry.GlobalSkillGate { ref ->
             when (ref.kind) {
                 // 内置技能是本 APK 编译进来的函数：既没有第三方声明，也没有"被发现"这件事。

@@ -105,11 +105,22 @@ internal class ScriptedTransport(
     public var calls: Int = 0
         private set
 
+    /**
+     * ★★ **真实出境字节数**（请求体）。
+     *
+     * 用 `req.bodyBytes()` 而不是「调没调」：`calls` 只能证明「进了传输层」，
+     * 而主理人要的判据是「**发出去的字节数**」。这是唯一能在 JVM 上
+     * 断言「一个字节都没发」的可观测量（真机侧由 mitmproxy 抓包复核）。
+     */
+    public var bytesSent: Int = 0
+        private set
+
     override suspend fun stream(
         req: CloudRequest,
         onBytes: suspend (ByteArray) -> Unit,
     ): CloudTransportOutcome {
         calls++
+        bytesSent += req.bodyBytes()
         raise?.let { throw it }
         failWith?.let { return it }
         chunks.forEach { onBytes(it) }

@@ -7,7 +7,10 @@ import com.ake.core.ports.ChatMessageView
 import com.ake.core.ports.ChatTerminalReason
 import com.ake.core.ports.MessageStatus
 import com.ake.ui.runtime.UiHumanGate
+import com.ake.ui.model.ModelBadgeSource
 import com.ake.ui.testsupport.FakeChatSessionStore
+import com.ake.ui.testsupport.FakeCloudCredentials
+import com.ake.ui.testsupport.FakeDialogTargetStore
 import com.ake.ui.testsupport.FakeProfiles
 import com.ake.ui.testsupport.FixedRiskPort
 import com.ake.ui.testsupport.NoopPermissions
@@ -387,6 +390,12 @@ class ChatViewModelTest {
             savedStateHandle = SavedStateHandle(
                 mapOf(ChatViewModel.ARG_SESSION_ID to sessionId),
             ),
+            badgeSource = ModelBadgeSource(
+                maybeRouter = Optional.empty(),
+                targets = FakeDialogTargetStore(),
+                creds = FakeCloudCredentials(),
+            ),
+            notices = Optional.empty(),
         )
     }
 }

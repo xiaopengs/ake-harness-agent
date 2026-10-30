@@ -180,6 +180,16 @@ interface ChatSessionDao {
     @Query("SELECT cloud_credential_id FROM chat_session WHERE id = :sessionId")
     suspend fun cloudCredentialIdOf(sessionId: String): String?
 
+    /**
+     * ★ 会话级目标（docs/10 §6.2-D 的落库面）。
+     *
+     * 返回的是 `DialogTargetCodec` 编码后的文本（`LOCAL` / `CLOUD:<ref>`），
+     * **不是**布尔值 —— 「没登记过」（NULL）与「登记了端侧」（`LOCAL`）
+     * 必须是两个可区分的返回值，否则上层只能猜。
+     */
+    @Query("SELECT model_target FROM chat_session WHERE id = :sessionId")
+    suspend fun modelTargetOf(sessionId: String): String?
+
     /** ★ 会话级目标：绑定凭证。NULL ⇒ 解绑（回落 LOCAL）。 */
     @Query(
         """

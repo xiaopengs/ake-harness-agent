@@ -454,3 +454,194 @@ public object CloudFailureCodes {
 
     public const val INSECURE_ENDPOINT: String = "CLOUD_INSECURE_ENDPOINT"
 }
+
+// =============================================================================
+// §4 docs/10 §6.2 缝隙 A：对端形态 CloudPeerKind
+// =============================================================================
+
+/**
+ * ★★ 对端的**形态**。这是「要不要总线」这个开关在类型上的落点（docs/10 §6.2-A）。
+ *
+ * ## 它不是「协议枚举」，是「控制权归属」的声明
+ *
+ *  · [CompletionEndpoint] —— 对端是**函数**：我们决定它做什么，它无权发起任何事。
+ *  · （未来）`AgentEndpoint` —— 对端是**主体**：它可以有自己的循环、工具、子任务，
+ *    并且可能反过来向我们要东西（A2A 的 `input-required`）。
+ *
+ * ## ★ 为什么今天就要有这个类型（即使第二个变体没有实现）
+ *
+ * 不是预留实现，是**预留「编译期逼你表态的位置」**：
+ *
+ *  · 今天所有 `when (peerKind)` 只有一条分支；
+ *  · 明天若真要支持 `AgentEndpoint`，加一个变体 ⇒ `DialogRoutingPort`、
+ *    `FallbackPolicy`、`EgressCoordinator`、UI 徽标的 `when` **当场编译失败**，
+ *    逼每一个调用点回答「对端是主体时，这一条还成立吗」。
+ *
+ * ★ 这比「在注释里写『将来可能支持 agent』」强的地方在于：
+ *   **注释会被忽略，编译错误不会。**
+ *
+ * ## ★★ 关键取舍：今天 sealed 里**只放一个变体**
+ *
+ * 加一个空变体会让今天所有 `when` 都必须写一个 `-> TODO()` 分支，
+ * 而 `TODO()` 会被忘记、会进生产。**留一个单变体 sealed，未来加第二个变体时
+ * 编译期自动逼宫** —— 这才是缝隙该有的样子：不为将来付今天的税，
+ * 但保证将来加东西时不会被静默忽略。
+ */
+public sealed interface CloudPeerKind {
+    public data object CompletionEndpoint : CloudPeerKind
+}
+
+/** ★ 今天唯一的取值。用属性而不是散落的常量，将来一处改。 */
+public val PEER_KIND_DEFAULT: CloudPeerKind get() = CloudPeerKind.CompletionEndpoint
+
+// =============================================================================
+// §4 docs/10 §6.2 缝隙 C：EgressCoordinator Port
+// =============================================================================
+
+/** 一次调用的原始结果（由 `:cloudai` 给出，只含「发生了什么」）。 */
+public sealed interface CloudCallOutcome {
+    public data class Done(
+        val text: String,
+        val finishReasonRaw: String?,
+        val deliveredBytes: Int,
+    ) : CloudCallOutcome
+
+    public data class Failed(
+        val failure: CloudFailure,
+        val deliveredBytes: Int,
+    ) : CloudCallOutcome
+}
+
+/**
+ * ★★ 编排的终态。**UI 必须能穷尽地处理它**（docs/10 §6.2-C）。
+ *
+ * ★ `sealed` 是刻意的：新增一个终态 ⇒ 所有 `when` 编译失败 ⇒
+ *   没有人能在「UI 还没准备好渲染它」的情况下悄悄加一种结果。
+ */
+public sealed interface EgressResult {
+
+    /** 完整收到。 */
+    public data class Delivered(val text: String) : EgressResult
+
+    /**
+     * ★ **仅 PRE 阶段可达。**
+     *
+     * ★★ UI **必须**显示「未上云，已由本机完成」—— 判据由 `:inference` 的
+     *    `FallbackPolicy.mustAnnounceFallback` 给出（docs/08 §4.2 红线）：
+     *    不显示等于静默降级。
+     */
+    public data class FellBackToLocal(val failure: CloudFailure) : EgressResult
+
+    /**
+     * ★ POST 阶段失败 ⇒ **不自动回落**，UI 必须显示「已发给 <host>」并让用户选。
+     */
+    public data class NeedsUserDecision(val failure: CloudFailure) : EgressResult
+
+    /** 终态失败（已收敛审计行）。 */
+    public data class Failed(val failure: CloudFailure) : EgressResult
+
+    /** ★ permit 开不出来（审计 INSERT 失败）⇒ 一个字节都没发。fail-closed。 */
+    public data object NotPermitted : EgressResult
+}
+
+/**
+ * ★ 告知的**种类**。
+ */
+public enum class AnnouncementKind {
+    /** 「未上云，已由本机完成」（PRE 回落）。 */
+    FELL_BACK_TO_LOCAL,
+
+    /** 「已经发给 <host>」（POST 失败，禁止回落）。 */
+    ALREADY_SENT,
+}
+
+/**
+ * ★★ 一次**必须被用户看到**的告知（docs/08 §4.4「必须告知」列的机器可读形态）。
+ *
+ * ## 为什么必须带 `turnId` / `sessionId`（2026-10-31 补）
+ *
+ * 告知是**每轮**的事实，不是每会话的姿态。少了这两个字段，UI 只能拿到一条
+ * 「某处发生过回落」的孤儿消息 —— 它挂不到任何气泡上，结果就是**照样静默**：
+ * 状态里有值、屏幕上没字。
+ *
+ * 字段来自 `RouteContext.turnId` / `sessionId`，由 `EgressCoordinator` 在
+ * 调用 sink 前填入。它们**不是**敏感信息（本机随机 ID），可以进日志。
+ *
+ * @param failure   失败的精确形态。★ 保留整个对象而非只留 `reasonKey`：
+ *                  UI 的文案表靠 `when (failure)` 的穷尽性保证「新增变体必红」，
+ *                  降级成字符串就失去了这条编译期保护。
+ * @param host      已过 `Hosts.normalise` 的端点；`ALREADY_SENT` 时**必非空**。
+ * @param turnId    这一轮对话的 ID。`null` 仅允许出现在「无会话上下文」的诊断调用里。
+ * @param sessionId 所属会话。`null` 同上。
+ */
+public data class FallbackAnnouncement(
+    val failure: CloudFailure,
+    val kind: AnnouncementKind,
+    val host: String?,
+    val turnId: String? = null,
+    val sessionId: String? = null,
+) {
+
+    /** i18n 常量。**不拼接服务端原文**（§6.3 ⑦）。 */
+    public val reasonKey: String get() = failure.reasonKey
+
+    /**
+     * ★ 不变式：`ALREADY_SENT` 必须能说出 host ——
+     * 「已经发出去了」却说不出发给谁，等于没说。
+     */
+    public fun isWellFormed(): Boolean =
+        kind != AnnouncementKind.ALREADY_SENT || !host.isNullOrBlank()
+}
+
+/**
+ * ★★ 告知的**唯一出口**（P0：PRE 回落「必须告知」的承载）。
+ *
+ * ## 为什么它必须是一个注入进来的 Port，而不是返回值上的一个字段
+ *
+ * 字段可以被忽略：调用方拿到 `mustAnnounce = true` 然后什么都不做，
+ * 编译期**不会有任何反应**。而这个 sink 由 `:app` 用 Hilt 绑定 ⇒
+ * **缺绑 = `[Dagger/MissingBinding]` = 编译失败**。
+ *
+ * ★ 于是「忘了告知」从一个**运行时可静默发生的错误**，变成了一个**装配期错误**。
+ *
+ * ⚠ **边界**：它不阻止 `:app` 绑一个空实现。那是组合根里的**一处**代码，
+ *   可评审、可断言（由 `:app` 的单测盯住），与「每个调用点各忘一次」不是一个量级。
+ */
+public fun interface EgressAnnouncementSink {
+    /** ★ 由 `EgressCoordinator` 在返回终态**之前**调用。 */
+    public suspend fun announce(a: FallbackAnnouncement)
+}
+
+/**
+ * ★★ 一次「出境」的完整编排：开许可 → 调 → 重试（每次新许可）→ 收敛 → 决定回落。
+ *
+ * ## 为什么它必须是 Port 而不是 `:inference` 里的具体类
+ *
+ * 这段编排是「端云之间那一次交互」的全部语义。今天它是 `chat/completions` 一次调用；
+ * 未来若对端形态变了（缝隙 A），变的**只应该是这个接口的实现**，
+ * 而不是 `:chat` / `:app` / `:ui` 里的调用点。
+ *
+ * ## ★ 为什么现在就要定它（docs/10 §1.2 修正 C）
+ *
+ * `CloudChatRunner` 的注释已经写了「由 FallbackPolicy / EgressCoordinator 管」，
+ * 但 `EgressCoordinator` **此前不存在**。若不在此刻定归属，
+ * `:app` 装配时这段逻辑会被就近写进组合根 ——
+ * 那时它就从「一个 Port 的实现」变成「散在组合根里的一段胶水」。
+ */
+public interface EgressCoordinator {
+
+    /**
+     * 执行一次出境，返回**最终**结果与已完成的审计收敛。
+     *
+     * ★ 契约（实现必须全部满足）：
+     *  ① permit 开不出来 ⇒ [EgressResult.NotPermitted]，**一次都不调** [call]；
+     *  ② 每次重试 = 一次**独立出境** ⇒ **新 permit + 新审计行**；
+     *  ③ POST 阶段**绝不**自动回落（docs/08 §4.2）⇒ 交给 UI 显式问用户；
+     *  ④ 返回前**必须**已经调用过 `EgressPermitSink.close`（不留 PENDING）。
+     */
+    public suspend fun execute(
+        ctx: RouteContext,
+        decision: RoutingDecision,
+        call: suspend (permit: EgressPermit) -> CloudCallOutcome,
+    ): EgressResult
+}
