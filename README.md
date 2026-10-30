@@ -203,6 +203,7 @@ L1  内核层          :core:common :core:ports :core:model-api
 | [`docs/08-cloud-model-architecture.md`](docs/08-cloud-model-architecture.md) | **端云双栈架构**：`ModelPort` 不改契约加第二实现、切换粒度、`ModelRouter` 与 PRE/POST 回落分相、**DOM 锁死的四道锁**、凭证抽象、审计闭环、依赖边清单、每条契约的证伪方式 |
 | [`docs/09-cloud-data-and-secrets.md`](docs/09-cloud-data-and-secrets.md) | **云端正数据层**：凭证密文落 Room 的论证（推翻"独立文件"方案）、BaseURL 整体加密、`egressGateVerdict` 三套常量收口、审计状态机与冷启 sweep、迁移 3→4 |
 | [`docs/10-endcloud-bus-analysis.md`](docs/10-endcloud-bus-analysis.md) | **端云通信总线是否需要**：先拆"云端算不算对等 harness"这个伪命题、总线与 DOM 红线为何结构互斥、SyncPlane B1–B4 逐条裁决、阶段触发条件与反触发清单、**今天必须埋的 4 处接口缝隙** |
+| [`docs/11-cloud-generation-path.md`](docs/11-cloud-generation-path.md) | **云端生成路径接线规格（待执行）**：为什么不能加个适配器转发（3 条实证）、一轮=一条 permit=一条审计行、`RouteContext` 逐字段填法、`EgressResult` 四分支落点、6 条可杀死实现的断言、4 条必须由人拍板的前置决策 |
 
 ---
 
@@ -385,7 +386,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 
 | 待办 | 级别 | 说明 |
 |---|---|---|
-| **云端仍未进入真生成路径** | **P0** | ★ 今天最重要的发现。已完成：`:data` v4、`:app` 组合根装配（`ModelRouter` 拿到 device/local/remote 三实现）、`:chat` 解除 `LocalOnly*` 硬绑、设置页切换 UI、模型徽标。但 **`ChatLoop` 仍只持有端侧 `model: ModelPort`**，`openSession → ModelSession.generate` 全程不经过 `ModelRouter`；而 `DialogModelPort.openDialog` 的 `permit` 必填、`ChatLoop` 手上也没有 `RouteContext`（缺 `turnId`/`payloadClasses`）⇒ **"路由判定放行云端"与"真的用云端生成"之间还差一段接线**。→ 用户选了云端，今天仍由端侧出字 |
+| **云端仍未进入真生成路径** | **P0** | ★ 今天最重要的发现。已完成：`:data` v4、`:app` 组合根装配（`ModelRouter` 拿到 device/local/remote 三实现）、`:chat` 解除 `LocalOnly*` 硬绑、设置页切换 UI、模型徽标。但 **`ChatLoop` 仍只持有端侧 `model: ModelPort`**，`openSession → ModelSession.generate` 全程不经过 `ModelRouter`；而 `DialogModelPort.openDialog` 的 `permit` 必填、`ChatLoop` 手上也没有 `RouteContext`（缺 `turnId`/`payloadClasses`）⇒ **"路由判定放行云端"与"真的用云端生成"之间还差一段接线**。→ 用户选了云端，今天仍由端侧出字。**接线规格见 [`docs/11`](docs/11-cloud-generation-path.md)**（含 3 条否决"适配器转发"的实证、6 条断言、4 条待拍板决策） |
 | **新会话不继承用户选的默认后端** | **P0** | `chat_session.model_target` 的列默认值是 `'LOCAL'`，`DialogTargetStore` 只有「按 sessionId 读写」。用户设置页选了云端，**新建的会话仍是本地** ⇒ 静默不一致（与红线同类错误，只是没有出境维度）。需要「全局默认目标」的落点（单行表或 `app_preference`），涉及 v5 迁移 |
 | **`PRE` 回落「必须告知」** | ✅ **已解除** | 三段闭环：`FallbackPolicy.mustAnnounceFallback`（裁决）→ `EgressAnnouncementSink`（唯一出口，`:app` 缺绑即 `MissingBinding` 编译失败）→ `AnnouncementCenter` 同时实现 `TurnEgressNoticeSource`（UI 唯一读取口）。`FallbackAnnouncement` 补 `failure`/`turnId`/`sessionId`，告知能挂到具体一轮。★ `ALREADY_SENT ⇒ producedBy=REMOTE`：请求体确实出境了，不许用"失败了"掩盖"已出境" |
 | `FirstByteTimeout` 归 POST 是推断 | P1 | 依据是"请求体确实已被服务端收下"，但没发 `Expect: 100-continue`，ktor 也不确认接收 ⇒ 存在"服务端零接收、我们却告诉用户已发出"的窗口。**只能靠 mitmproxy 抓包证伪**，是最可能被真机推翻的一格 |
