@@ -163,6 +163,7 @@ class CloudEgressEndToEndTest {
             localDialog = LocalDialogAdapter(FakeDevice()),
             remote = remote,
             targets = targets,
+            defaults = InMemoryDefaultTargetStore(),
             creds = creds,
             permits = permits,
         )

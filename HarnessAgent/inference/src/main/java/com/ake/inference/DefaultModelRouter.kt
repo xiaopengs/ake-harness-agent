@@ -6,6 +6,7 @@ import com.ake.core.common.Severity
 import com.ake.core.ports.CloudCredentialPort
 import com.ake.core.ports.DialogModelPort
 import com.ake.core.ports.DeviceModelPort
+import com.ake.core.ports.DefaultTargetStore
 import com.ake.core.ports.DialogTarget
 import com.ake.core.ports.DialogTargetStore
 import com.ake.core.ports.EgressPermit
@@ -33,23 +34,46 @@ import com.ake.core.ports.TaskKind
  *     ├── new LiteRtModelPort(...)          ← 唯一看得见 :llm 的地方
  *     ├── new LocalDialogAdapter(liteRt)   ← 升格成 DialogModelPort
  *     ├── new OpenAiCompatibleDialogPort(...)
- *     └── new DefaultModelRouter(device=..., localDialog=..., remote=..., ...)
+ *     └── new DefaultModelRouter(device=..., localDialog=..., remote=...,
+ *                                targets=..., defaults=..., ...)
  * ```
+ *
+ * ## ★★ 三级优先（v5）
+ *
+ * ```
+ *   会话显式登记  targets.of(sessionId)      ← 最高
+ *        ↓ null（这个会话没登记过）
+ *   全局默认      defaults.default()          ← 用户设置；未设置 ⇒ Device
+ * ```
+ *
+ * ⚠ 没有第四级：`default()` 的返回类型**不可空**，Port 自己裁决
+ *   「从未设置 ⇒ [DialogTarget.Device]（端侧）」⇒ 本方法不再产出 [CODE_NO_TARGET]。
  */
 public class DefaultModelRouter(
     private val device: DeviceModelPort,
     private val localDialog: DialogModelPort,
     private val remote: DialogModelPort,
     private val targets: DialogTargetStore,
+    private val defaults: DefaultTargetStore,
     private val creds: CloudCredentialPort,
     private val permits: EgressPermitSink,
 ) : ModelRouter {
 
     override suspend fun dialogFor(sessionId: String): Outcome<DialogModelPort> {
-        // ★ 没有登记过的目标 ⇒ **报错，不猜**。
-        val target = targets.of(sessionId) ?: return Outcome.Err(
-            AppError(code = CODE_NO_TARGET, reasonKey = "err_router_no_target", severity = Severity.MEDIUM),
-        )
+        /**
+         * ★★ `of() == null` 只表示「**这个会话**没登记过目标」，
+         * **不是**「走端侧」—— 那两条仍必须是两件不同的事。
+         *
+         * 于是交给 [DefaultTargetStore] 兜底：兜底值由**用户的全局设置**决定，
+         * 而不是由路由器猜一个本地。这就是「新会话继承用户选的后端」的落点。
+         *
+         * ⚠★ 本方法**绝不把兜底结果写回 `targets`**。三条理由：
+         *   ① 一旦写回，「从未设置过默认」与「把默认设成 Device」在库里就
+         *      **再也分不开**（可空列 + `isExplicitlySet()` 白做了）；
+         *   ② 会话目标的「会话内不可变」语义会被一次**读**操作破坏；
+         *   ③ 兜底是一次性的：用户之后改了默认，老会话不该跟着变。
+         */
+        val target = targets.of(sessionId) ?: defaults.default()
 
         return when (target) {
             is DialogTarget.Device -> Outcome.Ok(localDialog)
@@ -105,6 +129,19 @@ public class DefaultModelRouter(
         permits.sweepPending(olderThanMs)
 
     public companion object {
+        /**
+         * ⚠ **v5 起不可达**：`DialogTargetStore.of()` 返回 `null` 时改由
+         * [DefaultTargetStore.default()] 兜底，而它的返回类型**不可空**
+         * ⇒ `dialogFor()` 不再产出这个码。
+         *
+         * 保留常量是为了不打断已有日志/埋点里的字符串；**新代码不要用**，
+         * 也不要在 UI 上为它准备文案 —— 那条「请重新选择目标」的引导
+         * 如果哪天真要做，应该读 `isExplicitlySet()`，而不是等这个错误码。
+         */
+        @Deprecated(
+            message = "v5 起不可达：未登记会话由 DefaultTargetStore.default() 兜底，永不返回 null。",
+            level = DeprecationLevel.WARNING,
+        )
         public const val CODE_NO_TARGET: String = "ROUTER_NO_TARGET"
 
         /** ★ 落库文本无法识别（docs/10 §6.2-D）。UI 必须提示「请重新选择目标」。 */

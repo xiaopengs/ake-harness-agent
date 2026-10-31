@@ -15,6 +15,7 @@ import com.ake.core.ports.CloudCredentialPort
 import com.ake.core.ports.EgressPermitSink
 import com.ake.core.ports.ChatSessionStorePort
 import com.ake.core.ports.DeviceHealthPort
+import com.ake.core.ports.DefaultTargetStore
 import com.ake.core.ports.DialogTargetStore
 import com.ake.core.ports.McpServerStorePort
 import com.ake.core.ports.MemoryStorePort
@@ -51,6 +52,7 @@ import com.ake.data.persist.recovery.TaskReconciler
 import com.ake.data.persist.redact.PersistenceRedactionGate
 import com.ake.data.persist.store.AgentProfileStoreImpl
 import com.ake.data.persist.store.CloudCredentialStoreImpl
+import com.ake.data.persist.store.DefaultTargetStoreImpl
 import com.ake.data.persist.store.DialogTargetStoreImpl
 import com.ake.data.persist.store.EgressPermitSinkImpl
 import com.ake.data.persist.store.CapabilityGrantStoreImpl
@@ -228,6 +230,19 @@ public abstract class PersistenceBindingsModule {
     @Binds
     @Singleton
     public abstract fun bindDialogTargetStore(impl: DialogTargetStoreImpl): DialogTargetStore
+
+    /**
+     * ★ v5：**全局默认**目标（`default_dialog_target` 单行表）。
+     *
+     * ★★ 与会话级 `DialogTargetStore` 是**两个 Port**，不是同一个接口的两个方法 ——
+     *    `:inference` 的 `InMemoryDialogTargetStore` 实现了后者，
+     *    给那个接口加抽象方法会直接打断霍承钧正在改的模块。见 `DefaultTargetStore` 的注释。
+     *
+     * ⚠ 装配落在 `:data`（与 `DialogTargetStore` 同一理由：**必须持久化**）。
+     */
+    @Binds
+    @Singleton
+    public abstract fun bindDefaultTargetStore(impl: DefaultTargetStoreImpl): DefaultTargetStore
 
     /**
      * 「一键清除全部痕迹」的执行契约。
@@ -836,6 +851,18 @@ public abstract class PersistenceBindingsModule {
             clock: Clock,
         ): DialogTargetStoreImpl = DialogTargetStoreImpl(
             sessions = db.chatSessionDao(),
+            clock = clock,
+        )
+
+        /** ★ v5：全局默认目标。落 `default_dialog_target` 单行表（跨冷启动保持）。 */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun provideDefaultTargetStore(
+            db: AkeDatabase,
+            clock: Clock,
+        ): DefaultTargetStoreImpl = DefaultTargetStoreImpl(
+            dao = db.defaultTargetDao(),
             clock = clock,
         )
 

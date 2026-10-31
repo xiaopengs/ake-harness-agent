@@ -22,6 +22,8 @@ import com.ake.core.ports.AgentProfileStorePort
 import com.ake.core.ports.CapabilityGrantPort
 import com.ake.core.ports.ChatSessionStorePort
 import com.ake.core.ports.CloudCredentialPort
+import com.ake.core.ports.EgressCoordinator
+import com.ake.core.ports.ModelRouter
 import com.ake.core.ports.DeviceHealthPort
 import com.ake.core.ports.EgressGate
 import com.ake.core.ports.HumanGate
@@ -112,6 +114,18 @@ public class ChatServices(
      * 缺省视为**没有任何凭证**（deny-by-default）。
      */
     private val credentials: CloudCredentialPort? = null,
+    /**
+     * ★ 2026-10 端云接线（docs/11 §六 阶段一）：模型路由。
+     *   `null` ⇒ 端侧单栈，行为与接线前完全一致。
+     */
+    private val modelRouter: ModelRouter? = null,
+    /** ★ 同上：出境编排。`null` ⇒ 一轮也不会出境。 */
+    private val egressCoordinator: EgressCoordinator? = null,
+    /**
+     * ★ 「拿云端端口跑一次」的动作，由 `:app` 注入（原因见 `ChatLoop.CloudCall`）。
+     *   `null` ⇒ 不启用云端路径。
+     */
+    private val cloudCall: ChatLoop.CloudCall? = null,
 ) {
 
     /** ★ 没有凭证时的兜底：`exists()` 恒 false ⇒ 想上云也会被判成本地。 */
@@ -237,5 +251,8 @@ public class ChatServices(
         rehydrator = rehydrator,
         historyCollector = historyCollector,
         isolator = isolator,
+        modelRouter = modelRouter,
+        egressCoordinator = egressCoordinator,
+        cloudCall = cloudCall,
     )
 }

@@ -160,9 +160,9 @@ class CloudMigration3To4Test {
 
     @Test
     fun migrationIsRegistered() {
-        assertThat(AkeDatabase.VERSION).isEqualTo(4)
+        assertThat(AkeDatabase.VERSION).isEqualTo(5)
         assertThat(AkeMigrations.ALL.map { "${it.startVersion}->${it.endVersion}" })
-            .containsExactly("1->2", "2->3", "3->4").inOrder()
+            .containsExactly("1->2", "2->3", "3->4", "4->5").inOrder()
         assertThat(AkeMigrations.ALL.toList()).contains(CloudMigration3To4)
     }
 }

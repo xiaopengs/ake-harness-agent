@@ -176,7 +176,7 @@ class RouteDecisionProbeTest {
 
     @Test
     fun probeSqlIsRunnableAndSelfConsistent() {
-        assertThat(AkeDatabaseProbe.EXPECTED_USER_VERSION).isEqualTo(4)
+        assertThat(AkeDatabaseProbe.EXPECTED_USER_VERSION).isEqualTo(5)
         assertThat(AkeDatabaseProbe.PROBE_ROUTE_DECISION_ROWS).isEqualTo("SELECT COUNT(*) FROM route_decision")
         assertThat(AkeDatabaseProbe.PROBE_NON_CANONICAL_VERDICTS).contains("NOT IN")
         assertThat(AkeDatabaseProbe.PROBE_UNCONVERGED_ROWS).contains("PENDING")

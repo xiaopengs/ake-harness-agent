@@ -7,6 +7,7 @@ import com.ake.core.common.Clock
 import com.ake.core.ports.AnnouncementKind
 import com.ake.core.ports.CloudCredentialPort
 import com.ake.core.ports.DialogModelPort
+import com.ake.core.ports.DefaultTargetStore
 import com.ake.core.ports.DialogTargetStore
 import com.ake.core.ports.DeviceModelPort
 import com.ake.core.ports.EgressAnnouncementSink
@@ -98,6 +99,11 @@ public object CloudInferenceModule {
         @LocalDialog localDialog: DialogModelPort,
         @RemoteDialog remote: DialogModelPort,
         targets: DialogTargetStore,
+        /**
+         * ★ 全局默认目标（宋砚秋 v5）：`dialogFor()` 对**未登记**会话用它兜底
+         *   ⇒ 新会话不再撞 `Err(NO_TARGET)`。由 `:data` 绑定。
+         */
+        defaults: DefaultTargetStore,
         credentials: CloudCredentialPort,
         permits: EgressPermitSink,
     ): ModelRouter = DefaultModelRouter(
@@ -105,6 +111,7 @@ public object CloudInferenceModule {
         localDialog = localDialog,
         remote = remote,
         targets = targets,
+        defaults = defaults,
         creds = credentials,
         permits = permits,
     )

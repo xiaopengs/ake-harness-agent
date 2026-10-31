@@ -1,9 +1,6 @@
 package com.ake.data.persist.db
 
 import com.google.common.truth.Truth.assertThat
-import java.io.File
-import kotlin.io.path.createTempFile
-import org.junit.Assume
 import org.junit.Test
 
 /**
@@ -33,53 +30,9 @@ import org.junit.Test
  */
 class SqliteOracleV4Test {
 
-    private fun python3(): String? = listOf("python3", "python").firstOrNull { bin ->
-        runCatching { ProcessBuilder(bin, "--version").start().waitFor() == 0 }.getOrDefault(false)
-    }
-
-    private fun oracleScript(): File {
-        val candidates = listOf(
-            File("src/test/resources/oracle/v4_migration_oracle.py"),
-            File("data/src/test/resources/oracle/v4_migration_oracle.py"),
-            File("../data/src/test/resources/oracle/v4_migration_oracle.py"),
-        )
-        return candidates.firstOrNull { it.isFile }
-            ?: error("找不到 oracle 脚本：${candidates.map { it.path }}")
-    }
-
-    private fun schemaDir(): File {
-        val rel = "schemas/com.ake.data.persist.db.AkeDatabase"
-        val candidates = listOf(File(rel), File("data/$rel"), File("../data/$rel"))
-        return candidates.firstOrNull { it.isFile || it.isDirectory }
-            ?: error("找不到 Room schema 目录：$rel")
-    }
-
-    /** 跑一次 oracle，返回 (exitCode, stdout)。 */
-    private fun runOracle(statements: List<String>): Pair<Int, String> {
-        val bin = python3()
-        Assume.assumeNotNull(bin)
-        val stmts = createTempFile("v4-stmts", ".json").toFile()
-        stmts.writeText(jsonArray(statements))
-        val proc = ProcessBuilder(
-            bin!!,
-            oracleScript().absolutePath,
-            "--schema-dir", schemaDir().absolutePath,
-            "--statements", stmts.absolutePath,
-            "--json",
-        ).redirectErrorStream(true).start()
-        val out = proc.inputStream.bufferedReader().readText()
-        val code = proc.waitFor()
-        return code to out
-    }
-
-    private fun jsonArray(items: List<String>): String =
-        items.joinToString(prefix = "[", postfix = "]") {
-            "\"" + it.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\""
-        }
-
     @Test
     fun migrationRunsOnRealSqliteAndPreservesRows() {
-        val (code, out) = runOracle(CloudMigration3To4.STATEMENTS)
+        val (code, out) = SqliteOracleRunner.run(CloudMigration3To4.STATEMENTS, from = 3, to = 4)
         // ★★ 失败时把 oracle 原文打出来 —— 否则只有一句 "expected to contain" 无法归因。
         //    外部进程的 stdout 是唯一的证据来源，吞掉它就等于放弃了归因能力。
         com.google.common.truth.Truth.assertWithMessage("oracle 输出：\n$out").that(code).isEqualTo(0)
@@ -100,7 +53,7 @@ class SqliteOracleV4Test {
     @Test
     fun oracleRejectsADestructiveStatement() {
         val sabotaged = CloudMigration3To4.STATEMENTS + "DROP TABLE chat_message"
-        val (code, out) = runOracle(sabotaged)
+        val (code, out) = SqliteOracleRunner.run(sabotaged, from = 3, to = 4)
         assertThat(code).isNotEqualTo(0)
         // 它具体应该因为「行数没保住」或「缺表 / 列集不一致」/「迁移执行报错」而失败
         val rejected = out.contains("\"rows_preserved\": false")
@@ -120,7 +73,7 @@ class SqliteOracleV4Test {
         val withoutCredTable = CloudMigration3To4.STATEMENTS.filterNot {
             it.contains("cloud_credential") && it.trimStart().startsWith("CREATE TABLE")
         }
-        val (code, out) = runOracle(withoutCredTable)
+        val (code, out) = SqliteOracleRunner.run(withoutCredTable, from = 3, to = 4)
         assertThat(code).isNotEqualTo(0)
         assertThat(out).contains("缺表 cloud_credential")
     }

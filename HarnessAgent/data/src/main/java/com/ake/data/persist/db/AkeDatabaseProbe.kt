@@ -72,6 +72,6 @@ public object AkeDatabaseProbe {
     public const val PROBE_INTEGRITY: String = "PRAGMA integrity_check"
     public const val PROBE_FOREIGN_KEY_CHECK: String = "PRAGMA foreign_key_check"
 
-    /** ★ 迁移后应为 4。 */
-    public const val EXPECTED_USER_VERSION: Int = 4
+    /** ★ 迁移后应为 5。 */
+    public const val EXPECTED_USER_VERSION: Int = 5
 }

@@ -9,6 +9,7 @@ import com.ake.data.persist.db.dao.ChatSessionDao
 import com.ake.data.persist.db.dao.CheckpointDao
 import com.ake.data.persist.db.dao.CloudCredentialDao
 import com.ake.data.persist.db.dao.ConfigDao
+import com.ake.data.persist.db.dao.DefaultTargetDao
 import com.ake.data.persist.db.dao.MemoryDao
 import com.ake.data.persist.db.dao.ModelAssetDao
 import com.ake.data.persist.db.dao.PolicyDao
@@ -24,6 +25,7 @@ import com.ake.data.persist.db.entity.AppSettingsEntity
 import com.ake.data.persist.db.entity.ChatMessageEntity
 import com.ake.data.persist.db.entity.ChatSessionEntity
 import com.ake.data.persist.db.entity.CloudCredentialEntity
+import com.ake.data.persist.db.entity.DefaultTargetEntity
 import com.ake.data.persist.db.entity.McpServerEntity
 import com.ake.data.persist.db.entity.MemoryCardEntity
 import com.ake.data.persist.db.entity.ModelAssetEntity
@@ -95,6 +97,8 @@ import com.ake.data.persist.db.entity.TraceEventEntity
         RouteDecisionEntity::class,
         // ── ★ v4 新增 1 张
         CloudCredentialEntity::class,
+        // ── ★ v5 新增 1 张
+        DefaultTargetEntity::class,
     ],
     version = AkeDatabase.VERSION,
     exportSchema = true,
@@ -124,6 +128,9 @@ abstract class AkeDatabase : RoomDatabase() {
     /** ★ v4：云端凭证（A5 裁决：密文落 Room，不落独立文件）。 */
     abstract fun cloudCredentialDao(): CloudCredentialDao
 
+    /** ★ v5：全局默认目标（新建会话继承的那一份）。 */
+    abstract fun defaultTargetDao(): DefaultTargetDao
+
     companion object {
         const val DB_FILE_NAME: String = "ake_agent.db"
 
@@ -135,8 +142,10 @@ abstract class AkeDatabase : RoomDatabase() {
          *  - 4 = 云端模型推出（docs/09）：`cloud_credential` 新表 +
          *        `route_decision` 加 13 列 + `chat_session` 加 3 列 + 3 个索引。
          *        ★ **全 Additive**，无 DROP / RENAME / 重建 / 回填。
+         *  - 5 = 全局默认目标：`default_dialog_target` 单行表（新建会话继承用户
+         *        选的后端，而不是静默回到 `'LOCAL'`）。★ 同样全 Additive。
          */
-        const val VERSION: Int = 4
+        const val VERSION: Int = 5
 
         /** §4.4 配额硬限。DB 含 -wal/-shm。★ §8.4 重估后**不变**（v3 稳态 ≈34 MB，仍有 ≈7× 余量）。 */
         const val QUOTA_HARD_BYTES: Long = 256L * 1024 * 1024

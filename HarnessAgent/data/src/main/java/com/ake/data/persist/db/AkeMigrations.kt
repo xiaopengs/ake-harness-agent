@@ -130,7 +130,30 @@ object AkeMigrations {
      */
     val MIGRATION_3_4: Migration = CloudMigration3To4
 
+    /**
+     * 4 → 5：全局默认目标（docs/10 §6.2-A 的遗留缺口）。
+     *
+     *  - 1 张新表 `default_dialog_target`（单行表，承载"新建会话继承哪个后端"）。
+     *
+     * ★ 起因：`chat_session.model_target` 的列默认值是 `'LOCAL'`，而新建会话
+     *   不会去读用户在设置页选的后端 ⇒ 用户选了云端、新会话仍静默走本地。
+     *   这不是崩溃，是「用户以为在用某个模型、实际在用另一个」。
+     *
+     * ★ **全 Additive**：只有一条 `CREATE TABLE IF NOT EXISTS`，
+     *   没有 ALTER / DROP / RENAME / 回填 ⇒ 不碰任何既有表的一行。
+     */
+    val MIGRATION_4_5: Migration = DefaultTargetMigration4To5
+
     // ──────────────────────────────────────────── 样板（**不进 [ALL]**）
+
+    /** 5 → 6 的样板：带数据回填。 */
+    val SAMPLE_MIGRATION_5_6: Migration = object : Migration(5, 6) {
+        override fun migrate(connection: SQLiteConnection) {
+            connection.execSQL(
+                "UPDATE task SET budget_profile = 'DEFAULT' WHERE budget_profile IS NULL",
+            )
+        }
+    }
 
     /**
      * 4 → 5 的样板：加列 + 建索引。真实改动时照抄这个形状。
@@ -141,25 +164,19 @@ object AkeMigrations {
      *  ③ **大表加列用默认值而不是 UPDATE**：`ALTER TABLE ... ADD COLUMN x INTEGER NOT NULL DEFAULT 0`
      *     是 O(1)，而 `ADD COLUMN` + `UPDATE` 全表是 O(n)，在 trace_event 上会是几秒的卡顿。
      *
-     * ★ 2026-10：原「2 → 3 样板」已**转正**为 [MIGRATION_2_3]（聊天化 Agent），
-     *   样板顺延到 4 → 5，避免同一个版本号挂着两条 `Migration(2, 3)`。
+     * ★ 2026-10：原「2 → 3 样板」已**转正**为 [MIGRATION_2_3]（聊天化 Agent）；
+     *   原「4 → 5 样板」也已被 [MIGRATION_4_5]（全局默认目标）转正 ⇒ 顺延到 6 → 7。
+     *   ⚠ **不要留一条与真实迁移同号的样板**：某天有人把它加进 [ALL]，
+     *     同一个 (4,5) 会有两条 `Migration`，Room 只会取先匹配到的那条，
+     *     而哪条先取决于数组顺序 —— 这种 bug 在真机上表现为"迁移跑了但列没加上"。
      */
-    val SAMPLE_MIGRATION_4_5: Migration = object : Migration(4, 5) {
+    val SAMPLE_MIGRATION_6_7: Migration = object : Migration(6, 7) {
         override fun migrate(connection: SQLiteConnection) {
             connection.execSQL(
                 "ALTER TABLE task ADD COLUMN budget_profile TEXT",
             )
             connection.execSQL(
                 "CREATE INDEX IF NOT EXISTS idx_step_action_key ON step (task_id, action_key)",
-            )
-        }
-    }
-
-    /** 5 → 6 的样板：带数据回填。 */
-    val SAMPLE_MIGRATION_5_6: Migration = object : Migration(5, 6) {
-        override fun migrate(connection: SQLiteConnection) {
-            connection.execSQL(
-                "UPDATE task SET budget_profile = 'DEFAULT' WHERE budget_profile IS NULL",
             )
         }
     }
@@ -173,5 +190,5 @@ object AkeMigrations {
      *   把它放在最前面会对上 `Variable 'MIGRATION_1_2' must be initialized`（本轮真编译踩到）。
      *   `arrayOf(...)` 在这里是取值而不是延迟引用 —— 它是 `Array`，不是 `Lazy`。
      */
-    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
 }

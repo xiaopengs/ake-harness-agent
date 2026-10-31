@@ -99,6 +99,7 @@ class DialogTargetTest {
             localDialog = LocalDialogAdapter(FakeDevice()),
             remote = FakeCloudDialog(),
             targets = store,
+            defaults = InMemoryDefaultTargetStore(),
             creds = FakeCredentials(),
             permits = FakePermitSink(),
         )

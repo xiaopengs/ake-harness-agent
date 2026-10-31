@@ -1,5 +1,7 @@
 package com.ake.chat.loop
 
+import com.ake.inference.LocalDialogAdapter
+
 import com.ake.agent.context.ContextAssembler
 import com.ake.agent.context.ContextBudget
 import com.ake.agent.context.InjectionIsolator
@@ -44,10 +46,17 @@ import com.ake.core.ports.ChatRunnerPort
 import com.ake.core.ports.ChatSessionStorePort
 import com.ake.core.ports.ChatSessionSummary
 import com.ake.core.ports.ChatTerminalReason
+import com.ake.core.ports.CloudFailure
+import com.ake.core.ports.CloudCallOutcome
+import com.ake.core.ports.DialogModelPort
+import com.ake.core.ports.EgressPermit
+import com.ake.core.ports.EgressResult
+import com.ake.core.ports.TaskKind
 import com.ake.core.ports.ChatTurnRequest
 import com.ake.core.ports.ContentSource
 import com.ake.core.ports.DataClass
 import com.ake.core.ports.DeviceHealthPort
+import com.ake.core.ports.EgressCoordinator
 import com.ake.core.ports.FocusHolder
 import com.ake.core.ports.FocusKind
 import com.ake.core.ports.FocusLease
@@ -59,6 +68,7 @@ import com.ake.core.ports.MessageKind
 import com.ake.core.ports.MessageRole
 import com.ake.core.ports.MessageStatus
 import com.ake.core.ports.PolicyPort
+import com.ake.core.ports.ModelRouter
 import com.ake.core.ports.PolicyVerdict
 import com.ake.core.ports.Resolved
 import com.ake.core.ports.RouteContext
@@ -127,7 +137,45 @@ public class ChatLoop(
     private val historyCollector: ChatHistoryCollector,
     private val isolator: InjectionIsolator,
     private val router: SkillRouter = SkillRouter(),
+    /**
+     * ★ 2026-10 端云接线（docs/11 §六 阶段一）：模型路由。
+     *
+     * ★★ `null` ⇒ **行为与今天逐字节一致**（端侧单栈，`model.openSession` + `generate`）。
+     *   这是刻意的可空性：`:chat` 有 120 条测试守着 `InferenceFocus` 租约、Slot
+     *   结构、`TurnLedger` 这些不变量，必须先证明「加参数」这件事本身零影响，
+     *   再谈分支逻辑。
+     *
+     * ⚠ 参数名带前缀而不是 `router`：本类已有一个 `router: SkillRouter`（技能路由）。
+     *   两个都叫 `router` 会让调用点当场分不清自己在配哪一个。
+     */
+    private val modelRouter: ModelRouter? = null,
+    /** ★ 同上：出境编排。`null` ⇒ 不产生任何出境。 */
+    private val egressCoordinator: EgressCoordinator? = null,
+    /**
+     * ★★ 「拿一个云端 `DialogModelPort` 跑一次」的动作，由 `:app` 注入。
+     *
+     * ## 为什么它是一个**函数**而不是 `:chat` 直接调适配器
+     *
+     * 那个适配（`DialogModelPort` → `CloudCallOutcome`）需要把 `AppError.code`
+     * 反解成 `CloudFailure`，而这个映射**只有 `:cloudai` 有**。
+     * `:chat` 刻意**一条 L3 边都没有**（`:cloudai` 是 L3）⇒ 它不能看见适配器，
+     * 否则就会出现第二份「401 到底算 PRE 还是 POST」的判据。
+     *
+     * ⇒ 由 `:app`（唯一能同时看见 `:chat` 与 `:cloudai` 的组合根）把这段适配
+     *   **作为一个值**传进来。`:chat` 只见签名，不见实现。
+     */
+    private val cloudCall: CloudCall? = null,
 ) : ChatRunnerPort {
+
+    /** ★ `cloudCall` 的类型。`null` ⇒ 不启用云端路径。 */
+    public fun interface CloudCall {
+        public suspend fun invoke(
+            port: DialogModelPort,
+            permit: EgressPermit,
+            spec: SessionSpec,
+            req: GenerationRequest,
+        ): CloudCallOutcome
+    }
 
     private val estimate: (String) -> Int = { model.estimateTokens(it) }
 
@@ -723,6 +771,60 @@ public class ChatLoop(
             mode.profile(),
         )
 
+        // ══════════════════════════════════════════════════════════════════════
+        // ★ docs/11 §3：云端分支点。**在 `tokenStream.generate` 之前**。
+        //
+        // `openSession` 不动（端侧仍需 KV 会话）。四个 `?` 参数**全部**非 null
+        // 才启用云端路径；任一为 null ⇒ 行为与接线前逐字节一致。
+        // ══════════════════════════════════════════════════════════════════════
+        val cloud = if (modelRouter != null && egressCoordinator != null && cloudCall != null) {
+            answerViaCloud(sid = sid, turnId = req.turnId, budget = budget, prompt = prompt)
+        } else {
+            CloudAnswer.NotAttempted
+        }
+
+        when (cloud) {
+            is CloudAnswer.Blocked -> {
+                // §3.2：`NeedsUserDecision` / `Failed` / `NotPermitted` ⇒ 本轮失败收尾，
+                // **不重试、不回落**（POST 阶段回落 = 把「已出境」说成「没成功」）。
+                AkeLog.w(TAG, "cloud turn blocked: ${cloud.reasonKey}")
+                return TurnResult(null, ChatTerminalReason.MODEL_FAILED)
+            }
+
+            is CloudAnswer.Delivered -> {
+                // §3.2：`Delivered` ⇒ 用云端文本，走现有落库路径（`producedBy = REMOTE`
+                //   的承载待 `:core:ports` 给出 per-turn 字段，本轮先落文本本身）。
+                val cleaned = policy.sanitize(cloud.text, ContentSource.MODEL).text
+                if (cleaned.isNotEmpty()) {
+                    out.send(ChatEvent.AssistantDelta(sid, messageId, cleaned))
+                }
+                // ★ 与端侧共用同一个提交口（同一 messageId 的 UPDATE，幂等）。
+                //   `stats`/`kv` 无意义：云端是整段交付，没有 KV cache 概念。
+                var committed = commitAssistant(
+                    messageId, MessageStatus.COMPLETE, cleaned, stats = null, kv = 0,
+                )
+                if (committed is Outcome.Err) {
+                    AkeLog.w(TAG, "commitAssistant(cloud) failed：同一轮内重试一次")
+                    committed = commitAssistant(
+                        messageId, MessageStatus.COMPLETE, cleaned, stats = null, kv = 0,
+                    )
+                }
+                mode.to(ModeKind.CHAT, estimate(prompt.render()))?.let { t ->
+                    out.send(ChatEvent.ModeSwitched(sid, t.from, t.to, t.epoch, t.prefillTokens))
+                }
+                // ★ 云端路径**不**调 `maybeCompact`：压缩判据是 KV cache 占用，
+                //   云端没有 KV。这里也没有 conversation 可复水（见 §五-4）。
+                return TurnResult(
+                    messageId,
+                    if (committed is Outcome.Err) STORE_FAILURE_REASON else ChatTerminalReason.COMPLETED,
+                )
+            }
+
+            is CloudAnswer.FellBackToLocal, CloudAnswer.NotAttempted -> Unit
+            // §3.2 `FellBackToLocal`：PRE 失败，一个字节没出去 ⇒ 静默切回端侧重新生成。
+            //   「告知」已由 `EgressCoordinator` 在返回前经 `EgressAnnouncementSink` 发出。
+        }
+
         val scrubber = DeltaScrubber()
         val buffer = StringBuilder()
         val result = tokenStream.generate(conversation, answerRequest(prompt, budget)) { delta ->
@@ -785,6 +887,135 @@ public class ChatLoop(
             )
         }
         return TurnResult(messageId, terminal)
+    }
+
+    // ══════════════════════════════════════════════════════════════════ 云端生成
+
+    /** ★ docs/11 §3.2 四个分支在 `:chat` 侧的落地形状。 */
+    private sealed interface CloudAnswer {
+        /** 没启用云端 / 裁决为本地 ⇒ 走端侧，不产生任何出境账。 */
+        data object NotAttempted : CloudAnswer
+
+        /** `Delivered(text)`。 */
+        data class Delivered(val text: String) : CloudAnswer
+
+        /** `FellBackToLocal(failure)`：PRE 失败，零字节 ⇒ 静默切回端侧重新生成。 */
+        data class FellBackToLocal(val failure: CloudFailure) : CloudAnswer
+
+        /** `NeedsUserDecision` / `Failed` / `NotPermitted` ⇒ 本轮失败收尾。 */
+        data class Blocked(val reasonKey: String) : CloudAnswer
+    }
+
+    /**
+     * ★★ 一轮云端生成（docs/11 §2：**一轮 = 一条 permit = 一条审计行 = 一个云端 session**）。
+     *
+     * ## ★ 为什么这里**必须**走 `egress.decide(ctx)` 而不是 `routing.decide(ctx)`
+     *
+     * 主理人裁决：`ChatEgress.decide()` 落的是**决策账**，`EgressPermitSink.open()`
+     * 落的是**出境账**，两个不同事件，本就该两笔。**为了让断言写得顺手而绕过既有
+     * 核销路径，是让测试反过来绑架实现** ⇒ 一轮云端会写 2 行，
+     * 靠 `idempotency_key IS NULL`（决策行）与 `outcome='DELIVERED'`（出境行）区分。
+     */
+    private suspend fun answerViaCloud(
+        sid: String,
+        turnId: String,
+        budget: ChatBudget,
+        prompt: PromptSections,
+    ): CloudAnswer {
+        val ctx = RouteContext(
+            agentId = AGENT_ID_CHAT,
+            sessionId = sid,
+            // ★ 必须来自本轮，不能复用上一轮（T6 就是盯这个的）
+            turnId = turnId,
+            /**
+             * ★ 表达**意图**，不是授权。授权由 `EgressPermitSink.open()` 产出的 permit 决定。
+             *
+             * ⚠ docs/11 §3.1 写成 `CloudRequested(ref)`；实际 `CloudRequested` 是
+             *   **无参** `data object`（`CloudAssisted` 才带 permit）⇒ 以代码为准。
+             */
+            requested = InferenceTarget.CloudRequested,
+            /**
+             * ★ false。docs/11 §五-1 未解：今天没有「逐轮授权」UI。
+             *   填 true = 默认授权，与「显式授权」的承诺冲突 ⇒ 取 false。
+             *   且 `DialogRoutingPort` **不读**这个字段做决定 ⇒ 今天不影响能否出境。
+             */
+            userGrantedThisTurn = false,
+            estimatedContextTokens = estimate(prompt.render()),
+            needsLongContext = estimate(prompt.render()) > CHAT_LOCAL_WINDOW,
+            /**
+             * ★★ 取 `GREEN`（主理人裁决 2）。两条必须一起看：
+             *  ① **今天是空转**：`DialogRoutingPort` 恒返回 `allowedClasses = emptySet()`，
+             *     类别闸还没实现 ⇒ 填什么都不影响能否出境；
+             *  ② 一旦 permit 侧真的实现类别闸（docs/11 §五-2 未解），这里必须与白名单
+             *     **严格对齐**，届时重查。语义上「用户在设置页显式选了云端」= 把该会话
+             *     文本归类为可出境 ⇒ GREEN 是诚实的一档。
+             */
+            payloadClasses = setOf(DataClass.GREEN),
+            /**
+             * ★★ 显式给 `PureDialog`，**不用默认值兜底**。
+             *
+             * 这是 DOM 锁的第一道：`TaskKind.PageTask ⇒ 路由必须返回 LocalOnly`。
+             * 默认值兜底会让将来加页面任务时静默复用本调用点。
+             *
+             * ⚠ docs/11 §3.1 写 `TaskKind.Chat`；实际 `TaskKind` 只有
+             *   `PureDialog` / `PageTask` ⇒ 以代码为准，语义等价（非页面任务）。
+             */
+            kind = TaskKind.PureDialog,
+            page = null,
+        )
+
+        /**
+         * ★★ **先问路由要端口，再决定要不要落决策账**（T1 的关键顺序）。
+         *
+         * 若先 `egress.decide(ctx)`，只要 `requested != LOCAL_ONLY` 就会写一行决策账
+         * ⇒ 一个**选了端侧**的会话每轮也多一行「想上云」的账。那是假账。
+         * ⇒ 先派发：端侧端口 ⇒ 直接 `NotAttempted`，**一个字节、一行账都没有**。
+         *
+         * ⚠ **已知耦合**：这里靠 `port is LocalDialogAdapter` 判「路由选了端侧」。
+         *   形状不漂亮 —— 理想是 `ModelRouter` 直接给 `DialogTarget`，但
+         *   `ModelRouter` 属 `:core:ports`（本轮不可改）。
+         *   TODO(→ :core:ports)：给 `ModelRouter` 加 `targetOf(sessionId): DialogTarget?`
+         *   之后本处改为按 `DialogTarget.Device` 判定。
+         */
+        val router = modelRouter ?: return CloudAnswer.NotAttempted
+        val port = when (val picked = router.dialogFor(sid)) {
+            is Outcome.Ok -> picked.value
+            is Outcome.Err -> return CloudAnswer.Blocked(picked.error.reasonKey)
+        }
+        if (port is LocalDialogAdapter) return CloudAnswer.NotAttempted
+
+        // ★ 决策账（见上面 KDoc）。**不**自己调 `permits.open/close` ——
+        //   那会绕开 `FallbackPolicy`，把「是否允许回落」的判断散成两处。
+        val decision = egress.decide(ctx)
+        if (decision.target !is InferenceTarget.CloudRequested) {
+            return CloudAnswer.NotAttempted
+        }
+
+        val coordinator = egressCoordinator ?: return CloudAnswer.NotAttempted
+        val call = cloudCall ?: return CloudAnswer.NotAttempted
+
+        // ★ 云端靠 `initialMessages` 全量重放历史（协议无状态）。
+        val spec = SessionSpec(
+            modelId = CLOUD_MODEL_ID,
+            taskId = "chat:$sid",
+            initialMessages = rehydrator.buildInitialMessages(sid, budget).turns,
+            maxOutputTokens = budget.answerMaxTokens,
+            temperature = 0.4,
+            enableJsonConstraint = false,
+        )
+
+        return when (val r = coordinator.execute(ctx, decision) { permit ->
+            call.invoke(port, permit, spec, answerRequest(prompt, budget))
+        }) {
+            is EgressResult.Delivered -> CloudAnswer.Delivered(r.text)
+            is EgressResult.FellBackToLocal -> CloudAnswer.FellBackToLocal(r.failure)
+            is EgressResult.NeedsUserDecision -> CloudAnswer.Blocked(r.failure.reasonKey)
+            is EgressResult.Failed -> CloudAnswer.Blocked(r.failure.reasonKey)
+            EgressResult.NotPermitted -> CloudAnswer.Blocked(
+                // ★ 含义是「审计行都写不出来」⇒ 一个字节都没发。**不能**说成网络错误。
+                "err_cloud_not_permitted",
+            )
+        }
     }
 
     private suspend fun commitAssistant(
@@ -1065,6 +1296,30 @@ public class ChatLoop(
 
     public companion object {
         public const val TAG: String = "ChatLoop"
+
+        /** ★ 聊天固定 agentId（`RouteContext.agentId`）。云端路由用它区分调用来源。 */
+        public const val AGENT_ID_CHAT: String = "chat"
+
+        /**
+         * ★ `needsLongContext` 的判据阈值：端侧单栈的可用窗口。
+         *
+         * ⚠ docs/11 §3.1 只写了 `> CHAT_LOCAL_WINDOW` 没给值。这里取 4096
+         *   （端侧最低档 `ModelCapabilities.DEVICE_DEFAULT` 的量级）。
+         *   **它今天不参与任何出境判断**（`DialogRoutingPort` 不读它）⇒ 阈值取错
+         *   的代价只是「needsLongContext 报得不准」，不会放行或拦错。
+         *   待 `:core:ports` 给出权威窗口常量后改为引用它。
+         */
+        public const val CHAT_LOCAL_WINDOW: Int = 4_096
+
+        /**
+         * ★ 云端 spec 的 `modelId`。
+         *
+         * ⚠ **占位**：真实模型名应由会话登记的目标（`DialogTarget.Remote.credentialRef`
+         *   → `CloudCredentialPort.configOf(ref).modelName`）给出，而 `ModelRouter`
+         *   的 `dialogFor()` **只**返回端口、不带 spec ⇒ 本轮拿不到。
+         *   已列入报告「待拍板」项，**没有**静默取一个看起来对的值。
+         */
+        public const val CLOUD_MODEL_ID: String = "cloud"
 
         /** Q7 裁决：一次助手回答内最多 3 次技能调用。 */
         public const val MAX_SKILL_CALLS_PER_TURN: Int = 3

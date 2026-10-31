@@ -264,6 +264,69 @@ public interface DialogTargetStore {
 }
 
 /**
+ * ★★ **全局默认目标**（新建会话继承的那一份）。
+ *
+ * ## 为什么它是**另一个 Port**，而不是给 [DialogTargetStore] 加两个方法
+ *
+ *  ① **契约形状不同，混在一起会互相污染。** [DialogTargetStore] 的不变量是
+ *     「`of() == null` 与 `Device` 必须是两件不同的事」。而"全局默认"恰恰**没有**
+ *     「没选过」这个状态（未设置时一律按端侧走，见 [default]）——
+ *     把两者塞进一个接口，就会出现「同一个接口里 `of()` 能返回 null、`default()` 不能」
+ *     这种需要靠注释才能分辨的差别。
+ *  ② **生命周期不同。** 会话目标**会话内不可变**；全局默认随时可改。
+ *     共用实现会让「缓存/失效」这类后来的优化无从下手。
+ *  ③ ★ **硬约束**：`InMemoryDialogTargetStore`（`:inference`）是 [DialogTargetStore]
+ *     的一个既有实现。给接口加**抽象**方法会直接打断那个模块的编译；
+ *     而给它加"默认实现"（例如默认返回 `Device`）则是**静默走端侧**——
+ *     正是本轮要修的那类错误。⇒ 另起一个 Port 是唯一干净的解法。
+ *
+ * ## ★ 优先级（由调用方组合，本 Port 不代劳）
+ *
+ * ```
+ *   会话显式登记的目标（DialogTargetStore.of）  ← 最高
+ *        ↓ null
+ *   全局默认（本 Port）
+ * ```
+ *
+ * 即 `targets.of(sessionId) ?: defaults.default()`。
+ * **本 Port 不提供 `resolve(sessionId)`**：合成策略属于路由层（`:inference`），
+ * 放进 Port 就等于把"谁优先"这件产品决策挪到持久化层，改起来要动 schema。
+ */
+public interface DefaultTargetStore {
+
+    /**
+     * 全局默认目标。**永不返回 `null`**。
+     *
+     * ★★ 裁决：**从未设置过 ⇒ [DialogTarget.Device]（端侧），不报错。**
+     *
+     * 理由是三条，缺一不可：
+     *  ① 端侧是安全默认 —— 用户没选过就不该有出网可能；
+     *  ② 与 `chat_session.model_target` 列的默认值 `'LOCAL'` **同一套语义**。
+     *     「同一个概念两套表示法」在本仓已经出过一次真实的安全 bug（域名归一化），
+     *     这里不能再来一次；
+     *  ③ 若返回 `null`，调用方会退回 `Err(NO_TARGET)`，而那条分支**今天已不可达**
+     *     （v4 起 `model_target` 是 `NOT NULL DEFAULT 'LOCAL'`，会话侧也读不到 null）
+     *     ⇒ 留着它只是制造「看起来有引导流程」的假象。
+     *
+     * ⚠ 「从未设置过」与「显式选了端侧」在**库里**仍是两种状态（NULL vs `'LOCAL'`），
+     *    只是对外表现一致。将来若要做「你还没选过后端」的引导，加一个
+     *    `isExplicitlySet()` 即可，**不需要改 schema**。
+     *
+     * ⚠ 存的是什么就返回什么：**不会**因为目标指向的凭证已被粉碎而静默降级成
+     *    [DialogTarget.Device]。那种降级正是本轮要消灭的错误类型。
+     */
+    public suspend fun default(): DialogTarget
+
+    /**
+     * 设置全局默认（覆盖式，单行语义）。
+     *
+     * ★ 传 [DialogTarget.Unrecognized] 时原样落库（`DialogTargetCodec` 的既有纪律：
+     *   未知文本不改写，否则「曾经不认识」这件事会被抹掉）。
+     */
+    public suspend fun setDefault(target: DialogTarget): Outcome<Unit>
+}
+
+/**
  * 目标 ↔ 落库文本的互相转换。★ 全仓只有这一份（对应 §3.3 的 `chat_session.model_target`）。
  */
 public object DialogTargetCodec {

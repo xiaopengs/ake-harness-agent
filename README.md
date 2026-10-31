@@ -240,7 +240,7 @@ cd HarnessAgent
 **已完成并通过真机级编译验证**
 
 - **全部 14 个模块 `compileDebugKotlin` / `compileKotlin` 均 BUILD SUCCESSFUL**（含 Hilt KSP 与 Room KSP）
-- **`./gradlew test`：1125 通过 / 0 失败 / 2 跳过**（跳过的是 `:ui` 的 `captureToImage`，Robolectric 无 Surface/PixelCopy，历史已知边界；立项时全工程仅 4 个单测）
+- **`./gradlew test`：1176 通过 / 0 失败 / 2 跳过**（`--rerun-tasks` 强制重跑，非缓存）（跳过的是 `:ui` 的 `captureToImage`，Robolectric 无 Surface/PixelCopy，历史已知边界；立项时全工程仅 4 个单测）
 - **`checkModuleDependencies`：OK** —— 14 个模块的依赖边均在白名单内，`:ui` 对 `:chat`/`:agent`/`:mcp`/`:data` 的 import 为 0；`:cloudai` 对 `:core:contract` 的依赖为 **0**（DOM 锁 B 生效）
 - `:app` —— Dagger 依赖图贯通，MissingBinding 清零；`ChatRunnerPort`/`SkillRegistryPort`/`CapabilityGrantPort` 均已真绑定（生成代码里是 `Optional.of(...)` 而非 `Optional.empty()`）
 - 依赖红线已排除：`ktor-client-plugins-sse` 该坐标在任何版本都不存在（SSE 已收进 `ktor-client-core`），已从 catalog 移除
@@ -255,9 +255,11 @@ cd HarnessAgent
 | 界面 | 23 个新文件 / 3700 行：对话列表、聊天页（真流式渲染）、创建 Agent、模板市场、能力多选 |
 | 引擎 | `maxNumTokens` 分档夹紧、`initialMessages` 复水、`generateStream` 真流式（回调经 Channel 隔离） |
 
-### 第 6 轮产出：端云双栈（**只完成地基，尚不可用**）
+### 第 6–8 轮产出：端云双栈（**已可用 —— 见 `app-release.apk`**）
 
-用户要求"能自己切换云端模型"。本轮完成的是**契约层与两个新模块**；**UI、数据迁移、组合根装配都还没做，所以今天打开 App 是切不了的**。这一点必须写在最前面，避免把地基误读成功能。
+用户要求"能自己切换云端模型"。历经三轮：**第 6 轮**只交付契约与两个新模块（当时 App 确实切不了）；**第 7 轮**落地数据层 v3→v4 与告知口径；**第 8 轮**把最后两段线接完 —— `ChatLoop` 的云端生成路径、以及全局默认目标的持久化。
+
+> ⚠️ 「可用」的**确切含义**，不要过度解读：已通过 `:core` / `:cloudai` / `:inference` / `:chat` / `:data` 共 **1176 条 JVM 单测**，其中含"页面上下文 ⇒ 发出字节数为 0"这类端到端断言。**但没有任何一条是在真机或真 HTTP 端点上跑出来的**（见下方待办表）。
 
 | 层 | 产出 |
 |---|---|
@@ -330,7 +332,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 |---|---|
 | 从未产出过 APK | ✅ **已解除** —— debug 93.70MB + release 60.04MB |
 | AGP 与 R8 从未执行 | ✅ **已解除** —— `assembleRelease` 跑通，R8 真实执行 |
-| 七个模块零测试 | ✅ **已解除** —— 4 → **1125 通过** |
+| 七个模块零测试 | ✅ **已解除** —— 4 → **1176 通过** |
 | **从未在任何真机上运行过一次** | ❌ **仍然成立 —— 这是现在唯一充分的一条** |
 
 复审新识别的 P0：
@@ -382,12 +384,16 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 | **P1** 手动导入本地模型 | ✅ 已解除 —— `ModelFileImporter` + 导入页，**承接“首次启动 + 无网络”这个场景** |
 | **P2** 隐私政策 / Data Safety | ✅ 已备 —— `docs/compliance/`，逐项对照代码申报，五个难看处已如实列出 |
 
+| **`FellBackToLocal` 下达后端侧也失败时，告知仍会失真** | **P1** | T4 结构性修复后剩下的最后一处：**"已由本机完成"这句话成立的前提是本机真的完成了**。若 PRE 回落后端侧引擎也失败，UI 仍是这句话。修它需要 `AnnouncementKind` 第三个值（建议名 `CLOUD_FAILED_NO_OUTPUT`，语义"上云失败、本轮无产出、也没发给谁"，`host` 恒 null）。★ 已埋警报器 `terminalActionIsAlwaysDeterminedByWhetherBytesLeftTheDevice` —— 哪天出现「PRE 且不许回落」会当场红 |
+| 「默认目标能跨冷启动」的验证不够硬 | P2 | `survivesColdStart` 目前用 `FakeDefaultTargetDao`，证明的是"新实例 + 同一 DAO 读得回"，**不是真实 SQLite 关库重开**。真正的冷启动含 WAL checkpoint / 连接重建，需在 `:data` 补真实 Room 冷启动测试 |
+| **整条云端链路没有任何真 HTTP 端点验证** | **P0** | ★ 最重要的一条。今天全部证据都是 JVM 单测里的 fake transport。**没有一台机器真的向一个 OpenAI 兼容端点发过请求**。首次真机/真端点验证至少要看：SSE 分块边界、HTTP 401/429 的真实响应体、`HTTPS` 证书链、以及 `FirstByteTimeout` 那个推断是否成立 |
+
 **第 6–7 轮新增**
 
 | 待办 | 级别 | 说明 |
 |---|---|---|
-| **云端仍未进入真生成路径** | **P0** | ★ 今天最重要的发现。已完成：`:data` v4、`:app` 组合根装配（`ModelRouter` 拿到 device/local/remote 三实现）、`:chat` 解除 `LocalOnly*` 硬绑、设置页切换 UI、模型徽标。但 **`ChatLoop` 仍只持有端侧 `model: ModelPort`**，`openSession → ModelSession.generate` 全程不经过 `ModelRouter`；而 `DialogModelPort.openDialog` 的 `permit` 必填、`ChatLoop` 手上也没有 `RouteContext`（缺 `turnId`/`payloadClasses`）⇒ **"路由判定放行云端"与"真的用云端生成"之间还差一段接线**。→ 用户选了云端，今天仍由端侧出字。**接线规格见 [`docs/11`](docs/11-cloud-generation-path.md)**（含 3 条否决"适配器转发"的实证、6 条断言、4 条待拍板决策） |
-| **新会话不继承用户选的默认后端** | **P0** | `chat_session.model_target` 的列默认值是 `'LOCAL'`，`DialogTargetStore` 只有「按 sessionId 读写」。用户设置页选了云端，**新建的会话仍是本地** ⇒ 静默不一致（与红线同类错误，只是没有出境维度）。需要「全局默认目标」的落点（单行表或 `app_preference`），涉及 v5 迁移 |
+| **云端未进入真生成路径** | ✅ **已解除** | `docs/11` 的规格已落地：`ChatLoop` 新增可空的 `modelRouter`/`egressCoordinator`（全 null ⇒ 行为与旧版逐字节一致），answer 生成点按目标分支，**一轮 = 一条 permit = 一条审计行 = 一个云端 session**。T1–T6 六条断言全绿，其中 **T3（含页面上下文 ⇒ `bytesSent == 0` 且 `route_decision` 0 行）是 DOM 红线唯一能杀死"以为拦住了其实发出去了"的硬断言**。T4 牵引出一个更深的缺陷，见下表 |
+| **新会话不继承用户选的默认后端** | ✅ **已解除** | Room **v4 → v5**：新增单行表 `default_dialog_target` + `DefaultTargetStore` Port。优先级「会话显式 > 全局默认 > Device（从未设置）」，**末层不写回会话表** ⇒ 「未设置」与「显式设成 Device」仍可区分。`of()==null ≠ Device` 的不变量没被破坏。`:app` 故意不做默认值兜底 —— 缺 `defaults` 绑定即编译失败（fail-loud：给默认值就等于再造一次静默走端侧） |
 | **`PRE` 回落「必须告知」** | ✅ **已解除** | 三段闭环：`FallbackPolicy.mustAnnounceFallback`（裁决）→ `EgressAnnouncementSink`（唯一出口，`:app` 缺绑即 `MissingBinding` 编译失败）→ `AnnouncementCenter` 同时实现 `TurnEgressNoticeSource`（UI 唯一读取口）。`FallbackAnnouncement` 补 `failure`/`turnId`/`sessionId`，告知能挂到具体一轮。★ `ALREADY_SENT ⇒ producedBy=REMOTE`：请求体确实出境了，不许用"失败了"掩盖"已出境" |
 | `FirstByteTimeout` 归 POST 是推断 | P1 | 依据是"请求体确实已被服务端收下"，但没发 `Expect: 100-continue`，ktor 也不确认接收 ⇒ 存在"服务端零接收、我们却告诉用户已发出"的窗口。**只能靠 mitmproxy 抓包证伪**，是最可能被真机推翻的一格 |
 | `:data` 迁移 3→4 | ✅ **已解除** | 已落地：`cloud_credential`、`route_decision` 加 7 列、`RouteDecisionVerdict` 正交拆分、`EgressAuditReconciler` 冷启对账；`:data` 249 → 324（含 sqlite3 CLI 外部 oracle） |

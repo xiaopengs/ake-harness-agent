@@ -97,6 +97,74 @@ public object FallbackPolicy {
         CloudFailure.DeadlineExceeded -> FallbackAction.FAIL_LOUD
     }
 
+    // ═════════════════════════════════════════════════════════════════════════
+    // ★★ 试完了之后该怎么办（2026-10 主理人裁决：**告知必须恒等于事实**）
+    //
+    // ## 缺口：一次失败该干什么 ≠ 试完了该怎么办
+    //
+    // [actionFor] 回答的是「**这一次**失败怎么办」（重试 / 回落 / 大声失败）。
+    // 但重试**有次数上限** ⇒ 必然还要回答第二个问题：「**试完了**怎么办」。
+    // 此前这个答案散在 `DefaultEgressCoordinator` 的 `while` 循环尾部 ——
+    // 于是出现了同一条路径**先**发 `FELL_BACK_TO_LOCAL` 告知、
+    // **再** `return EgressResult.Failed` ⇒ UI 显示「已由本机完成」而本机一次都没跑。
+    //
+    // ★ 这是「告知与事实不符」，比静默降级更糟：它制造了一个**错误的安心**。
+    //
+    // ## 为什么它是独立的一个函数而不是 `actionFor` 的一个参数
+    //
+    // 「重试耗尽」这个状态只有编排知道，判据表不该掺进循环变量。
+    // 于是：编排负责**数次数**，本函数负责**定终态** —— 终态只有下面两个，
+    // 且**没有** `RETRY`（重试是过程，不是终态）⇒ 编排里不存在「落回默认分支」这种写法。
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /** ★★ 终态。**两个值、没有 `RETRY`**：试完了只有「交回端侧」与「交回用户」两种事实。 */
+    public enum class TerminalAction {
+        /**
+         * 零字节离机 ⇒ 交回端侧推理，UI 显示「未上云，已由本机完成」。
+         *
+         * ★ 与 [FallbackAction.FALLBACK_TO_DEVICE] 同名而不同层：那是「这一次」，这是「试完了」。
+         */
+        FALL_BACK_TO_DEVICE,
+
+        /** 字节已出境 ⇒ **禁止**回落，UI 显示「已发给 <host>」并让用户选。 */
+        ASK_USER,
+    }
+
+    /**
+     * ★§4.4「允许回落？」那一列的**终态版本**：重试耗尽后落在哪一档。
+     *
+     * ★★ 判据仍然只有一条：**字节有没有出去**（`failure.phase`）。
+     *  · PRE ⇒ 一个字节都没出去 ⇒ 试完了也允许回落（§4.4 前七行全为 ✅）；
+     *  · POST ⇒ 请求体早就在对方服务器上了 ⇒ 试完了**仍不许**回落（❌）。
+     *
+     * ⚠ 这里刻意**逐个枚举 17 个变体**、不写 `else`：将来若新增一个
+     *   「PRE 且不许回落」的形态，本 `when` 当场编译失败，逼作者回答
+     *   「那告知该说什么」—— 而今天的 `AnnouncementKind` 只有两个值，
+     *   **没有**与之相符的形态（见 `DefaultEgressCoordinator` 类注释末尾）。
+     */
+    public fun terminalFor(failure: CloudFailure): TerminalAction = when (failure) {
+        // ── PRE：一个字节都没出去 ⇒ 试完了就交回端侧
+        CloudFailure.NoPermit -> TerminalAction.FALL_BACK_TO_DEVICE
+        CloudFailure.CredentialMissing -> TerminalAction.FALL_BACK_TO_DEVICE
+        CloudFailure.ConnectFailed -> TerminalAction.FALL_BACK_TO_DEVICE
+        CloudFailure.AuthRejected -> TerminalAction.FALL_BACK_TO_DEVICE
+        CloudFailure.ProxyAuthRequired -> TerminalAction.FALL_BACK_TO_DEVICE
+        CloudFailure.InsecureEndpoint -> TerminalAction.FALL_BACK_TO_DEVICE
+        CloudFailure.PageContextRefused -> TerminalAction.FALL_BACK_TO_DEVICE
+
+        // ── POST：请求体已经发出去了 ⇒ 试完了**也**不许回落
+        CloudFailure.ModelNotFound -> TerminalAction.ASK_USER
+        CloudFailure.ContextTooLong -> TerminalAction.ASK_USER
+        CloudFailure.RateLimited -> TerminalAction.ASK_USER
+        CloudFailure.ServerError -> TerminalAction.ASK_USER
+        CloudFailure.FirstByteTimeout -> TerminalAction.ASK_USER
+        CloudFailure.StreamIdleTimeout -> TerminalAction.ASK_USER
+        CloudFailure.StreamTruncated -> TerminalAction.ASK_USER
+        CloudFailure.EmptyDelta -> TerminalAction.ASK_USER
+        CloudFailure.MalformedResponse -> TerminalAction.ASK_USER
+        CloudFailure.DeadlineExceeded -> TerminalAction.ASK_USER
+    }
+
     /** §4.4「自动重试」列的次数上限。 */
     public fun maxRetries(failure: CloudFailure): Int = when (failure) {
         CloudFailure.ConnectFailed -> 1
@@ -141,24 +209,34 @@ public object FallbackPolicy {
         actionFor(failure) == FallbackAction.FALLBACK_TO_DEVICE
 
     /**
-     * ★ 生成告知内容。
+     * ★★ 生成告知内容。
      *
-     * @param host 已过 `Hosts.normalise` 的端点 host；PRE 阶段允许为空（确实没发出去）。
+     * ## ★ 为什么形参是 [TerminalAction] 而不是 [CloudFailure]
+     *
+     * 旧签名只拿 `failure`，于是 `kind` 只能从 `failure.phase` 推 ——
+     * 而**终态是编排定的**（重试耗尽后还能不能回落，只有编排知道）。
+     * 两个来源不一致的那一天，就是「UI 说已由本机完成、本机却没跑」的那一天。
+     *
+     * ⇒ 形参换成终态：告知的 `kind` 与编排即将 `return` 的那个 `EgressResult`
+     *   **由同一个值派生**，物理上不可能再错位。
+     *
+     * @param host 已过 `Hosts.normalise` 的端点 host。★ 只有 `ASK_USER` 才会带上 ——
+     *             「已由本机完成」这句话里出现 host 是自相矛盾的（= 那字节根本没出去）。
      */
     public fun announcementFor(
+        action: TerminalAction,
         failure: CloudFailure,
-        host: String?,
+        host: String? = null,
         turnId: String? = null,
         sessionId: String? = null,
     ): FallbackAnnouncement =
         FallbackAnnouncement(
             failure = failure,
-            kind = if (mustSayAlreadySent(failure)) {
-                AnnouncementKind.ALREADY_SENT
-            } else {
-                AnnouncementKind.FELL_BACK_TO_LOCAL
+            kind = when (action) {
+                TerminalAction.FALL_BACK_TO_DEVICE -> AnnouncementKind.FELL_BACK_TO_LOCAL
+                TerminalAction.ASK_USER -> AnnouncementKind.ALREADY_SENT
             },
-            host = host,
+            host = if (action == TerminalAction.ASK_USER) host else null,
             turnId = turnId,
             sessionId = sessionId,
         )

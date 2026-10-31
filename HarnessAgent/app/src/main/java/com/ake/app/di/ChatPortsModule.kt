@@ -1,5 +1,7 @@
 package com.ake.app.di
 
+import com.ake.chat.loop.ChatLoop
+import com.ake.cloudai.CloudCallAdapter
 import com.ake.chat.ports.ChatServices
 import com.ake.chat.skill.ChatSkillRegistry
 import com.ake.core.common.Clock
@@ -13,7 +15,9 @@ import com.ake.core.ports.ChatRunnerPort
 import com.ake.core.ports.ChatSessionStorePort
 import com.ake.core.ports.CloudCredentialPort
 import com.ake.core.ports.DeviceHealthPort
+import com.ake.core.ports.EgressCoordinator
 import com.ake.core.ports.HumanGate
+import com.ake.core.ports.ModelRouter
 import com.ake.core.ports.PolicyPort
 import com.ake.core.ports.SkillRegistryPort
 import com.ake.core.ports.TaskRunnerPort
@@ -132,6 +136,12 @@ public object ChatPortsModule {
          */
         routing: DialogRoutingPort,
         credentials: CloudCredentialPort,
+        /**
+         * ★ 2026-10 端云接线（docs/11）：三个**都**非 null 才启用云端生成路径。
+         *   任一缺席 ⇒ `ChatLoop` 走端侧单栈（与接线前一致）。
+         */
+        modelRouter: ModelRouter,
+        egressCoordinator: EgressCoordinator,
     ): ChatServices = ChatServices(
         model = model,
         health = health,
@@ -163,6 +173,12 @@ public object ChatPortsModule {
         //   2026-10-31 修复：此处曾写 `routing =`，与构造参数名不一致导致 :app 编译失败。
         routingOverride = routing,
         credentials = credentials,
+        modelRouter = modelRouter,
+        egressCoordinator = egressCoordinator,
+        // ★ 云端调用适配（`:chat` 看不见 `:cloudai` ⇒ 由组合根以值的形式注入）
+        cloudCall = ChatLoop.CloudCall { port, permit, spec, req ->
+            CloudCallAdapter.once(port, permit, spec, req)
+        },
         globalGate = ChatSkillRegistry.GlobalSkillGate { ref ->
             when (ref.kind) {
                 // 内置技能是本 APK 编译进来的函数：既没有第三方声明，也没有"被发现"这件事。

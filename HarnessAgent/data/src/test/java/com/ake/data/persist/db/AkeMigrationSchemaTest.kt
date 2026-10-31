@@ -204,14 +204,15 @@ class AkeMigrationSchemaTest {
 
     @Test
     fun versionAndStatementsAreWired() {
-        assertThat(AkeDatabase.VERSION).isEqualTo(4)
+        assertThat(AkeDatabase.VERSION).isEqualTo(5)
         assertThat(AkeMigrations.ALL.map { "${it.startVersion}->${it.endVersion}" })
-            .containsExactly("1->2", "2->3", "3->4")
+            .containsExactly("1->2", "2->3", "3->4", "4->5")
             .inOrder()
         // ★ ALL 必须包含 2→3 与 3→4，否则真机上根本不会跑这两段迁移。
         //   v4 的逐条断言在 `CloudMigration3To4Test`（本文件仍只盯 v3 的既有纪律）。
         assertThat(AkeMigrations.ALL.toList()).contains(ChatMigration2To3)
         assertThat(AkeMigrations.ALL.toList()).contains(CloudMigration3To4)
+        assertThat(AkeMigrations.ALL.toList()).contains(DefaultTargetMigration4To5)
     }
 
     // ─────────────────────────────── ⑦ ★ v3 → v4（docs/09 §3.5）
@@ -236,6 +237,39 @@ class AkeMigrationSchemaTest {
                 assertThat(kept.defaultValue).isEqualTo(f.defaultValue)
             }
         }
+    }
+
+    /**
+     * ★ v4 → v5：**一张新表**，且 v4 的每一张表必须原样还在。
+     *
+     * 与 [v3TablesOnlyGainedColumns] 同一条判据，只是换了一档版本。
+     */
+    @Test
+    fun v4TablesSurviveV5Untouched() {
+        val v5 = DbSchema.load(5)
+        for (old in v4.tables) {
+            val now = v5.table(old.name)
+                ?: error("v5 里丢了表 ${old.name} —— 迁移绝不能删表")
+            assertThat(now.fields.map { it.name }).isEqualTo(old.fields.map { it.name })
+        }
+        val added = v5.tables.map { it.name }.toSet() - v4.tables.map { it.name }.toSet()
+        assertThat(added).containsExactly("default_dialog_target")
+    }
+
+    /**
+     * ★★ `default_dialog_target.model_target` **必须可空**。
+     *
+     * 写成 `NOT NULL DEFAULT 'LOCAL'` 的后果：迁移当天就给新表灌一个
+     * 「用户选过端侧」的假事实 ⇒ 「从未设置过」永远问不出来。
+     * 这正是不变量 ② 的落点（见 `DefaultTargetStore.default()`）。
+     */
+    @Test
+    fun v5DefaultTargetModelTargetIsNullable() {
+        val t = DbSchema.load(5).table("default_dialog_target")
+            ?: error("5.json 里没有 default_dialog_target")
+        val col = t.field("model_target") ?: error("没有 model_target 列")
+        assertThat(col.notNull).isFalse()
+        assertThat(col.defaultValue).isNull()
     }
 
     @Test

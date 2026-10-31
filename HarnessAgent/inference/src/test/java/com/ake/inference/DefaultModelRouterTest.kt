@@ -7,6 +7,7 @@ import com.ake.core.ports.CredentialRef
 import com.ake.core.ports.DeviceModelPort
 import com.ake.core.ports.DialogModelPort
 import com.ake.core.ports.DialogTarget
+import com.ake.core.ports.DialogTargetCodec
 import com.ake.core.ports.EgressPhase
 import com.ake.core.ports.InferenceTarget
 import com.ake.core.ports.RouteContext
@@ -22,7 +23,8 @@ import org.junit.Test
  *
  * 于是这里能钉死两件事：
  *  ① 路由器**只**认 [DeviceModelPort] 接口 —— 端侧引擎从哪来不关它的事；
- *  ② 「没选过目标」≠「选了端侧」⇒ 前者必须报错，**不许猜**。
+ *  ② 「这个会话没登记过」≠「选了端侧」⇒ 前者交给 `DefaultTargetStore` 兜底，
+ *     **不许由路由器猜一个本地**（v5：三级优先 = 会话显式 > 全局默认 > 端侧）。
  *
  * ★ 全部替身都是纯 JVM 的 ⇒ 毫秒级，无需设备（§9.4）。
  */
@@ -33,6 +35,7 @@ class DefaultModelRouterTest {
         val creds: FakeCredentials = FakeCredentials(),
         val permits: FakePermitSink = FakePermitSink(),
         val targets: InMemoryDialogTargetStore = InMemoryDialogTargetStore(),
+        val defaults: InMemoryDefaultTargetStore = InMemoryDefaultTargetStore(),
     ) {
         val localDialog: DialogModelPort = LocalDialogAdapter(device)
         val remote: FakeCloudDialog = FakeCloudDialog()
@@ -41,28 +44,168 @@ class DefaultModelRouterTest {
             localDialog = localDialog,
             remote = remote,
             targets = targets,
+            defaults = defaults,
             creds = creds,
             permits = permits,
         )
     }
 
-    // ═══ 1. 「没选过目标」≠「选了端侧」 ═══
+    // ═══ 1. 三级优先：会话显式 > 全局默认 > 端侧 ═══
 
     /**
-     * ★★ 未登记目标 ⇒ **Err**，不是默默走端侧。
+     * ★★ **本轮的头号负例**：未登记会话必须**继承全局默认**。
      *
-     * 若这里返回端侧，「用户明明选了云端、但会话悄悄跑在本地」就会变成一个
-     * 用户无法察觉的静默降级 —— 与 §4.2 禁止静默回落是同一条理由。
+     * 用户把默认设成云端、新开一个还没登记过的会话 ⇒ 必须拿到 [remote]。
+     *
+     * ★ 它能杀死「忘了接默认值」这个错误：只要 `dialogFor` 里还是
+     *   `?: return Err(NO_TARGET)`（或 `?: DialogTarget.Device`），
+     *   这里就会变成 `Err` / `localDialog` ⇒ 测试立刻红。
+     *   这条**不是**读回自证 —— 断言的是「用户设置能否穿过路由层」。
      */
     @Test
-    fun unregisteredTargetIsAnErrorNotASilentLocalFallback() = runTest {
+    fun unregisteredSessionInheritsTheGlobalDefault() = runTest {
+        val f = Fixture()
+        f.defaults.setDefault(DialogTarget.Remote(CredentialRef("svc-a")))
+
+        val r = f.router.dialogFor("sess-never-configured")
+
+        assertThat(r).isInstanceOf(Outcome.Ok::class.java)
+        assertThat((r as Outcome.Ok).value).isSameInstanceAs(f.remote)
+        // ★ 派发阶段一次都不读明文
+        assertThat(f.creds.secretReads).isEqualTo(0)
+    }
+
+    /** 默认**从未设置过** ⇒ 端侧（安全默认）。与 `model_target` 列 `'LOCAL'` 同一套语义。 */
+    @Test
+    fun unsetDefaultFallsBackToTheDeviceSide() = runTest {
         val f = Fixture()
 
         val r = f.router.dialogFor("sess-never-configured")
 
-        assertThat(r).isInstanceOf(Outcome.Err::class.java)
-        assertThat((r as Outcome.Err).error.code).isEqualTo(DefaultModelRouter.CODE_NO_TARGET)
+        assertThat((r as Outcome.Ok).value).isSameInstanceAs(f.localDialog)
         assertThat(f.device.openSessionCalls).isEqualTo(0)
+    }
+
+    /** ★ 会话显式登记**压过**全局默认（两个方向都钉死）。 */
+    @Test
+    fun explicitSessionTargetBeatsTheGlobalDefaultInBothDirections() = runTest {
+        run {
+            val f = Fixture()
+            f.defaults.setDefault(DialogTarget.Remote(CredentialRef("svc-a")))
+            f.targets.select("sess-1", DialogTarget.Device)
+
+            assertThat((f.router.dialogFor("sess-1") as Outcome.Ok).value)
+                .isSameInstanceAs(f.localDialog)
+        }
+        run {
+            val f = Fixture()
+            f.defaults.setDefault(DialogTarget.Device)
+            f.targets.select("sess-2", DialogTarget.Remote(CredentialRef("svc-a")))
+
+            assertThat((f.router.dialogFor("sess-2") as Outcome.Ok).value)
+                .isSameInstanceAs(f.remote)
+        }
+    }
+
+    /**
+     * ★★ 兜底**不许写回会话表**。
+     *
+     * 若有人图省事写成 `targets.select(sessionId, defaults.default())`：
+     *  ① 「从未设置过默认」与「把默认设成 Device」在库里**再也分不开**；
+     *  ② 会话目标「会话内不可变」被一次**读**操作破坏；
+     *  ③ 兜底被固化 ⇒ 用户之后改默认，老会话不会跟着变。
+     *
+     * ⇒ 这里断言 `dialogFor` 之后会话表里**仍然没有这一行**。
+     */
+    @Test
+    fun globalDefaultIsNotWrittenBackIntoTheSessionStore() = runTest {
+        val f = Fixture()
+        f.defaults.setDefault(DialogTarget.Device)
+
+        assertThat(f.router.dialogFor("sess-never-configured")).isInstanceOf(Outcome.Ok::class.java)
+
+        assertThat(f.targets.of("sess-never-configured")).isNull()
+        assertThat(f.targets.rawOf("sess-never-configured")).isNull()
+    }
+
+    /**
+     * ★★ 「从未设置过默认」与「显式把默认设成 Device」**仍然可区分**。
+     *
+     * 两者路由结果相同（都是端侧），但库里的状态不同（NULL vs `'LOCAL'`）：
+     * 路由层看不出来 ≠ 可以抹平 —— 将来的「你还没选过后端」引导靠的就是它。
+     */
+    @Test
+    fun neverSetDefaultAndExplicitDeviceDefaultRemainDistinguishable() = runTest {
+        val neverSet = Fixture()
+        assertThat(neverSet.defaults.isExplicitlySet()).isFalse()
+        assertThat(neverSet.defaults.rawOf()).isNull()
+        assertThat((neverSet.router.dialogFor("s") as Outcome.Ok).value)
+            .isSameInstanceAs(neverSet.localDialog)
+        // ★ 读一次之后，**依然**是「从未设置过」
+        assertThat(neverSet.defaults.isExplicitlySet()).isFalse()
+
+        val explicit = Fixture()
+        explicit.defaults.setDefault(DialogTarget.Device)
+        assertThat(explicit.defaults.isExplicitlySet()).isTrue()
+        assertThat(explicit.defaults.rawOf()).isEqualTo(DialogTargetCodec.VALUE_DEVICE)
+        assertThat((explicit.router.dialogFor("s") as Outcome.Ok).value)
+            .isSameInstanceAs(explicit.localDialog)
+    }
+
+    /**
+     * ★ 全局默认**不绕过**任何既有的守卫：未知文本照样报错、凭证没了照样 fail-closed。
+     */
+    @Test
+    fun globalDefaultGoesThroughTheSameGuardsAsAnExplicitTarget() = runTest {
+        run {
+            val f = Fixture()
+            f.defaults.setDefault(DialogTargetCodec.decode("GARBAGE"))
+            val r = f.router.dialogFor("s")
+            assertThat((r as Outcome.Err).error.code)
+                .isEqualTo(DefaultModelRouter.CODE_UNRECOGNIZED_TARGET)
+        }
+        run {
+            val f = Fixture(creds = FakeCredentials(existing = mutableSetOf()))
+            f.defaults.setDefault(DialogTarget.Remote(CredentialRef("svc-a")))
+            val r = f.router.dialogFor("s")
+            assertThat((r as Outcome.Err).error.code)
+                .isEqualTo(CloudFailureCodes.CREDENTIAL_MISSING)
+            assertThat(f.creds.secretReads).isEqualTo(0)
+        }
+    }
+
+    /**
+     * ★ `ROUTER_NO_TARGET` **已不可达**：三级优先的末层由 `default()` 兜住，
+     * 而它永不返回 `null` ⇒ 任何组合都不该再产出那个码。
+     *
+     * 它防的是「有人把 `?:` 又改回 `return Err(NO_TARGET)`」。
+     */
+    @Test
+    fun noTargetErrorCodeIsUnreachableAcrossTheMatrix() = runTest {
+        // ① 默认从未设置过
+        val unset = Fixture()
+        // ② 默认 = 端侧
+        val deviceDefault = Fixture()
+        deviceDefault.defaults.setDefault(DialogTarget.Device)
+        // ③ 默认 = 云端（凭证在）
+        val cloudDefault = Fixture()
+        cloudDefault.defaults.setDefault(DialogTarget.Remote(CredentialRef("svc-a")))
+        // ④ 默认 = 云端（凭证已删）
+        val cloudNoCred = Fixture(creds = FakeCredentials(existing = mutableSetOf()))
+        cloudNoCred.defaults.setDefault(DialogTarget.Remote(CredentialRef("svc-a")))
+        // ⑤ 默认 = 未知文本
+        val garbageDefault = Fixture()
+        garbageDefault.defaults.setDefault(DialogTargetCodec.decode("GARBAGE"))
+
+        listOf(unset, deviceDefault, cloudDefault, cloudNoCred, garbageDefault).forEach { f ->
+            val code = (f.router.dialogFor("sess-x") as? Outcome.Err)?.error?.code
+            assertThat(code).isNotEqualTo(LEGACY_NO_TARGET_CODE)
+        }
+        // ★ 顺带钉死「至少有两种组合真的走得通」，防止上面退化成空跑
+        assertThat((unset.router.dialogFor("sess-x") as Outcome.Ok).value)
+            .isSameInstanceAs(unset.localDialog)
+        assertThat((cloudDefault.router.dialogFor("sess-x") as Outcome.Ok).value)
+            .isSameInstanceAs(cloudDefault.remote)
     }
 
     // ═══ 2. 端侧派发 ═══
@@ -195,4 +338,13 @@ class DefaultModelRouterTest {
         kind = TaskKind.PureDialog,
         page = null,
     )
+
+    private companion object {
+        /**
+         * ★ 故意用**字面量**而不是 `DefaultModelRouter.CODE_NO_TARGET`：
+         *   那个常量已标记 `@Deprecated`（v5 起不可达），引用它会带警告；
+         *   而这里要钉的恰恰是「这个码不再出现」，用字面量才不会跟着实现漂移。
+         */
+        const val LEGACY_NO_TARGET_CODE: String = "ROUTER_NO_TARGET"
+    }
 }

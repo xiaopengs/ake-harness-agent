@@ -57,16 +57,20 @@ def run_migration(con, stmts):
         con.execute(sql)
 
 
-def build_v3(con, schema):
-    """用 **3.json 里的 createSql** 造一个 v3 库（不自造 DDL ⇒ 与真机同一份坐标）。"""
-    v3 = json.load(open(f"{schema}/3.json"))
-    for e in v3["database"]["entities"]:
+def build_schema(con, schema, version):
+    """用 **`<version>.json` 里的 createSql** 造一个该版本的库。
+
+    ★ 不自造 DDL，全部取自 Room 导出的 schema ⇒ 与真机**同一份坐标**，
+      改了 Entity 而忘了改迁移时，这里会立刻对不上。
+    """
+    doc = json.load(open(f"{schema}/{version}.json"))
+    for e in doc["database"]["entities"]:
         con.execute(e["createSql"].replace("${TABLE_NAME}", e["tableName"]))
         for i in (e.get("indices") or []):
             con.execute(i["createSql"].replace("${TABLE_NAME}", e["tableName"]))
-    # Room 自己的元数据表（真机 sqlite_master 里数出 20 张表就是它 + 19 张 Entity 表）
+    # Room 自己的元数据表（真机 sqlite_master 里数出的表数 = Entity 表 + 它）
     con.execute("CREATE TABLE room_master_table(id INTEGER PRIMARY KEY, identity TEXT)")
-    return v3
+    return doc
 
 
 def seed(con):
@@ -95,6 +99,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--schema-dir", required=True)
     ap.add_argument("--statements", required=True)
+    # ★ v5 起泛化：同一份 oracle 验任意 from → to（默认仍是 3 → 4）
+    ap.add_argument("--from", dest="from_version", type=int, default=3)
+    ap.add_argument("--to", dest="to_version", type=int, default=4)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -102,7 +109,7 @@ def main():
     con = sqlite3.connect(":memory:")
     con.execute("PRAGMA foreign_keys = ON")
 
-    v3 = build_v3(con, args.schema_dir)
+    build_schema(con, args.schema_dir, args.from_version)
     seed(con)
     con.commit()
 
@@ -131,9 +138,9 @@ def main():
     fk_violations = con.execute("PRAGMA foreign_key_check").fetchall() if not migration_error else ["<migration failed>"]
 
     # ★ 迁移必须真的加出了 v4 的列
-    v4 = json.load(open(f"{args.schema_dir}/4.json"))
+    target = json.load(open(f"{args.schema_dir}/{args.to_version}.json"))
     missing = []
-    for e in v4["database"]["entities"]:
+    for e in target["database"]["entities"]:
         if e["tableName"] not in table_names(con):
             missing.append(f"缺表 {e['tableName']}")
             continue
@@ -144,6 +151,14 @@ def main():
 
     idempotent = True
     idempotent_err = ""
+
+    # ★ 迁移**预期**新增的表：由 from/to 两份 schema 的差集算出，不写死表名
+    #   ⇒ 同一份 oracle 能验 3→4 与 4→5，且不会漏掉"多建了一张表"。
+    before_schema = json.load(open(f"{args.schema_dir}/{args.from_version}.json"))
+    before_tables = {e["tableName"] for e in before_schema["database"]["entities"]}
+    expected_new_tables = sorted(
+        {e["tableName"] for e in target["database"]["entities"]} - before_tables
+    )
 
     if not migration_error:
         # 幂等：再跑一遍（ALTER 不能带 IF NOT EXISTS ⇒ 靠 pragma_table_info 守卫）
@@ -163,6 +178,8 @@ def main():
 
     report = {
         "sqlite_version": sqlite3.sqlite_version,
+        "from_version": args.from_version,
+        "to_version": args.to_version,
         "statement_count": len(stmts),
         "migration_error": migration_error,
         "rows_before": before,
@@ -179,7 +196,8 @@ def main():
     ok = (not migration_error and report["rows_preserved"] and integrity == "ok"
           and not fk_violations and not missing and idempotent
           # ★ 新表必须真的被建出来（且为空 —— 迁移不回填）
-          and "cloud_credential" in new_tables and after.get("cloud_credential") == 0)
+          and len(new_tables) == len(expected_new_tables)
+          and all(after.get(t) == 0 for t in expected_new_tables))
     report["ok"] = ok
 
     if args.json:

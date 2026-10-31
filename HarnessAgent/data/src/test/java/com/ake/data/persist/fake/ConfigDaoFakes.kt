@@ -168,6 +168,9 @@ internal class FakeAkeDatabase(private val configDao: ConfigDao) : AkeDatabase()
     // ── v4：云端凭证 DAO（A5 裁决的落点）。本轮这两个替身不覆盖凭证路径 ⇒ unsupported。
     override fun cloudCredentialDao(): com.ake.data.persist.db.dao.CloudCredentialDao =
         unsupported("cloudCredentialDao")
+    // ── v5：全局默认目标 DAO。同上 ⇒ unsupported。
+    override fun defaultTargetDao(): com.ake.data.persist.db.dao.DefaultTargetDao =
+        unsupported("defaultTargetDao")
 
 
     override fun createOpenHelper(config: DatabaseConfiguration): androidx.sqlite.db.SupportSQLiteOpenHelper =
@@ -219,6 +222,9 @@ internal class BareAkeDatabase(private val configDao: ConfigDao) : AkeDatabase()
     // ── v4：云端凭证 DAO（A5 裁决的落点）。本轮这两个替身不覆盖凭证路径 ⇒ unsupported。
     override fun cloudCredentialDao(): com.ake.data.persist.db.dao.CloudCredentialDao =
         unsupported("cloudCredentialDao")
+    // ── v5：全局默认目标 DAO。同上 ⇒ unsupported。
+    override fun defaultTargetDao(): com.ake.data.persist.db.dao.DefaultTargetDao =
+        unsupported("defaultTargetDao")
 
     override fun createOpenHelper(config: DatabaseConfiguration): androidx.sqlite.db.SupportSQLiteOpenHelper =
         unsupported("createOpenHelper")
