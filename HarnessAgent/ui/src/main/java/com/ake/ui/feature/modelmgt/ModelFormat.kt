@@ -29,3 +29,13 @@ internal fun formatDuration(seconds: Long): String {
     val s = seconds % 60
     return if (m > 0) "${m} 分 ${s} 秒" else "${s} 秒"
 }
+
+internal fun formatDownloadEstimate(bytesPerSecond: Long, etaSeconds: Long?): String {
+    if (bytesPerSecond <= 0L) return "正在测算速度与剩余时间…"
+    val remaining = when {
+        etaSeconds == null -> "正在测算剩余时间"
+        etaSeconds < 60L -> "还剩不到 1 分钟"
+        else -> "还剩约 ${(etaSeconds + 59L) / 60L} 分钟"
+    }
+    return "${formatBytes(bytesPerSecond)}/s · $remaining"
+}

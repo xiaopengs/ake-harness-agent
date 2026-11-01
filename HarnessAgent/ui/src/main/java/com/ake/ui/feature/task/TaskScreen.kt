@@ -124,7 +124,7 @@ public fun TaskScreen(
 
         if (session.toolCalls.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
-            SectionCard("工具调用", subtitle = "MCP 工具与本地内置工具在同一份清单里，授权逐条管理") {
+            SectionCard("工具调用", subtitle = "外部工具与本机工具在同一份清单里，授权逐条管理") {
                 Column(Modifier.height(120.dp).verticalScroll(rememberScrollState())) {
                     session.toolCalls.forEach { ToolCallRow(it) }
                 }
@@ -153,7 +153,7 @@ public fun TaskScreen(
     domPayload?.let { payload ->
         androidx.compose.material3.AlertDialog(
             onDismissRequest = viewModel::dismissDom,
-            title = { Text("Agent 眼里的这一页") },
+            title = { Text("助手看到的这一页") },
             text = {
                 Column(Modifier.height(360.dp).verticalScroll(rememberScrollState())) {
                     Text(

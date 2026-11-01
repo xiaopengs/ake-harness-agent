@@ -204,12 +204,13 @@ L1  内核层          :core:common :core:ports :core:model-api
 | [`docs/09-cloud-data-and-secrets.md`](docs/09-cloud-data-and-secrets.md) | **云端正数据层**：凭证密文落 Room 的论证（推翻"独立文件"方案）、BaseURL 整体加密、`egressGateVerdict` 三套常量收口、审计状态机与冷启 sweep、迁移 3→4 |
 | [`docs/10-endcloud-bus-analysis.md`](docs/10-endcloud-bus-analysis.md) | **端云通信总线是否需要**：先拆"云端算不算对等 harness"这个伪命题、总线与 DOM 红线为何结构互斥、SyncPlane B1–B4 逐条裁决、阶段触发条件与反触发清单、**今天必须埋的 4 处接口缝隙** |
 | [`docs/11-cloud-generation-path.md`](docs/11-cloud-generation-path.md) | **云端生成路径接线规格（待执行）**：为什么不能加个适配器转发（3 条实证）、一轮=一条 permit=一条审计行、`RouteContext` 逐字段填法、`EgressResult` 四分支落点、6 条可杀死实现的断言、4 条必须由人拍板的前置决策 |
+| [`docs/12-ux-design.md`](docs/12-ux-design.md) | **UX 重构设计定稿**：「用户看不懂」的 5 条代码级诊断、把模型就绪提升为启动门控、移动优先断点与尺寸、靛蓝主色 50–900 + 青绿「本机」语义色、字体刻度、8 步实现清单、WCAG 2.2 AA 检查表 |
 
 ---
 
 ## 七、构建与运行
 
-前置：Android Studio（AGP 9.4.1+）、**JDK 17**、Android SDK（**compileSdk 36**；若只有 36 请勿把依赖升到要求 37 的版本）。模型**不随包分发**，首次启动由 App 内下载服务拉取 Gemma 4 E2B（约 2.6GB）到设备存储。
+前置：Android Studio（AGP 9.4.1+）、**JDK 17**、Android SDK（**compileSdk 36**；若只有 36 请勿把依赖升到要求 37 的版本）。模型**不随包分发**，首次启动由 App 内下载服务拉取 Gemma 4 E2B（**2.77 GB**，常量 `ModelGateViewModel.VERIFIED_MODEL_BYTES`）到设备存储。
 
 ```bash
 cd HarnessAgent
@@ -240,7 +241,7 @@ cd HarnessAgent
 **已完成并通过真机级编译验证**
 
 - **全部 14 个模块 `compileDebugKotlin` / `compileKotlin` 均 BUILD SUCCESSFUL**（含 Hilt KSP 与 Room KSP）
-- **`./gradlew test`：1176 通过 / 0 失败 / 2 跳过**（`--rerun-tasks` 强制重跑，非缓存）（跳过的是 `:ui` 的 `captureToImage`，Robolectric 无 Surface/PixelCopy，历史已知边界；立项时全工程仅 4 个单测）
+- **`./gradlew test`：1177 通过 / 0 失败 / 2 跳过**（`--rerun-tasks` 强制重跑，非缓存）（跳过的是 `:ui` 的 `captureToImage`，Robolectric 无 Surface/PixelCopy，历史已知边界；立项时全工程仅 4 个单测）
 - **`checkModuleDependencies`：OK** —— 14 个模块的依赖边均在白名单内，`:ui` 对 `:chat`/`:agent`/`:mcp`/`:data` 的 import 为 0；`:cloudai` 对 `:core:contract` 的依赖为 **0**（DOM 锁 B 生效）
 - `:app` —— Dagger 依赖图贯通，MissingBinding 清零；`ChatRunnerPort`/`SkillRegistryPort`/`CapabilityGrantPort` 均已真绑定（生成代码里是 `Optional.of(...)` 而非 `Optional.empty()`）
 - 依赖红线已排除：`ktor-client-plugins-sse` 该坐标在任何版本都不存在（SSE 已收进 `ktor-client-core`），已从 catalog 移除
@@ -259,7 +260,7 @@ cd HarnessAgent
 
 用户要求"能自己切换云端模型"。历经三轮：**第 6 轮**只交付契约与两个新模块（当时 App 确实切不了）；**第 7 轮**落地数据层 v3→v4 与告知口径；**第 8 轮**把最后两段线接完 —— `ChatLoop` 的云端生成路径、以及全局默认目标的持久化。
 
-> ⚠️ 「可用」的**确切含义**，不要过度解读：已通过 `:core` / `:cloudai` / `:inference` / `:chat` / `:data` 共 **1176 条 JVM 单测**，其中含"页面上下文 ⇒ 发出字节数为 0"这类端到端断言。**但没有任何一条是在真机或真 HTTP 端点上跑出来的**（见下方待办表）。
+> ⚠️ 「可用」的**确切含义**，不要过度解读：已通过 `:core` / `:cloudai` / `:inference` / `:chat` / `:data` 共 **1177 条 JVM 单测**，其中含"页面上下文 ⇒ 发出字节数为 0"这类端到端断言。**但没有任何一条是在真机或真 HTTP 端点上跑出来的**（见下方待办表）。
 
 | 层 | 产出 |
 |---|---|
@@ -332,7 +333,7 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 |---|---|
 | 从未产出过 APK | ✅ **已解除** —— debug 93.70MB + release 60.04MB |
 | AGP 与 R8 从未执行 | ✅ **已解除** —— `assembleRelease` 跑通，R8 真实执行 |
-| 七个模块零测试 | ✅ **已解除** —— 4 → **1176 通过** |
+| 七个模块零测试 | ✅ **已解除** —— 4 → **1177 通过** |
 | **从未在任何真机上运行过一次** | ❌ **仍然成立 —— 这是现在唯一充分的一条** |
 
 复审新识别的 P0：
@@ -361,6 +362,49 @@ debug → release 缩减 **34.94MB（-36.6%）**。第 3 轮新增 `:chat` + 23 
 > 它不能证明：装得上（它装不上）、任何一行被执行、`-keep` 保的是符号而非可达性。
 
 **最需要警惕的一点**：不要把「编译通过」当成「验证通过」。本项目高危点的共性是**静默失效**——JS 回调改名不崩溃、GPU 缺声明时 `initialize()` 照常成功、KV cache 不复用只是悄悄慢 6.8 倍、一键清除失败而 UI 报成功。它们不会让 CI 变红、不会产崩溃栈，只让用户觉得"这 App 有点怪"。
+
+### 第 8 轮产出：UX 重构（移动优先 · 一比一还原）
+
+用户反馈「交互方式看不懂、也不会用」。本轮先做**代码级诊断**再改，不在未定位根因前重画界面。设计定稿见 [`docs/12-ux-design.md`](docs/12-ux-design.md)。
+
+**「看不懂」的 5 条证据（不是猜测）**
+
+| 证据 | 用户的实际遭遇 |
+|---|---|
+| `AkeNavHost` `startDestination = CHAT_LIST` | 打开就是对话页，但模型没下载 ⇒ 发消息必然失败 |
+| 全仓无 onboarding / firstLaunch | 必须**自己发现**藏在底部小按钮里的"模型"入口，才知道要先下模型 |
+| `chat_runner_missing` 原文含「ChatRunnerPort 在 Hilt 里没有绑定」 | **开发者内部信息直接暴露给终端用户** |
+| 底栏 4 tab：对话 / Agent / 任务 / 设置 | "Agent""任务"是陌生概念；且"任务"才是浏览器自动化主场，却与"对话"割裂 |
+| 首页首屏即「要它做什么？+开始执行」 | 首屏就是浏览器自动化，无前置说明 |
+
+**核心改动：把「模型就绪」从设置深处提到启动流程本身**
+
+```
+启动 → 模型未就绪 ⇒【模型门控页】(全屏·唯一可做的事)
+     → 已就绪     ⇒【对话列表】
+```
+
+- 门控页**不给"跳过"按钮** —— 跳过即进到用不了的对话页，等于复现本轮要修的 bug
+- 说明代价与收益：2.8 GB、需 Wi-Fi、约 5–10 分钟；数据不出手机 / 可离线 / 仅首次
+- 非 Wi‑Fi 提前拦截（「会消耗 X GB 流量」+ 两个按钮）
+- 下载完成后自动进对话列表，不要求用户点返回
+
+**导航与配色**
+
+| 项 | 改动 |
+|---|---|
+| `startDestination` | 改为**动态**：`gateUi.ready` 决定走门控页还是对话列表 |
+| 底栏 | 4 tab → **3 tab**（对话 / 助手 / 我的）；"任务"tab 删除（浏览器任务降级为对话内技能卡，两个入口做同一件事是困惑主因） |
+| 主色 | **靛蓝 Indigo 50–900**（浅色主 `#4F46E5` / 深色主 `#6366F1`） |
+| 语义色 | 成功 `#16A34A` / 警告 `#EA580C` / 错误 `#DC2626` / **「本机」青绿 `#0D9488`** |
+| 深色模式 | 真实现（非反色）：背景 `#0B1120`、卡片 `#131C31` 分层，不用分隔线 |
+| 术语 | Agent→助手；MCP/能力/插件→工具 |
+
+> 青绿 `#0D9488` 专门承载「本机处理 / 数据不出机」语义 —— 本产品与云端 AI 的唯一本质区别，值得一个专属色。
+
+**★ 事实订正**：模型体积此前 README 与设计稿均写「2.6 GB」，本轮核实 `ModelLifecycle.GEMMA4_E2B_IT.expectedBytes` ⇒ **实际 2,770,000,000 字节（2.77 GB）**，UI 显示「2.8 GB」（向上取整，避免实际下载量大于承诺值）。
+
+**防行话回归的负向用例**：`ChatCopyTest` 新增 `BANNED_TECHNICAL_WORDS`（`Port`/`Hilt`/`Exception`/`ViewModel`/`reasonKey`/`code=`），并**先断言原句确实会命中禁词表** —— 有人把开发者行话放回去会当场红。
 
 ### 已知待办
 

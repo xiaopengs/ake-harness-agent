@@ -24,11 +24,10 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextButton as MaterialTextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -39,6 +38,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -263,7 +264,16 @@ public fun AlertBar(text: String, color: Color = AkeColors.RiskForbidden, modifi
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(
+                text = "！",
+                modifier = Modifier.semantics { contentDescription = "提示" },
+                style = MaterialTheme.typography.titleMedium,
+                color = color,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
                 text,
+                modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.bodySmall,
                 color = color,
                 fontWeight = FontWeight.SemiBold,
@@ -340,13 +350,8 @@ public fun DangerButton(text: String, onClick: () -> Unit, modifier: Modifier = 
 }
 
 @Composable
-public fun SecondaryButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
-    OutlinedButton(onClick = onClick, modifier = modifier, enabled = enabled) { Text(text) }
-}
-
-@Composable
 public fun TinyButton(text: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    TextButton(onClick = onClick, modifier = modifier) { Text(text, style = MaterialTheme.typography.labelMedium) }
+    MaterialTextButton(onClick = onClick, modifier = modifier) { Text(text, style = MaterialTheme.typography.labelMedium) }
 }
 
 /** 只读键值行。用于设置页那些「目前改不了但必须让用户看见」的参数。 */

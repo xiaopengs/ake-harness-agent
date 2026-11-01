@@ -22,6 +22,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -110,9 +112,11 @@ public fun ChatListScreen(
             }
         }
 
+        val newChatDescription = stringResource(R.string.chat_list_fab)
         FloatingActionButton(
             onClick = onNewChat,
-            modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp),
+            modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp)
+                .semantics { contentDescription = newChatDescription },
             containerColor = MaterialTheme.colorScheme.primary,
         ) {
             Text(

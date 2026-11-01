@@ -19,15 +19,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextButton as MaterialTextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.ake.core.ports.ChatMessageView
+import com.ake.core.ports.ChatTerminalReason
 import com.ake.core.ports.MessageKind
 import com.ake.core.ports.MessageRole
 import com.ake.core.ports.MessageStatus
@@ -92,8 +94,11 @@ public fun MessageBubble(
     egressNotice: com.ake.ui.spi.TurnEgressNotice? = null,
     onRetry: () -> Unit = {},
     onOpenTask: ((String) -> Unit)? = null,
+    onPrepareModel: () -> Unit = {},
 ) {
     val status = statusOverride ?: message.status
+    val bubbleMaxWidth = ((LocalConfiguration.current.screenWidthDp.dp - 24.dp) * 0.8f)
+        .coerceAtLeast(160.dp)
 
     when (message.kind) {
         MessageKind.COMPACT_BOUNDARY -> {
@@ -150,7 +155,7 @@ public fun MessageBubble(
                 // 右下角收一点，气泡的"尾巴"指向说话的人
                 shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
                 color = MaterialTheme.colorScheme.primaryContainer,
-                modifier = Modifier.widthIn(max = 300.dp),
+                modifier = Modifier.widthIn(max = bubbleMaxWidth),
             ) {
                 Text(
                     text = shown,
@@ -166,7 +171,7 @@ public fun MessageBubble(
     Row(modifier.fillMaxWidth()) {
         AgentAvatar(name = agentName, size = 30.dp)
         Spacer(Modifier.width(8.dp))
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.widthIn(max = bubbleMaxWidth)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     text = agentName,
@@ -216,7 +221,11 @@ public fun MessageBubble(
                     }
 
                     if (failed) {
-                        FailureFoot(failure = failure, onRetry = onRetry)
+                        FailureFoot(
+                            failure = failure,
+                            onRetry = onRetry,
+                            onPrepareModel = onPrepareModel,
+                        )
                     }
                 }
             }
@@ -291,7 +300,11 @@ private fun ModelBadgeChip(badge: ModelBadge?) {
  * 只写原因不给按钮，用户只能自己重打一遍那句话。
  */
 @Composable
-private fun FailureFoot(failure: ChatTurnFailure?, onRetry: () -> Unit) {
+private fun FailureFoot(
+    failure: ChatTurnFailure?,
+    onRetry: () -> Unit,
+    onPrepareModel: () -> Unit,
+) {
     Spacer(Modifier.height(6.dp))
     if (failure != null) {
         val copy = chatTerminalCopyOf(failure.reason)
@@ -307,8 +320,15 @@ private fun FailureFoot(failure: ChatTurnFailure?, onRetry: () -> Unit) {
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        if (failure.retryable) {
-            TextButton(onClick = onRetry, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
+        if (failure.reason == ChatTerminalReason.MODEL_NOT_LOADED) {
+            MaterialTextButton(
+                onClick = onPrepareModel,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+            ) {
+                Text(stringResource(R.string.chat_prepare_model), style = MaterialTheme.typography.labelMedium)
+            }
+        } else if (failure.retryable) {
+            MaterialTextButton(onClick = onRetry, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
                 Text(stringResource(R.string.chat_turn_retry), style = MaterialTheme.typography.labelMedium)
             }
         }

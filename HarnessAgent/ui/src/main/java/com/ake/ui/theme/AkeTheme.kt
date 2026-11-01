@@ -2,7 +2,6 @@ package com.ake.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -42,25 +41,47 @@ public object AkeColors {
 }
 
 private val LightScheme = lightColorScheme(
-    primary = Color(0xFF1565C0),
+    primary = Indigo600,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFD6E4FF),
-    secondary = Color(0xFF00695C),
-    error = Color(0xFFB71C1C),
-    surface = Color(0xFFFDFCFF),
-    surfaceVariant = Color(0xFFE9EEF6),
-    outline = Color(0xFFB9C4D4),
+    primaryContainer = Indigo50,
+    onPrimaryContainer = Indigo900,
+    secondary = PrivacyLight,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFCCFBF1),
+    onSecondaryContainer = Color(0xFF134E4A),
+    tertiary = WarningLight,
+    onTertiary = Color.White,
+    error = ErrorLight,
+    onError = Color.White,
+    background = SlateLightBackground,
+    onBackground = SlateLightOnSurface,
+    surface = SlateLightSurface,
+    onSurface = SlateLightOnSurface,
+    surfaceVariant = SlateLightSurfaceVariant,
+    onSurfaceVariant = SlateLightOnSurfaceVariant,
+    outline = SlateLightOutline,
 )
 
 private val DarkScheme = darkColorScheme(
-    primary = Color(0xFF9ECAFF),
-    onPrimary = Color(0xFF003062),
-    primaryContainer = Color(0xFF004A87),
-    secondary = Color(0xFF6BDBCA),
-    error = Color(0xFFFF8A80),
-    surface = Color(0xFF101418),
-    surfaceVariant = Color(0xFF222831),
-    outline = Color(0xFF414B59),
+    primary = Indigo400,
+    onPrimary = SlateDarkBackground,
+    primaryContainer = Indigo900,
+    onPrimaryContainer = Indigo100,
+    secondary = PrivacyDark,
+    onSecondary = Color(0xFF042F2E),
+    secondaryContainer = Color(0xFF134E4A),
+    onSecondaryContainer = Color(0xFF99F6E4),
+    tertiary = WarningDark,
+    onTertiary = Color(0xFF431407),
+    error = ErrorDark,
+    onError = Color(0xFF450A0A),
+    background = SlateDarkBackground,
+    onBackground = SlateDarkOnSurface,
+    surface = SlateDarkSurface,
+    onSurface = SlateDarkOnSurface,
+    surfaceVariant = SlateDarkSurfaceVariant,
+    onSurfaceVariant = SlateDarkOnSurfaceVariant,
+    outline = SlateDarkOutline,
 )
 
 /**
@@ -76,7 +97,8 @@ public fun AkeTheme(
 ) {
     MaterialTheme(
         colorScheme = if (darkTheme) DarkScheme else LightScheme,
-        typography = Typography(),
+        typography = AkeTypography,
+        shapes = AkeShapes,
         content = content,
     )
 }

@@ -182,7 +182,7 @@ public fun SuspendReason.humanTitle(): String = when (this) {
 public fun SuspendReason.humanAdvice(): String = when (this) {
     SuspendReason.THERMAL -> "把手机放一会儿、别边充边跑，凉下来后可以直接继续 —— 已完成的步骤与已消耗的预算都会带回来。"
     SuspendReason.BATTERY_LOW -> "接上电源或等电量回到 15% 以上再继续。现在继续有跑到一半掉电的风险。"
-    SuspendReason.HUMAN_GATE -> "Agent 想执行一个需要你点头的动作，确认后才会继续。"
+    SuspendReason.HUMAN_GATE -> "助手想执行一个需要你点头的动作，确认后才会继续。"
 }
 
 /** 由 status 字符串反查暂停原因（冷启动恢复时用）。 */

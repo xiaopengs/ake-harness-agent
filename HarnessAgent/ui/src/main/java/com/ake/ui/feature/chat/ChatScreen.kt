@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -36,8 +37,10 @@ import com.ake.ui.R
 import com.ake.ui.components.AgentAvatar
 import com.ake.ui.components.AlertBar
 import com.ake.ui.components.EmptyHint
+import com.ake.ui.components.EmptyState
 import com.ake.ui.components.MessageBubble
 import com.ake.ui.components.NoticeBar
+import com.ake.ui.components.PrimaryButton
 import com.ake.ui.components.StreamingCursor
 import com.ake.ui.components.Tag
 import com.ake.ui.components.riskColorOf
@@ -80,6 +83,7 @@ import com.ake.ui.util.collectAsStateWithLifecycle
 public fun ChatScreen(
     onBack: () -> Unit,
     onOpenTask: (String) -> Unit,
+    onPrepareModel: () -> Unit,
     viewModel: ChatViewModel = hiltViewModel(),
 ) {
     val ui by viewModel.ui.collectAsStateWithLifecycle()
@@ -115,7 +119,13 @@ public fun ChatScreen(
         //   等于先说"出事了"再补一句"其实没事" —— 用户只会记住前半句。
         ui.terminal?.let { reason ->
             if (reason != ChatTerminalReason.COMPLETED && ui.stuck.isEmpty()) {
-                BannerSlot { TerminalBanner(reason, onRetry = viewModel::retry) }
+                BannerSlot {
+                    TerminalBanner(
+                        reason = reason,
+                        onRetry = viewModel::retry,
+                        onPrepareModel = onPrepareModel,
+                    )
+                }
             }
         }
 
@@ -153,6 +163,7 @@ public fun ChatScreen(
                     // ★ 回落 / 出境失败。有就必须出镜，一次都不能被丢掉。
                     egressNotice = ui.noticeOf(msg),
                     onOpenTask = onOpenTask,
+                    onPrepareModel = onPrepareModel,
                     onRetry = viewModel::retry,
                     modifier = Modifier.padding(bottom = 6.dp),
                 )
@@ -160,7 +171,14 @@ public fun ChatScreen(
 
             if (ui.messages.isEmpty() && !ui.loadingHistory) {
                 item(key = "__empty__") {
-                    EmptyHint(stringResource(R.string.chat_empty_history), Modifier.fillMaxWidth())
+                    EmptyState(
+                        title = stringResource(R.string.chat_empty_title),
+                        description = stringResource(R.string.chat_empty_history),
+                        actionText = stringResource(R.string.chat_empty_action),
+                        onAction = { viewModel.onInputChange("你好") },
+                        modifier = Modifier.fillMaxWidth(),
+                        icon = { Text("＋", style = MaterialTheme.typography.displayLarge) },
+                    )
                 }
             }
 
@@ -259,6 +277,7 @@ public fun TerminalBanner(
     reason: ChatTerminalReason,
     modifier: Modifier = Modifier,
     onRetry: () -> Unit = {},
+    onPrepareModel: () -> Unit = {},
 ) {
     if (reason == ChatTerminalReason.COMPLETED) return
 
@@ -270,7 +289,17 @@ public fun TerminalBanner(
             ChatTerminalTone.ALERT -> AlertBar(text, color = AkeColors.RiskSensitive)
             ChatTerminalTone.NOTICE -> NoticeBar(text)
         }
-        if (reason == ChatTerminalReason.IN_FLIGHT && copy.retryable) {
+        if (reason == ChatTerminalReason.MODEL_NOT_LOADED) {
+            TextButton(
+                onClick = onPrepareModel,
+                contentPadding = PaddingValues(horizontal = 4.dp),
+            ) {
+                Text(
+                    text = stringResource(R.string.chat_prepare_model),
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        } else if (reason == ChatTerminalReason.IN_FLIGHT && copy.retryable) {
             TextButton(
                 onClick = onRetry,
                 contentPadding = PaddingValues(horizontal = 4.dp),
@@ -376,24 +405,23 @@ private fun ChatInputBar(
                 OutlinedTextField(
                     value = input,
                     onValueChange = onInputChange,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp, max = 120.dp),
                     placeholder = { Text(stringResource(R.string.chat_input_placeholder)) },
-                    maxLines = 4,
-                    shape = RoundedCornerShape(14.dp),
+                    label = { Text(stringResource(R.string.chat_input_label)) },
+                    minLines = 1,
+                    maxLines = 5,
+                    shape = RoundedCornerShape(12.dp),
                     enabled = enabled,
                 )
                 Spacer(Modifier.width(8.dp))
                 if (streaming) {
-                    Button(onClick = onStop) {
-                        Text(stringResource(R.string.chat_stop))
-                    }
+                    PrimaryButton(text = stringResource(R.string.chat_stop), onClick = onStop)
                 } else {
-                    Button(
+                    PrimaryButton(
+                        text = stringResource(R.string.chat_send),
                         onClick = onSend,
                         enabled = enabled && input.isNotBlank(),
-                    ) {
-                        Text(stringResource(R.string.chat_send))
-                    }
+                    )
                 }
             }
             if (!enabled) {

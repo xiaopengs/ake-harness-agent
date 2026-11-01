@@ -11,34 +11,42 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.ake.core.contract.ModelAssetState
 import com.ake.core.modelapi.ModelRuntimeState
 import com.ake.ui.components.AlertBar
 import com.ake.ui.components.FactRow
+import com.ake.ui.components.PrimaryButton
 import com.ake.ui.components.SectionCard
 import com.ake.ui.components.SecondaryButton
 import com.ake.ui.components.SkeletonLine
 import com.ake.ui.components.Tag
+import com.ake.ui.components.TextButton
 import com.ake.ui.theme.AkeColors
 import com.ake.ui.util.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
 
 /**
  * 模型管理页。
@@ -52,9 +60,27 @@ import com.ake.ui.util.collectAsStateWithLifecycle
  *  - **模型文件删不删单独问一次**（重下代价高，不能藏在「清除全部」里顺手删掉）。
  */
 @Composable
-public fun ModelScreen(viewModel: ModelViewModel = hiltViewModel()) {
+public fun ModelScreen(
+    autoStart: Boolean = false,
+    onModelReady: () -> Unit = {},
+    onCancelled: () -> Unit = {},
+    viewModel: ModelViewModel = hiltViewModel(),
+) {
     val ui by viewModel.ui.collectAsStateWithLifecycle()
     var confirmDelete by remember { mutableStateOf(false) }
+    val expectedBytes = ui.asset.expectedBytes.takeIf { it > 0L }
+        ?: com.ake.ui.feature.onboarding.ModelGateViewModel.VERIFIED_MODEL_BYTES
+    val modelSize = formatBytes(expectedBytes)
+
+    LaunchedEffect(autoStart) {
+        if (autoStart) viewModel.ensureReady()
+    }
+    LaunchedEffect(autoStart, ui.asset.state) {
+        if (autoStart && ui.asset.state == ModelAssetState.READY) {
+            delay(1_200L)
+            onModelReady()
+        }
+    }
 
     // ── 离线导入：走 SAF，不需要任何存储权限（系统选择器临时授予读权）。
     val importVm: ModelImportViewModel = hiltViewModel()
@@ -79,7 +105,7 @@ public fun ModelScreen(viewModel: ModelViewModel = hiltViewModel()) {
         Text("模型", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Gemma-4-E2B-it · 约 2.6 GB · 全程在本机推理",
+            "Gemma-4-E2B-it · $modelSize · 全程在本机推理",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -89,8 +115,12 @@ public fun ModelScreen(viewModel: ModelViewModel = hiltViewModel()) {
 
         Spacer(Modifier.height(12.dp))
 
-        if (ui.asset.state == ModelAssetState.DOWNLOADING || ui.asset.state == ModelAssetState.VERIFYING) {
-            ProgressCard(ui = ui)
+        if (
+            ui.asset.state == ModelAssetState.DOWNLOADING ||
+            ui.asset.state == ModelAssetState.PAUSED ||
+            ui.asset.state == ModelAssetState.VERIFYING
+        ) {
+            ProgressCard(ui = ui, viewModel = viewModel, onCancelled = onCancelled)
             Spacer(Modifier.height(12.dp))
         }
 
@@ -141,14 +171,24 @@ public fun ModelScreen(viewModel: ModelViewModel = hiltViewModel()) {
                 SecondaryButton("释放内存", onClick = viewModel::unload, modifier = Modifier.weight(1f))
             }
             Spacer(Modifier.height(8.dp))
-            SecondaryButton("删除模型文件（2.6 GB，重下代价高）", onClick = { confirmDelete = true }, modifier = Modifier.fillMaxWidth())
+            SecondaryButton("删除模型文件（$modelSize，重下代价高）", onClick = { confirmDelete = true }, modifier = Modifier.fillMaxWidth())
         }
 
         if (ui.errorCode != null) {
             Spacer(Modifier.height(12.dp))
-            AlertBar(ui.errorMessage ?: "出错了")
-            Spacer(Modifier.height(8.dp))
-            Button(onClick = viewModel::ensureReady, modifier = Modifier.fillMaxWidth()) { Text("重试（从断点继续）") }
+            SectionCard("准备失败") {
+                Text(
+                    text = "！ ${ui.errorMessage ?: "暂时无法准备模型，请检查网络后重试。"}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Spacer(Modifier.height(12.dp))
+                PrimaryButton(
+                    text = "重试",
+                    onClick = viewModel::ensureReady,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
     }
 
@@ -157,7 +197,7 @@ public fun ModelScreen(viewModel: ModelViewModel = hiltViewModel()) {
             onDismissRequest = { confirmDelete = false },
             title = { Text("删除模型文件？") },
             text = {
-                Text("删除后要重新下载 2.6 GB。如果你只是想释放内存，用「释放内存」就够了 —— 它只卸载常驻、不删文件。")
+                Text("删除后要重新下载 $modelSize。如果你只是想释放内存，用「释放内存」就够了 —— 它只卸载常驻、不删文件。")
             },
             confirmButton = {
                 com.ake.ui.components.DangerButton("删除", onClick = { confirmDelete = false; viewModel.deleteFile() })
@@ -169,6 +209,10 @@ public fun ModelScreen(viewModel: ModelViewModel = hiltViewModel()) {
 
 @Composable
 private fun StateCard(ui: com.ake.ui.feature.modelmgt.ModelUi, viewModel: ModelViewModel) {
+    val size = formatBytes(
+        ui.asset.expectedBytes.takeIf { it > 0L }
+            ?: com.ake.ui.feature.onboarding.ModelGateViewModel.VERIFIED_MODEL_BYTES,
+    )
     val (label, color) = when (ui.asset.state) {
         ModelAssetState.NOT_PRESENT -> "未下载" to MaterialTheme.colorScheme.outline
         ModelAssetState.DOWNLOADING -> "下载中" to AkeColors.PhaseActive
@@ -187,7 +231,7 @@ private fun StateCard(ui: com.ake.ui.feature.modelmgt.ModelUi, viewModel: ModelV
         Spacer(Modifier.height(8.dp))
         if (ui.asset.state == ModelAssetState.NOT_PRESENT) {
             Text(
-                "还没有模型文件。第一次点「下载并加载」会开始下载约 2.6 GB —— 建议连着 Wi‑Fi 并保持屏幕常亮。",
+                "还没有模型文件。第一次点「下载并加载」会开始下载 $size —— 建议连接 Wi‑Fi。",
                 style = MaterialTheme.typography.bodySmall,
             )
         } else {
@@ -201,40 +245,76 @@ private fun StateCard(ui: com.ake.ui.feature.modelmgt.ModelUi, viewModel: ModelV
 }
 
 @Composable
-private fun ProgressCard(ui: com.ake.ui.feature.modelmgt.ModelUi) {
+private fun ProgressCard(
+    ui: com.ake.ui.feature.modelmgt.ModelUi,
+    viewModel: ModelViewModel,
+    onCancelled: () -> Unit,
+) {
     val pct = if (ui.asset.expectedBytes > 0L) {
         (ui.asset.bytesDownloaded * 100 / ui.asset.expectedBytes).toInt().coerceIn(0, 100)
     } else {
         0
     }
+    val paused = ui.asset.state == ModelAssetState.PAUSED
+    val verifying = ui.asset.state == ModelAssetState.VERIFYING
+    val size = formatBytes(
+        ui.asset.expectedBytes.takeIf { it > 0L }
+            ?: com.ake.ui.feature.onboarding.ModelGateViewModel.VERIFIED_MODEL_BYTES,
+    )
+
     SectionCard(
-        if (ui.asset.state == ModelAssetState.VERIFYING) "校验中" else "下载中",
-        subtitle = if (ui.asset.state == ModelAssetState.VERIFYING) {
-            "正在逐块比对 SHA-256 —— 2.6 GB 的文件静默损坏不算罕见，跳过这一步会表现为「随机输出乱码」"
-        } else {
-            "支持断点续传：中断后继续，不会从头开始"
+        title = when {
+            verifying -> "正在校验"
+            paused -> "下载已暂停"
+            else -> "正在下载"
+        },
+        subtitle = when {
+            verifying -> "正在确认文件完整性"
+            paused -> "已保留下载进度，继续后不会从头开始"
+            else -> "正在下载，请勿关闭应用"
         },
     ) {
-        if (ui.asset.state == ModelAssetState.VERIFYING) {
+        if (verifying) {
             SkeletonLine(Modifier.fillMaxWidth())
-            Spacer(Modifier.height(6.dp))
-            Text("校验中不显示进度 —— 这一步是顺序读整个文件，进度条没有意义。", style = MaterialTheme.typography.labelSmall)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "正在检查 $size 的模型文件，请稍候。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         } else {
             LinearProgressIndicator(
                 progress = { pct / 100f },
-                modifier = Modifier.fillMaxWidth().height(8.dp),
+                modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))
+                    .semantics { liveRegion = LiveRegionMode.Polite },
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = "$pct%",
+                modifier = Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite },
+                fontSize = 32.sp,
+                lineHeight = 40.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
             Spacer(Modifier.height(8.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("$pct%", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text("${formatBytes(ui.asset.bytesDownloaded)} / ${formatBytes(ui.asset.expectedBytes)}", style = MaterialTheme.typography.bodySmall)
-            }
-            Spacer(Modifier.height(6.dp))
-            Text("速度 ${formatBytes(ui.bytesPerSecond)}/s", style = MaterialTheme.typography.bodySmall)
             Text(
-                ui.etaSeconds?.let { "预计剩余 ${formatDuration(it)}" } ?: "正在测算剩余时间…",
-                style = MaterialTheme.typography.bodySmall,
+                text = formatDownloadEstimate(ui.bytesPerSecond, ui.etaSeconds),
+                modifier = Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            Spacer(Modifier.height(16.dp))
+            SecondaryButton(
+                text = if (paused) "继续" else "暂停",
+                onClick = if (paused) viewModel::ensureReady else viewModel::pauseDownload,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            TextButton(
+                text = "取消",
+                onClick = { viewModel.cancelDownload(onCancelled) },
+                modifier = Modifier.fillMaxWidth(),
             )
         }
     }

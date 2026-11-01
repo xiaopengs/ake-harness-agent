@@ -73,6 +73,7 @@ public class ModelViewModel @Inject constructor(
     public val ui: StateFlow<ModelUi> = _ui.asStateFlow()
 
     private var samplingJob: Job? = null
+    private var downloadJob: Job? = null
     private var lastBytes = 0L
     private var lastSampleAt = 0L
 
@@ -80,7 +81,12 @@ public class ModelViewModel @Inject constructor(
         viewModelScope.launch {
             // 资产状态是 Flow，且在下载过程中持续更新
             lifecycle.assetState().collect { asset ->
-                _ui.update { it.copy(asset = asset, busy = asset.state == ModelAssetState.DOWNLOADING) }
+                _ui.update {
+                    it.copy(
+                        asset = asset,
+                        busy = asset.state == ModelAssetState.DOWNLOADING || asset.state == ModelAssetState.VERIFYING,
+                    )
+                }
                 lastBytes = asset.bytesDownloaded
                 lastSampleAt = android.os.SystemClock.elapsedRealtime()
             }
@@ -99,8 +105,8 @@ public class ModelViewModel @Inject constructor(
 
     /** 开始 / 继续：下载 → 校验 → 加载，全过程幂等。 */
     public fun ensureReady() {
-        if (_ui.value.busy) return
-        viewModelScope.launch {
+        if (downloadJob?.isActive == true) return
+        downloadJob = viewModelScope.launch {
             _ui.update { it.copy(busy = true, errorCode = null, errorMessage = null) }
             refreshSpace()
             when (val r = lifecycle.ensureReady(MODEL_ID)) {
@@ -109,6 +115,27 @@ public class ModelViewModel @Inject constructor(
                     it.copy(busy = false, errorCode = r.error.code, errorMessage = errorTextOf(r.error))
                 }
             }
+        }
+    }
+
+    /** 暂停当前下载；半成品由底层保留，继续时使用 Range 续传。 */
+    public fun pauseDownload() {
+        if (_ui.value.asset.state != ModelAssetState.DOWNLOADING) return
+        downloadJob?.cancel()
+        downloadJob = null
+        _ui.update { current ->
+            current.copy(asset = current.asset.copy(state = ModelAssetState.PAUSED), busy = false)
+        }
+    }
+
+    /** 取消下载并删除已归属此模型的半成品。 */
+    public fun cancelDownload(onCancelled: () -> Unit = {}) {
+        downloadJob?.cancel()
+        downloadJob = null
+        viewModelScope.launch {
+            lifecycle.deleteModelFile(MODEL_ID)
+            _ui.update { it.copy(busy = false, errorCode = null, errorMessage = null, asset = DEFAULT_ASSET) }
+            onCancelled()
         }
     }
 
@@ -173,14 +200,19 @@ public class ModelViewModel @Inject constructor(
 
     public fun memoryTier(): String = health.memoryTier().name
 
-    public fun errorTextOf(e: AppError): String = when (e.code) {
-        ModelErrorCodes.DOWNLOAD_NO_SPACE -> "存储空间不足。2.6 GB 的模型需要额外 15% 的余量，请先清理空间。"
-        ModelErrorCodes.DOWNLOAD_FAILED -> "下载失败（已自动重试多次）。检查网络后点「重试」即可从断点继续，不会从头开始。"
-        ModelErrorCodes.CHECKSUM_MISMATCH -> "文件校验不通过，已丢弃重下。这通常意味着传输中被损坏 —— 换一个稳定的网络再试。"
-        ModelErrorCodes.LOAD_FAILED -> "模型加载失败。可能是这台设备的 GPU 路径不可用，将自动降级到 CPU 重试。"
-        ModelErrorCodes.OUT_OF_MEMORY -> "内存不足，无法加载。请先结束其它占用内存的任务。"
-        ModelErrorCodes.OPENCL_MISSING -> "这台设备缺少 OpenCL，已改用 CPU 后端。"
-        else -> "未知错误（code=${e.code}，reasonKey=${e.reasonKey}）"
+    public fun errorTextOf(e: AppError): String {
+        val expectedBytes = _ui.value.asset.expectedBytes.takeIf { it > 0L }
+            ?: com.ake.ui.feature.onboarding.ModelGateViewModel.VERIFIED_MODEL_BYTES
+        val size = formatBytes(expectedBytes)
+        return when (e.code) {
+            ModelErrorCodes.DOWNLOAD_NO_SPACE -> "存储空间不足。$size 的模型还需要 15% 临时空间，请先清理存储。"
+            ModelErrorCodes.DOWNLOAD_FAILED -> "网络连接中断。检查网络后重试，会从已下载的位置继续。"
+            ModelErrorCodes.CHECKSUM_MISMATCH -> "下载的文件不完整，已安全丢弃。请换一个稳定的网络重试。"
+            ModelErrorCodes.LOAD_FAILED -> "模型暂时无法启动，请关闭占用内存较多的应用后重试。"
+            ModelErrorCodes.OUT_OF_MEMORY -> "可用内存不足，请先关闭其他应用后重试。"
+            ModelErrorCodes.OPENCL_MISSING -> "这台设备不支持首选加速方式，已切换为兼容模式。"
+            else -> "暂时无法准备模型，请检查网络和存储空间后重试。"
+        }
     }
 
     public companion object {

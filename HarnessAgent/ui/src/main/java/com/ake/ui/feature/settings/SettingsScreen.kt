@@ -53,7 +53,11 @@ import kotlin.math.roundToInt
  * 好过给他一个调了也不会生效的滑块（那会造成最难排查的一类不一致）。
  */
 @Composable
-public fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
+public fun SettingsScreen(
+    onOpenModel: () -> Unit = {},
+    onOpenTools: () -> Unit = {},
+    viewModel: SettingsViewModel = hiltViewModel(),
+) {
     val ui by viewModel.ui.collectAsStateWithLifecycle()
     val local by viewModel.local.collectAsStateWithLifecycle()
 
@@ -63,7 +67,15 @@ public fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
             .padding(14.dp)
             .verticalScroll(rememberScrollState()),
     ) {
-        Text("设置", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(12.dp))
+
+        SectionCard("模型与工具", subtitle = "管理本机模型和助手可以使用的工具") {
+            SecondaryButton("模型管理", onClick = onOpenModel, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            SecondaryButton("工具管理", onClick = onOpenTools, modifier = Modifier.fillMaxWidth())
+        }
+
         Spacer(Modifier.height(12.dp))
 
         ui.message?.let {
@@ -172,7 +184,7 @@ public fun SettingsScreen(viewModel: SettingsViewModel = hiltViewModel()) {
         SectionCard("可解释性") {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(checked = local.showDomPayload, onCheckedChange = viewModel::setShowDomPayload)
-                Text("显示模型原文与 Agent 看到的 DOM", style = MaterialTheme.typography.bodySmall)
+                Text("显示模型原文与助手看到的页面内容", style = MaterialTheme.typography.bodySmall)
             }
             Text(
                 "关掉会让步骤流变短，但出问题时就无从查起了 —— 默认开着。",

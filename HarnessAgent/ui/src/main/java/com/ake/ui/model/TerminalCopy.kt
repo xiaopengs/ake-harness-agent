@@ -116,7 +116,7 @@ public fun TerminalReason.copy(): TerminalCopy = when (this) {
     TerminalReason.NO_PROGRESS -> TerminalCopy(
         title = "一直在原地打转",
         what = "连续 4 步页面结构、地址、抓到的数据都没变。多数是点了不生效的元素，或掉进了无限加载。",
-        nextStep = "先把目标改成「确认页面上有没有 XX」这类只读任务，确认 Agent 能看见页面再谈操作。",
+        nextStep = "先把目标改成「确认页面上有没有 XX」这类只读任务，确认助手能看见页面再谈操作。",
         trust = TerminalCopy.Trust.NONE,
     )
 
@@ -268,7 +268,7 @@ public fun confirmCopyOf(reasonKey: String, args: List<String>): String = when (
         "即将发送内容（评论 / 私信 / 回复）。发出去就收不回了，且是以你的身份发出。"
 
     "confirm.mcp_first_use" ->
-        "即将调用外部工具 ${args.firstOrNull() ?: ""}。这一步是你自己接入的 MCP 工具，" +
+        "即将调用外部工具 ${args.firstOrNull() ?: ""}。这一步使用的是你自己接入的工具，" +
             "它可能在你本机或局域网里产生副作用。"
 
     "confirm.account_modify" ->

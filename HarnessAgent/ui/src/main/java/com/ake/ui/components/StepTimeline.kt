@@ -247,7 +247,7 @@ public fun ObservationPanel(
     onInspect: ((String) -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
-    SectionCard(title = "当前页面观察", subtitle = "这是 Agent 现在看到的东西，不是浏览器截图", modifier = modifier) {
+    SectionCard(title = "当前页面观察", subtitle = "这是助手现在看到的内容，不是浏览器截图", modifier = modifier) {
         if (obs == null) {
             WaitingBlock("还没有读到页面", detail = "首次感知要等页面稳定（最多 3 秒），之后每步都会重读一次。")
         } else {
@@ -268,7 +268,7 @@ public fun ObservationPanel(
 public fun ToolCallRow(call: ToolCallUi, modifier: Modifier = Modifier) {
     Column(modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Tag(call.origin, if (call.origin == "MCP") riskColorOf("EXTERNAL_SIDE_EFFECT") else riskColorOf("READ_ONLY"))
+            Tag(call.origin, if (call.origin == "外部工具") riskColorOf("EXTERNAL_SIDE_EFFECT") else riskColorOf("READ_ONLY"))
             Spacer(Modifier.size(6.dp))
             Text(call.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
             if (call.durationMs != null) {

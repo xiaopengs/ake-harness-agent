@@ -2,7 +2,10 @@ package com.ake.ui.nav
 
 import android.net.Uri
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -12,10 +15,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -35,8 +40,11 @@ import com.ake.ui.feature.chat.ChatViewModel
 import com.ake.ui.feature.home.HomeScreen
 import com.ake.ui.feature.mcp.McpScreen
 import com.ake.ui.feature.modelmgt.ModelScreen
+import com.ake.ui.feature.onboarding.ModelGateScreen
+import com.ake.ui.feature.onboarding.ModelGateViewModel
 import com.ake.ui.feature.settings.SettingsScreen
 import com.ake.ui.feature.task.TaskScreen
+import com.ake.ui.util.collectAsStateWithLifecycle
 
 /**
  * 导航结构。
@@ -68,6 +76,8 @@ public object AkeRoute {
     public const val SETTINGS: String = "settings"
 
     // ── 全屏
+    public const val MODEL_GATE: String = "model-gate"
+    public const val MODEL_DOWNLOAD: String = "model-download"
     public const val CHAT: String = "chat?sessionId={sessionId}&agentId={agentId}"
     public const val TASK: String = "task"
     public const val MODEL: String = "model"
@@ -102,15 +112,42 @@ private val TABS: List<Pair<String, Int>> = listOf(
     AkeRoute.CHAT_LIST to R.string.nav_tab_chat,
     // ★ 底栏指向"非挑人"形态；`pick` 有默认值，所以裸路由也能匹配
     "agents" to R.string.nav_tab_agent,
-    AkeRoute.HOME to R.string.nav_tab_task,
     AkeRoute.SETTINGS to R.string.nav_tab_settings,
 )
 
 @Composable
 public fun AkeNavHost(
     navController: NavHostController = rememberNavController(),
+    gateViewModel: ModelGateViewModel = hiltViewModel(),
 ) {
-    NavHost(navController = navController, startDestination = AkeRoute.CHAT_LIST) {
+    val gateUi by gateViewModel.ui.collectAsStateWithLifecycle()
+    if (!gateUi.initialCheckComplete) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Text(
+                text = "正在检查本地模型…",
+                modifier = Modifier.padding(24.dp),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        return
+    }
+    val startDestination = remember {
+        if (gateUi.ready) AkeRoute.CHAT_LIST else AkeRoute.MODEL_GATE
+    }
+
+    NavHost(navController = navController, startDestination = startDestination) {
+
+        composable(AkeRoute.MODEL_GATE) {
+            ModelGateScreen(
+                viewModel = gateViewModel,
+                onStartDownload = {
+                    navController.navigate(AkeRoute.MODEL_DOWNLOAD) {
+                        popUpTo(AkeRoute.MODEL_GATE) { inclusive = true }
+                    }
+                },
+                onModelReady = { navController.navigateToChatsClearingStart() },
+            )
+        }
 
         composable(AkeRoute.CHAT_LIST) {
             TabScaffold(navController, AkeRoute.CHAT_LIST) {
@@ -150,7 +187,12 @@ public fun AkeNavHost(
         }
 
         composable(AkeRoute.SETTINGS) {
-            TabScaffold(navController, AkeRoute.SETTINGS) { SettingsScreen() }
+            TabScaffold(navController, AkeRoute.SETTINGS) {
+                SettingsScreen(
+                    onOpenModel = { navController.navigate(AkeRoute.MODEL) },
+                    onOpenTools = { navController.navigate(AkeRoute.TOOLS) },
+                )
+            }
         }
 
         composable(
@@ -173,6 +215,7 @@ public fun AkeNavHost(
                 ChatScreen(
                     onBack = { navController.popBackStack() },
                     onOpenTask = { navController.navigate(AkeRoute.TASK) },
+                    onPrepareModel = { navController.navigate(AkeRoute.MODEL) },
                 )
             }
         }
@@ -181,6 +224,20 @@ public fun AkeNavHost(
             // ★ 全屏、不带底栏：确认弹窗出现时不该有任何东西与它抢注意力
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 TaskScreen(onBack = { navController.popBackStack() })
+            }
+        }
+
+        composable(AkeRoute.MODEL_DOWNLOAD) {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                ModelScreen(
+                    autoStart = true,
+                    onModelReady = { navController.navigateToChatsClearingStart() },
+                    onCancelled = {
+                        navController.navigate(AkeRoute.MODEL_GATE) {
+                            popUpTo(AkeRoute.MODEL_DOWNLOAD) { inclusive = true }
+                        }
+                    },
+                )
             }
         }
 
@@ -250,7 +307,11 @@ private fun TabScaffold(
     val selected = entry?.destination?.route ?: current
     Scaffold(
         bottomBar = {
-            NavigationBar(tonalElevation = 2.dp) {
+            NavigationBar(
+                modifier = Modifier.navigationBarsPadding().heightIn(min = 64.dp),
+                tonalElevation = 2.dp,
+                windowInsets = WindowInsets(0, 0, 0, 0),
+            ) {
                 for ((route, labelRes) in TABS) {
                     NavigationBarItem(
                         // 路由带可选参数时 destination.route 是模板串（`agents?pick={pick}`），
@@ -288,5 +349,12 @@ private fun NavHostController.navigateToTab(route: String) {
         popUpTo(graph.findStartDestination().id) { saveState = true }
         launchSingleTop = true
         restoreState = true
+    }
+}
+
+private fun NavHostController.navigateToChatsClearingStart() {
+    navigate(AkeRoute.CHAT_LIST) {
+        popUpTo(graph.findStartDestination().id) { inclusive = true }
+        launchSingleTop = true
     }
 }

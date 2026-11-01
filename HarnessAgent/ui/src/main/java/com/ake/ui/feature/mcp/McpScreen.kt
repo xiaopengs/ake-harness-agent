@@ -67,7 +67,7 @@ public fun McpScreen(viewModel: McpViewModel = hiltViewModel()) {
         Text("工具与连接", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(4.dp))
         Text(
-            "MVP 只连接本机（127.0.0.1 / localhost）的 MCP server。允许连公网等于让第三方代表登录态的你执行动作 —— 这条回路我们不打开。",
+            "目前只连接这台手机上的工具服务，不连接公网服务，避免第三方代你执行操作。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -102,7 +102,7 @@ public fun McpScreen(viewModel: McpViewModel = hiltViewModel()) {
 
         SectionCard(
             "工具清单与授权",
-            subtitle = "逐个开关：默认停用，授权可单条撤销（授权落 Room，不落 DataStore）",
+            subtitle = "逐个开关：默认停用，授权可以随时单独撤销",
         ) {
             if (ui.tools.isEmpty()) {
                 EmptyHint("还没有发现任何工具。先添加一台 server，再点「发现工具」。")
@@ -179,7 +179,8 @@ private fun ToolRowView(row: ToolRow, vm: McpViewModel) {
                     maxLines = 2,
                 )
             }
-            Tag(row.spec.origin.name, if (row.spec.origin.name == "MCP") AkeColors.RiskExternal else AkeColors.RiskReadOnly)
+            val external = row.spec.origin.name == "MCP"
+            Tag(if (external) "外部工具" else "本机工具", if (external) AkeColors.RiskExternal else AkeColors.RiskReadOnly)
         }
         Spacer(Modifier.height(4.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {

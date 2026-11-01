@@ -344,7 +344,7 @@ public class AgentSessionCoordinator @Inject constructor(
                             toolCalls = s.toolCalls + ToolCallUi(
                                 seq = e.seq,
                                 name = call.toolId.value,
-                                origin = if (call.toolId.value.startsWith("mcp.")) "MCP" else "本地",
+                                origin = if (call.toolId.value.startsWith("mcp.")) "外部工具" else "本机工具",
                                 argsSummary = if (call.args.isEmpty()) "（无入参）"
                                 else call.args.entries.joinToString(", ") { (k, v) -> "$k=$v" }.take(200),
                                 resultSummary = null,

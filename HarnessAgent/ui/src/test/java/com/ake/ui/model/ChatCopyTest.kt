@@ -87,7 +87,7 @@ class ChatCopyTest {
         // 存不下去这件事跟模型无关：归因必须落在存储上 —— 不许把人支使到模型页去。
         assertThat(UiStrings.text(store.nextRes)).contains("存储")
         assertThat(UiStrings.text(store.nextRes)).doesNotContain("模型页")
-        assertThat(UiStrings.text(model.nextRes)).contains("模型页")
+        assertThat(UiStrings.text(model.nextRes)).contains("新对话")
     }
 
     @Test
@@ -214,6 +214,18 @@ class ChatCopyTest {
         }
     }
 
+    @Test
+    fun userVisibleStringsNeverLeakDeveloperTypeNames() {
+        val leaked = UiStrings.entries.filterValues { text ->
+            BANNED_TECHNICAL_WORDS.any(text::contains)
+        }
+
+        assertThat(BANNED_TECHNICAL_WORDS.any("ChatRunnerPort 在 Hilt 里没有绑定"::contains)).isTrue()
+        assertWithMessage("用户可见文案泄漏了开发者类型或框架名：$leaked")
+            .that(leaked)
+            .isEmpty()
+    }
+
     // ══════════════════════════════════════════════ 消息状态徽标
 
     /** `COMPLETE` 必须是 null：一条正常说完的消息不该在气泡上贴「已完成」。 */
@@ -242,6 +254,10 @@ class ChatCopyTest {
          */
         val BANNED_IN_FLIGHT_WORDS: List<String> = listOf(
             "失败", "出错", "错误", "被拒", "拒绝", "拦截", "安全", "权限", "策略", "禁止", "未授权",
+        )
+
+        val BANNED_TECHNICAL_WORDS: List<String> = listOf(
+            "Port", "Hilt", "Exception", "ViewModel", "reasonKey", "code=",
         )
     }
 }
