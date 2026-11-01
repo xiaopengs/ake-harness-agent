@@ -27,11 +27,11 @@ plugins {
 val appVersionCode: Int =
     (project.findProperty("ake.versionCode") as String?)?.toInt()
         ?: System.getenv("AKE_VERSION_CODE")?.toIntOrNull()
-        ?: 1
+        ?: 2
 val appVersionName: String =
     (project.findProperty("ake.versionName") as String?)
         ?: System.getenv("AKE_VERSION_NAME")
-        ?: "0.1.0-dev"
+        ?: "0.2.0"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // release 签名凭据
