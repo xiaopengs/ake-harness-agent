@@ -205,6 +205,8 @@ L1  内核层          :core:common :core:ports :core:model-api
 | [`docs/10-endcloud-bus-analysis.md`](docs/10-endcloud-bus-analysis.md) | **端云通信总线是否需要**：先拆"云端算不算对等 harness"这个伪命题、总线与 DOM 红线为何结构互斥、SyncPlane B1–B4 逐条裁决、阶段触发条件与反触发清单、**今天必须埋的 4 处接口缝隙** |
 | [`docs/11-cloud-generation-path.md`](docs/11-cloud-generation-path.md) | **云端生成路径接线规格（待执行）**：为什么不能加个适配器转发（3 条实证）、一轮=一条 permit=一条审计行、`RouteContext` 逐字段填法、`EgressResult` 四分支落点、6 条可杀死实现的断言、4 条必须由人拍板的前置决策 |
 | [`docs/12-ux-design.md`](docs/12-ux-design.md) | **UX 重构设计定稿**：「用户看不懂」的 5 条代码级诊断、把模型就绪提升为启动门控、移动优先断点与尺寸、靛蓝主色 50–900 + 青绿「本机」语义色、字体刻度、8 步实现清单、WCAG 2.2 AA 检查表 |
+| [`docs/13-prd-android-personal-agent.md`](docs/13-prd-android-personal-agent.md) | **产品需求基线（PRD V1.0 原文）**：六大功能域、P0/P1/P2 分级、五 tab 信息架构、任务/工具/记忆/模型/安全五大模块详设、产品边界与非目标、非功能要求、V1.0–V2.0 迭代规划、12 条验收标准 |
+| [`docs/14-prd-gap-analysis.md`](docs/14-prd-gap-analysis.md) | **PRD 需求分析与落地差距**：V1.0 清单 12 条逐条判定（已有 5 / 半成品 5 / 缺失 2）、三处必裁冲突（五 tab、云端定位、形态 A vs B+C）、PRD 低估的四件事、Must/Should/Cut 收窄（Must ≈ 18 人日）、四个里程碑、五个待拍板问题 |
 
 ---
 
