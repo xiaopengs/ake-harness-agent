@@ -344,6 +344,10 @@ dependencies {
     implementation(project(":agent"))
     implementation(project(":mcp"))
     implementation(project(":data"))
+    // ★ 2026-11：文档解析（L3，全仓唯一持有 PDFBox）。`:agent` 为了 `ChunkAssembler`
+    //   已经依赖它，这里再声明一次是**组合根的需要** —— `DocumentPort` 的实现
+    //   （`PdfBoxDocumentExtractor`）要在这里注入 Context 才能构造，见 `di/DocumentModule.kt`。
+    implementation(project(":document"))
     // ★ 2026-10：聊天编排（L5）。`:app` 是唯一能同时看见 `:chat`（实现）与
     //   `core:ports/Chat.kt`（契约）的地方 ⇒ `ChatRunnerPort` / `SkillRegistryPort`
     //   的 Hilt 绑定只能写在这里（见 `di/ChatPortsModule.kt`）。

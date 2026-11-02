@@ -12,6 +12,9 @@ import com.ake.agent.loop.DefaultVerifier
 import com.ake.agent.loop.TokenStream
 import com.ake.agent.loop.Verifier
 import com.ake.agent.planner.DefaultSystemCharter
+import com.ake.agent.planner.PlanCoordinator
+import com.ake.agent.planner.PlanStepHandler
+import com.ake.agent.planner.PlanStepHandlers
 import com.ake.agent.planner.StepActionParser
 import com.ake.agent.planner.StepPromptBuilder
 import com.ake.agent.planner.SystemCharterText
@@ -30,6 +33,9 @@ import com.ake.core.ports.ActionRiskPort
 import com.ake.core.ports.BrowserExecutorPort
 import com.ake.core.ports.CheckpointStorePort
 import com.ake.core.ports.DeviceHealthPort
+import com.ake.core.ports.DocumentPort
+import com.ake.core.ports.PlanCoordinatorPort
+import com.ake.core.ports.PlanStorePort
 import com.ake.core.ports.DomPerceptionPort
 import com.ake.core.ports.HumanGate
 import com.ake.core.ports.LoopBudgetPort
@@ -97,6 +103,36 @@ public abstract class AgentBindingsModule {
     public abstract fun bindLocalToolHost(impl: ResultCollector): LocalToolHost
 
     public companion object {
+
+        /**
+         * 计划步骤的实现路由（`read_file` / `pdf_extract` / `summarize` / `report_todos`）。
+         *
+         * ★ `export_records` 刻意没有注册：导出要落盘，而 `:agent` 拿不到 Android 的存储上下文。
+         *   真去 `File(...)` 写只会写进 App 私有目录，用户在"文件"里找不到 ——
+         *   那比"这一步明确失败"更难排查。缺处理器时 `KindRoutedPlanStepHandler`
+         *   返回 `UNSUPPORTED`，用户能看到是哪一步没实现，而不是"结果少了一半"。
+         */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun providePlanStepHandler(
+            documents: DocumentPort,
+            model: ModelPort,
+        ): PlanStepHandler = PlanStepHandlers.routing(documents, model)
+
+        /**
+         * 计划编排。带默认值的标量参数（modelId / 超时 / token 上限）**不能**走
+         * `@Inject constructor` —— Dagger 看不见 Kotlin 默认值，会去为 `String`、`Long`
+         * 找绑定，而那样的绑定在这里不该存在。
+         */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun providePlanCoordinator(
+            model: ModelPort,
+            plans: PlanStorePort,
+            steps: PlanStepHandler,
+        ): PlanCoordinatorPort = PlanCoordinator(model = model, plans = plans, steps = steps)
 
         @Provides
         @Singleton

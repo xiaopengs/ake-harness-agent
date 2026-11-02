@@ -34,6 +34,11 @@ dependencies {
     //    因此不违反「L4 不得直接依赖 Room 具体类型」这条硬约束。
     implementation(project(":data"))
 
+    // ── `:document`（L3，交付方案 §3.1）：计划执行里的 `pdf_extract` 复用它的
+    //    `ChunkAssembler`（12 块硬上限 + 按页/句切分）。**不直接 new PDFBox** ——
+    //    PDFBox 仍只出现在 `:document` 内部，这里只消费纯数据的切块结果。
+    implementation(project(":document"))
+
     implementation(libs.coroutines.android)
     implementation(libs.javax.inject)
     implementation(libs.hilt.android)
