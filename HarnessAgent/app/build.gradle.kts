@@ -253,8 +253,17 @@ android {
         }
         release {
             // R8 代码压缩 + 资源裁剪。规则见 proguard-rules.pro
-            isMinifyEnabled = true
-            isShrinkResources = true
+            //
+            // ★ `-Pake.skipR8=true` 是**受限环境**的逃生门，不是常规构建方式：
+            //   R8 在 8GB 内存上限的容器里会吃满堆被杀（实测：4.6G / 6.1G 都 OOM），
+            //   而"确认 release 签名包能装能起"这件事不该因为压缩器跑不动就卡住。
+            //   跳过 R8 的包**更大、可被反编译**，只用于本机/沙箱验收，不得分发。
+            val skipR8 = providers.gradleProperty("ake.skipR8").orNull?.toBoolean() == true
+            if (skipR8) {
+                logger.warn("⚠ ake.skipR8=true ⇒ release 包未做 R8 压缩，仅限本机验收，不得分发")
+            }
+            isMinifyEnabled = !skipR8
+            isShrinkResources = !skipR8
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
