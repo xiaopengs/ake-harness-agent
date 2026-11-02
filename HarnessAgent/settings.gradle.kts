@@ -82,3 +82,4 @@ include(":app")
 
 include(":cloudai")
 include(":inference")
+include(":document")

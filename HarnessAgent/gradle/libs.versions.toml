@@ -87,6 +87,9 @@ composeBom = "2026.06.01"
 
 # ── 测试
 junit = "4.13.2"
+# ★ PDFBox-Android：坐标是 com.tom-roush:pdfbox-android（不是 org.apache.pdfbox，后者依赖 java.awt，
+#   在 Android 上不可用）。2.0.27.0 是 2.0.x 线最后一个稳定版，已在 Maven Central 核实存在。
+pdfbox = "2.0.27.0"
 truth = "1.4.4"
 turbine = "1.2.1"
 
@@ -168,6 +171,9 @@ compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
 compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+
+# ── 文档解析（仅 :document）
+pdfbox-android = { group = "com.tom-roush", name = "pdfbox-android", version.ref = "pdfbox" }
 
 # ── 测试
 junit = { group = "junit", name = "junit", version.ref = "junit" }

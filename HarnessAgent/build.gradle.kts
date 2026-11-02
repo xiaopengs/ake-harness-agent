@@ -42,7 +42,7 @@ val archCoreModules = setOf(
     ":core:ports",
     ":core:model-api",
 )
-val archLeafModules = setOf(":llm", ":browser", ":agent", ":mcp", ":data", ":ui", ":chat", ":cloudai", ":inference")
+val archLeafModules = setOf(":llm", ":browser", ":agent", ":mcp", ":data", ":ui", ":chat", ":cloudai", ":inference", ":document")
 
 // ① 允许的 Gradle 依赖边（键 = 模块 path，值 = 允许的上游 path）
 val archAllowedEdges: Map<String, Set<String>> = buildMap {
@@ -62,6 +62,15 @@ val archAllowedEdges: Map<String, Set<String>> = buildMap {
     //   不许碰 Room / `persist.db`」—— 与 `:agent → :data` 同一套收紧手法。
     put(":llm", archCoreModules + ":data")
     put(":browser", archCoreModules)
+    // ★ `:document`（L3，交付方案 §3.1）—— 全仓**唯一**持有 PDFBox 的模块。
+    //
+    //   为什么必须是独立模块而不是塞进 `:data` 或 `:agent`：
+    //   ① PDFBox 是外部 SDK，按本项目铁律只能出现在 L3 且必须 Port 封装；
+    //   ② 它需要与 `:data` 完全隔离 —— 一旦 `:document → :data` 这条横向边成立，
+    //      PDFBox 的解析生命周期就会和 Room 事务绑在一起，`HeavyResourceLease`
+    //      想单独做内存隔离就没有边界可切。
+    //   ③ 这条边由 import 黑名单收紧为「不得碰 Room / agent / llm / ui」。
+    put(":document", archCoreModules)
     put(":mcp", archCoreModules)
     put(":data", archCoreModules)
     // ★ 硬约束：:ui 不得看见 :agent / :mcp / :data / :chat
@@ -71,7 +80,7 @@ val archAllowedEdges: Map<String, Set<String>> = buildMap {
     // :agent → :data 是白名单里唯一一条「实现层横向」例外，
     // 且经源码断言 ② 收紧为「只许碰 com.ake.data.persist.store 的接口，
     // 不许碰 Room / db 实现」。改这条前先看 settings.gradle.kts 的 L4→L3 说明。
-    put(":agent", archCoreModules + ":data")
+    put(":agent", archCoreModules + ":data" + ":document")
     // ★ :chat —— 聊天会话编排（L5），向下依赖 :agent 的上下文/压缩/护栏内核。
     //   必须直接依赖 :agent 而不是重抄一份预算算法：
     //   「UI 显示一套预算、主循环跑另一套」是本项目已反复警告过的一致性灾难
@@ -138,6 +147,13 @@ val archForbiddenImports: Map<String, Set<String>> = mapOf(
         "com.ake.data.persist.db.", "androidx.room.", "com.ake.ui.",
         "com.ake.browser.",
         "com.google.ai.edge.litertlm.",
+    ),
+    // ★ `:document` —— 只做 PDF → 页文本，不得往上知道任何业务。
+    //   特别禁止 `com.ake.data.`：它一旦能碰 Room，PDFBox 的加载/释放就会
+    //   被事务边界牵住，架构建制里「解析与推理永不重叠」的内存隔离就失效了。
+    ":document" to setOf(
+        "com.ake.data.", "androidx.room.", "com.ake.agent.", "com.ake.llm.",
+        "com.ake.ui.", "com.ake.chat.", "com.ake.browser.", "com.ake.mcp.",
     ),
 )
 
