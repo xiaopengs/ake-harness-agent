@@ -16,23 +16,23 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.ake.core.contract.TaskPhase
-import com.ake.core.contract.TaskStatus
 import com.ake.ui.components.EmptyHint
 import com.ake.ui.components.LabeledField
 import com.ake.ui.components.SectionCard
 import com.ake.ui.components.Tag
 import com.ake.ui.model.RunState
 import com.ake.ui.model.TerminalCopy
+import com.ake.ui.model.phaseColorOf
 import com.ake.ui.model.statusLabelOf
 import com.ake.ui.model.terminalCopyOf
 import com.ake.ui.util.collectAsStateWithLifecycle
@@ -55,6 +55,7 @@ import com.ake.ui.theme.AkeColors
 @Composable
 public fun HomeScreen(
     viewModel: HomeViewModel = hiltViewModel(),
+    onOpenChats: () -> Unit,
     onOpenTask: () -> Unit,
     onOpenModel: () -> Unit,
     onOpenTools: () -> Unit,
@@ -76,7 +77,18 @@ public fun HomeScreen(
             .verticalScroll(rememberScrollState()),
     ) {
 
-        Text("要它做什么？", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "要它做什么？",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f),
+            )
+            // ★ 五 tab 之后「对话」不再是底栏项，但对话仍是最常用的入口之一。
+            //   放在首页右上角而不是塞进「我的」：用户找一个聊过的会话时，
+            //   第一反应是回首页，不是翻设置。
+            TextButton(onClick = onOpenChats) { Text("对话记录") }
+        }
         Spacer(Modifier.height(4.dp))
         Text(
             "全部在本机完成：不联网、不上云、不看你的登录态以外的数据。",
@@ -237,17 +249,7 @@ public fun HomeScreen(
     }
 }
 
-/** 相位 → 语义色。与任务页顶部的相位条同一套色，避免同一个状态在两个页面两种颜色。 */
-@Composable
-private fun phaseColorOf(status: String, phase: TaskPhase): Color = when (phase) {
-    TaskPhase.ACTIVE -> AkeColors.PhaseActive
-    TaskPhase.SUSPENDED -> AkeColors.PhaseSuspended
-    TaskPhase.TERMINAL -> if (status == TaskStatus.SUCCEEDED) {
-        AkeColors.PhaseTerminalOk
-    } else {
-        AkeColors.PhaseTerminalWarn
-    }
-}
+/** 相位 → 语义色。实现已上收到 `ui/model/TaskPhaseColor.kt`，任务中心与首页共用。 */
 
 @Composable
 private fun ExampleLine(text: String) {

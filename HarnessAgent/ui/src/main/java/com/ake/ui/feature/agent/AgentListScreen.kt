@@ -17,6 +17,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -55,25 +56,36 @@ public fun AgentListScreen(
     onOpenTemplateMarket: () -> Unit,
     modifier: Modifier = Modifier,
     pickMode: Boolean = false,
+    onBack: (() -> Unit)? = null,
     viewModel: AgentListViewModel = hiltViewModel(),
 ) {
     val ui by viewModel.ui.collectAsStateWithLifecycle()
 
     Column(modifier.fillMaxSize()) {
         Column(Modifier.padding(start = 14.dp, end = 14.dp, top = 14.dp, bottom = 8.dp)) {
-            Text(
-                text = stringResource(if (pickMode) R.string.chat_list_pick_agent_title else R.string.agent_list_title),
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(2.dp))
-            Text(
-                text = stringResource(
-                    if (pickMode) R.string.chat_list_pick_agent_subtitle else R.string.agent_list_subtitle,
-                ),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = stringResource(
+                            if (pickMode) R.string.chat_list_pick_agent_title else R.string.agent_list_title,
+                        ),
+                        style = MaterialTheme.typography.headlineSmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = stringResource(
+                            if (pickMode) R.string.chat_list_pick_agent_subtitle else R.string.agent_list_subtitle,
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                // 助手页在五 tab 之后是二级页，给一个看得见的出口
+                if (onBack != null) {
+                    TextButton(onClick = onBack) { Text("返回") }
+                }
+            }
         }
 
         ui.errorText?.let { err ->

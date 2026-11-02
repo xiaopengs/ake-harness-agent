@@ -39,49 +39,53 @@ import com.ake.ui.feature.chat.ChatScreen
 import com.ake.ui.feature.chat.ChatViewModel
 import com.ake.ui.feature.home.HomeScreen
 import com.ake.ui.feature.mcp.McpScreen
+import com.ake.ui.feature.memory.MemoryListScreen
 import com.ake.ui.feature.modelmgt.ModelScreen
 import com.ake.ui.feature.onboarding.ModelGateScreen
 import com.ake.ui.feature.onboarding.ModelGateViewModel
 import com.ake.ui.feature.settings.SettingsScreen
 import com.ake.ui.feature.task.TaskScreen
+import com.ake.ui.feature.tasks.TaskListScreen
+import com.ake.ui.feature.tools.ToolCenterScreen
 import com.ake.ui.util.collectAsStateWithLifecycle
 
 /**
- * 导航结构。
+ * 导航结构：五个一级 tab。
  *
- * ## 为什么首页是「对话」而不是「任务」
+ * ## 为什么是五 tab 而不是三 tab
  *
- * 这个 App 原来的形态是"下达一次任务、盯着它跑完"。加了人格之后，用户的主循环变成
- * **"找一个角色 → 说句话 → 它自己决定要不要去干活"** —— 对话是入口，任务降级成
- * 对话里的一次技能调用。所以 `startDestination` 改成对话列表，任务页退成一个
- * 从对话里跳进去的全屏详情（[AkeRoute.TASK]）。
+ * 三 tab 的取舍是工程口径（拇指舒适区），五 tab 的取舍是产品口径（任务、工具、记忆
+ * 必须一眼可见）。PRD 定的是后者，**并且这个决定是可回退的**：把 [TABS] 减到三项、
+ * 把 `startDestination` 改回 `CHAT_LIST` 即可，其余页面全部保留、不删代码。
  *
- * ## 底栏四个 tab
+ * ## 为什么首页是「下任务」而不是「对话列表」
  *
- * 对话 / Agent / 任务 / 设置。模型与工具页仍在图里，但**不占底栏**：
- * 它们是低频配置项，从任务页与设置页进得去。四个 tab 是拇指舒适区的上限，
- * 五个以上就开始有点不准了。
+ * 这个应用的主循环是**「说一句 → 它在本机干完 → 你回来看结果」**。
+ * 对话是辅助形态（追问、改口、换个说法），所以它在首页右上角，不占底栏。
  *
- * ## 为什么对话页与任务页不带底栏
+ * ## 为什么任务详情与会话页不带底栏
  *
- * 这两个页面都有一个"正在发生"的区域（消息流 / 步骤流）和一个贴底的操作区。
+ * 这两个页面都有一个"正在发生"的区域（步骤流 / 消息流）和一个贴底的操作区。
  * 底栏会同时吃掉垂直空间、并在确认弹窗出现时抢注意力 —— 所以它们走全屏路由。
  */
 public object AkeRoute {
 
-    // ── tab
-    public const val CHAT_LIST: String = "chats"
-    public const val AGENT_LIST: String = "agents?pick={pick}"
+    // ── tab（五 tab：首页 / 任务 / 工具 / 记忆 / 我的）
     public const val HOME: String = "home"
+    public const val TASKS: String = "tasks"
+    public const val TOOLS: String = "tools"
+    public const val MEMORY: String = "memory"
     public const val SETTINGS: String = "settings"
 
     // ── 全屏
     public const val MODEL_GATE: String = "model-gate"
     public const val MODEL_DOWNLOAD: String = "model-download"
+    public const val CHAT_LIST: String = "chats"
     public const val CHAT: String = "chat?sessionId={sessionId}&agentId={agentId}"
     public const val TASK: String = "task"
     public const val MODEL: String = "model"
-    public const val TOOLS: String = "tools"
+    public const val AGENT_LIST: String = "agents?pick={pick}"
+    public const val MCP: String = "mcp"
     public const val AGENT_DETAIL: String = "agent/detail/{profileId}"
     public const val AGENT_CREATE: String = "agent/create?templateId={templateId}&prefillProfileId={prefillProfileId}"
     public const val TEMPLATE_PICKER: String = "agent/templates"
@@ -108,10 +112,26 @@ public object AkeRoute {
     }
 }
 
+/**
+ * 底栏五个 tab。
+ *
+ * ## 从三个到五个：这是产品需求，不是工程判断
+ *
+ * 三 tab（对话 / 助手 / 我的）的取舍是「拇指舒适区」，五 tab 的取舍是「任务、工具、记忆
+ * 必须是用户能直接看见的一等公民」。PRD 选了后者，这里照做 —— 代价是 360dp 屏上
+ * 每个 tab 约 72dp 宽，低于 Material 建议的 80dp。缓解手段：图标位留空（只排文字），
+ * 文字压到 12sp，点击区仍按 48dp 高度给足。
+ *
+ * ## 对话去哪了
+ *
+ * 它不再是底栏项，入口在首页右上角「对话记录」。对话是**和一个助手聊**，
+ * 而首页是**让它干活** —— 后者才是这个应用的主循环。
+ */
 private val TABS: List<Pair<String, Int>> = listOf(
-    AkeRoute.CHAT_LIST to R.string.nav_tab_chat,
-    // ★ 底栏指向"非挑人"形态；`pick` 有默认值，所以裸路由也能匹配
-    "agents" to R.string.nav_tab_agent,
+    AkeRoute.HOME to R.string.nav_tab_home,
+    AkeRoute.TASKS to R.string.nav_tab_task,
+    AkeRoute.TOOLS to R.string.nav_tab_tools,
+    AkeRoute.MEMORY to R.string.nav_tab_memory,
     AkeRoute.SETTINGS to R.string.nav_tab_settings,
 )
 
@@ -132,7 +152,7 @@ public fun AkeNavHost(
         return
     }
     val startDestination = remember {
-        if (gateUi.ready) AkeRoute.CHAT_LIST else AkeRoute.MODEL_GATE
+        if (gateUi.ready) AkeRoute.HOME else AkeRoute.MODEL_GATE
     }
 
     NavHost(navController = navController, startDestination = startDestination) {
@@ -145,15 +165,17 @@ public fun AkeNavHost(
                         popUpTo(AkeRoute.MODEL_GATE) { inclusive = true }
                     }
                 },
-                onModelReady = { navController.navigateToChatsClearingStart() },
+                onModelReady = { navController.navigateToHomeClearingStart() },
             )
         }
 
         composable(AkeRoute.CHAT_LIST) {
-            TabScaffold(navController, AkeRoute.CHAT_LIST) {
+            // 五 tab 之后对话列表是二级页：全屏、不给底栏，避免和首页的底栏"打架"
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 ChatListScreen(
                     onOpenSession = { navController.navigate(AkeRoute.chat(sessionId = it)) },
                     onNewChat = { navController.navigate(AkeRoute.agents(pick = true)) },
+                    onBack = { navController.popBackStack() },
                 )
             }
         }
@@ -163,7 +185,7 @@ public fun AkeNavHost(
             arguments = listOf(navArgument("pick") { type = NavType.BoolType; defaultValue = false }),
         ) { entry ->
             val pick = entry.arguments?.getBoolean("pick") == true
-            TabScaffold(navController, "agents") {
+            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 AgentListScreen(
                     pickMode = pick,
                     onOpenAgent = { navController.navigate(AkeRoute.agentDetail(it)) },
@@ -171,6 +193,7 @@ public fun AkeNavHost(
                     onCreateBlank = { navController.navigate(AkeRoute.createAgent()) },
                     onCreateFromTemplate = { navController.navigate(AkeRoute.TEMPLATE_PICKER) },
                     onOpenTemplateMarket = { navController.navigate(AkeRoute.TEMPLATE_PICKER) },
+                    onBack = { navController.popBackStack() },
                 )
             }
         }
@@ -178,11 +201,33 @@ public fun AkeNavHost(
         composable(AkeRoute.HOME) {
             TabScaffold(navController, AkeRoute.HOME) {
                 HomeScreen(
+                    onOpenChats = { navController.navigate(AkeRoute.CHAT_LIST) },
                     onOpenTask = { navController.navigate(AkeRoute.TASK) },
                     onOpenModel = { navController.navigate(AkeRoute.MODEL) },
-                    onOpenTools = { navController.navigate(AkeRoute.TOOLS) },
+                    onOpenTools = { navController.navigateToTab(AkeRoute.TOOLS) },
                     onOpenSettings = { navController.navigateToTab(AkeRoute.SETTINGS) },
                 )
+            }
+        }
+
+        composable(AkeRoute.TASKS) {
+            TabScaffold(navController, AkeRoute.TASKS) {
+                TaskListScreen(
+                    onOpenTask = { navController.navigate(AkeRoute.TASK) },
+                    onGoHome = { navController.navigateToTab(AkeRoute.HOME) },
+                )
+            }
+        }
+
+        composable(AkeRoute.TOOLS) {
+            TabScaffold(navController, AkeRoute.TOOLS) {
+                ToolCenterScreen(onOpenMcp = { navController.navigate(AkeRoute.MCP) })
+            }
+        }
+
+        composable(AkeRoute.MEMORY) {
+            TabScaffold(navController, AkeRoute.MEMORY) {
+                MemoryListScreen()
             }
         }
 
@@ -190,7 +235,7 @@ public fun AkeNavHost(
             TabScaffold(navController, AkeRoute.SETTINGS) {
                 SettingsScreen(
                     onOpenModel = { navController.navigate(AkeRoute.MODEL) },
-                    onOpenTools = { navController.navigate(AkeRoute.TOOLS) },
+                    onOpenTools = { navController.navigate(AkeRoute.MCP) },
                 )
             }
         }
@@ -231,7 +276,7 @@ public fun AkeNavHost(
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 ModelScreen(
                     autoStart = true,
-                    onModelReady = { navController.navigateToChatsClearingStart() },
+                    onModelReady = { navController.navigateToHomeClearingStart() },
                     onCancelled = {
                         navController.navigate(AkeRoute.MODEL_GATE) {
                             popUpTo(AkeRoute.MODEL_DOWNLOAD) { inclusive = true }
@@ -247,7 +292,10 @@ public fun AkeNavHost(
             }
         }
 
-        composable(AkeRoute.TOOLS) {
+        // MCP 服务管理：工具中心里的「连接与管理」进这里。
+        // 它不再是 TOOLS tab 本身 —— 那个 tab 现在回答的是"我有什么能力"，
+        // 而不是"我怎么接一个新服务"。
+        composable(AkeRoute.MCP) {
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                 McpScreen()
             }
@@ -352,8 +400,14 @@ private fun NavHostController.navigateToTab(route: String) {
     }
 }
 
-private fun NavHostController.navigateToChatsClearingStart() {
-    navigate(AkeRoute.CHAT_LIST) {
+/**
+ * 模型就绪后进首页，并把门控页从返回栈里抹掉。
+ *
+ * 必须 `inclusive = true`：门控页是「还没准备好」的状态，用户按返回不该回到那里 ——
+ * 回去了也只会看到一个已经完成的下载页。
+ */
+private fun NavHostController.navigateToHomeClearingStart() {
+    navigate(AkeRoute.HOME) {
         popUpTo(graph.findStartDestination().id) { inclusive = true }
         launchSingleTop = true
     }

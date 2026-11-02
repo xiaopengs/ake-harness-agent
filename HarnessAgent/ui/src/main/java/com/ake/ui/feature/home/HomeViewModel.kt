@@ -3,12 +3,13 @@ package com.ake.ui.feature.home
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.ake.core.common.Clock
-import com.ake.core.contract.TaskPhase
-import com.ake.core.contract.TaskStatus
 import com.ake.core.ports.CheckpointStorePort
 import com.ake.core.ports.LocalSettings
 import com.ake.core.ports.SettingsStorePort
 import com.ake.core.ports.TaskStorePort
+import com.ake.ui.model.TaskRow
+import com.ake.ui.model.relativeTimeOf
+import com.ake.ui.model.toRow
 import com.ake.ui.runtime.AgentSessionCoordinator
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,25 +20,14 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
-/** 历史任务列表里的一行。**已结束与已暂停都在同一张表里。 */
-public data class HistoryTaskItem(
-    val taskId: String,
-    val goalPreview: String,
-    /** 机器态（落库原值），仅供逻辑判定。显示请用 `statusLabelOf`。 */
-    val status: String,
-    val phase: TaskPhase,
-    /** 已完成步数（= `TaskRecord.stepsDone`，恢复起点由 checkpoint 决定）。 */
-    val stepsDone: Int,
-    val lastActivityAt: Long,
-    /**
-     * 是否可以「点继续」。
-     *
-     * = 落在挂起态 **且** 断点真的还在库里。两个条件缺一不可：
-     * 只看 status 会给出「暂停了但恢复不了」的按钮，只看断点会把已结束任务也列成可继续。
-     */
-    val resumable: Boolean,
-    val terminalReason: String?,
-)
+/**
+ * 历史任务列表里的一行。
+ *
+ * ★ 2026-11 起改为 [TaskRow] 的别名：任务中心（五 tab 之一）显示同一批数据，
+ * 两边各写一份映射就会出现「首页说可继续、任务中心说不可继续」。别名保持旧引用可编译，
+ * 但**新代码请直接用 [TaskRow]**。
+ */
+public typealias HistoryTaskItem = TaskRow
 
 /**
  * 主界面（任务下达）的 ViewModel。
@@ -130,33 +120,13 @@ public class HomeViewModel @Inject constructor(
                 .mapTo(HashSet()) { it.value }
 
             _history.value = recs.map { rec ->
-                val suspended = TaskStatus.isSuspended(rec.status)
-                HistoryTaskItem(
-                    taskId = rec.id.value,
-                    goalPreview = rec.goalPreview ?: "（目标已清除）",
-                    status = rec.status,
-                    phase = TaskStatus.phaseOf(rec.status),
-                    stepsDone = rec.stepsDone,
-                    lastActivityAt = rec.lastActivityAt,
-                    resumable = suspended && rec.id.value in withCp,
-                    terminalReason = rec.terminalReason,
-                )
+                rec.toRow(resumable = rec.id.value in withCp)
             }
         }
     }
 
     /** 「3 分钟前」这类相对时间。历史列表要的是「多久以前」，不是时间戳。 */
-    public fun relativeTime(atMillis: Long): String {
-        if (atMillis <= 0L) return ""
-        val diff = (clock.nowMillis() - atMillis).coerceAtLeast(0L)
-        val min = diff / 60_000L
-        return when {
-            min < 1L -> "刚刚"
-            min < 60L -> "${min} 分钟前"
-            min < 60L * 24L -> "${min / 60L} 小时前"
-            else -> "${min / (60L * 24L)} 天前"
-        }
-    }
+    public fun relativeTime(atMillis: Long): String = relativeTimeOf(clock.nowMillis(), atMillis)
 
     /** 任务规格里的白名单由设置页决定 —— 这里把「设置真的会影响行为」这件事坐实。 */
     public fun allowHosts(): Set<String> = localSettings.value.allowHosts.toSet()

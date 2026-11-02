@@ -17,11 +17,13 @@
 <resources>
 
     <!-- ── 导航 ────────────────────────────────────────────── -->
+    <string name="nav_tab_home">首页</string>
     <string name="nav_tab_chat">对话</string>
     <string name="nav_tab_agent">助手</string>
     <string name="nav_tab_task">任务</string>
     <string name="nav_tab_model">模型</string>
     <string name="nav_tab_tools">工具</string>
+    <string name="nav_tab_memory">记忆</string>
     <string name="nav_tab_settings">我的</string>
 
     <!-- ── 通用 ────────────────────────────────────────────── -->
