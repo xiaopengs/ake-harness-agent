@@ -169,6 +169,7 @@ internal class FakeAkeDatabase(private val configDao: ConfigDao) : AkeDatabase()
     override fun cloudCredentialDao(): com.ake.data.persist.db.dao.CloudCredentialDao =
         unsupported("cloudCredentialDao")
     // ── v5：全局默认目标 DAO。同上 ⇒ unsupported。
+    override fun planDao(): com.ake.data.persist.db.dao.PlanDao = unsupported("planDao")
     override fun defaultTargetDao(): com.ake.data.persist.db.dao.DefaultTargetDao =
         unsupported("defaultTargetDao")
 
@@ -223,6 +224,7 @@ internal class BareAkeDatabase(private val configDao: ConfigDao) : AkeDatabase()
     override fun cloudCredentialDao(): com.ake.data.persist.db.dao.CloudCredentialDao =
         unsupported("cloudCredentialDao")
     // ── v5：全局默认目标 DAO。同上 ⇒ unsupported。
+    override fun planDao(): com.ake.data.persist.db.dao.PlanDao = unsupported("planDao")
     override fun defaultTargetDao(): com.ake.data.persist.db.dao.DefaultTargetDao =
         unsupported("defaultTargetDao")
 

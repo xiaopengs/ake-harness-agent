@@ -31,7 +31,52 @@ public interface MemoryStorePort {
     public suspend fun put(card: MemoryCard)
 
     public suspend fun relevantTo(task: TaskSpec): List<MemoryCard>
+
+    /**
+     * 记忆中心（五 tab 之一）的列表数据源。
+     *
+     * ## 为什么不复用 [relevantTo]
+     *
+     * [relevantTo] 是**给模型喂上下文**用的：按当前任务域名过滤、按 pinned/最近使用排序、
+     * 最多 8 条。记忆中心要的是**全量、按更新时间倒序、可翻**，两者排序口径相反。
+     * 复用会让「用户最近记的那条」在列表里沉底，而模型恰好不需要它。
+     *
+     * ## 为什么返回 [MemoryEntry] 而不是 [MemoryCard]
+     *
+     * 列表要显示 `title` / `useCount` / `pinned` / `updatedAt`，这些字段 [MemoryCard] 没有；
+     * 而列表**不需要正文**（正文是密文，逐条解密 50 条会卡主线程）。
+     * 用独立投影，顺带把「列表只拿 preview」这件事固化成类型约束。
+     */
+    public fun observeRecent(limit: Int = 50): Flow<List<MemoryEntry>>
+
+    /**
+     * 删除一条记忆。
+     *
+     * @return true = 确实删掉了；false = 这条本来就不在（多端/多次点击的常态，不是错误）。
+     *         实现**不得**抛异常 —— 用户在列表里连点两下不该看到崩溃。
+     */
+    public suspend fun deleteById(id: String): Boolean
 }
+
+/**
+ * 记忆中心的列表行（见 [MemoryStorePort.observeRecent]）。
+ *
+ * `preview` 来自明文列 `content_preview`（≤160 字符），**不是解密后的正文** ——
+ * 列表滚动时不做任何解密，是这条投影存在的第二个理由。
+ */
+public data class MemoryEntry(
+    public val id: String,
+    public val title: String,
+    public val preview: String,
+    public val kind: String,
+    /** 记忆作用的域名；`null` = 全局。 */
+    public val scopeHost: String?,
+    public val updatedAtMillis: Long,
+    public val useCount: Int,
+    public val pinned: Boolean,
+    /** 由哪个任务写下的；`null` = 用户手动记的。 */
+    public val sourceTaskId: String?,
+)
 
 // ──────────────────────────────────────────────────────────────
 // agent 模块要求新增的 6 个持久化 Port（EXPECTED_CORE_API.md §3）

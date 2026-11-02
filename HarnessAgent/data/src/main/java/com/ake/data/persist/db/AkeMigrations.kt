@@ -146,14 +146,18 @@ object AkeMigrations {
 
     // ──────────────────────────────────────────── 样板（**不进 [ALL]**）
 
-    /** 5 → 6 的样板：带数据回填。 */
-    val SAMPLE_MIGRATION_5_6: Migration = object : Migration(5, 6) {
-        override fun migrate(connection: SQLiteConnection) {
-            connection.execSQL(
-                "UPDATE task SET budget_profile = 'DEFAULT' WHERE budget_profile IS NULL",
-            )
-        }
-    }
+    /**
+     * 5 → 6：计划版本（`plan_revision`，V1.0 M2）。
+     *
+     *  - 1 张新表 + 1 个索引；
+     *  - **全 Additive**：无 ALTER / DROP / 回填。
+     *
+     * ★ 原来那条 5 → 6 的**样板已被这条真实迁移取代**并删除。留一条同号样板是
+     *   `AkeMigrations` 头部明确禁止的：某天有人把它加进 [ALL]，同一个 (5,6) 就有两条
+     *   `Migration`，Room 取第一条匹配的，而哪条在前取决于数组顺序 ——
+     *   症状是"迁移跑了，但表没建"。
+     */
+    val MIGRATION_5_6: Migration = PlanRevisionMigration5To6
 
     /**
      * 4 → 5 的样板：加列 + 建索引。真实改动时照抄这个形状。
@@ -190,5 +194,11 @@ object AkeMigrations {
      *   把它放在最前面会对上 `Variable 'MIGRATION_1_2' must be initialized`（本轮真编译踩到）。
      *   `arrayOf(...)` 在这里是取值而不是延迟引用 —— 它是 `Array`，不是 `Lazy`。
      */
-    val ALL: Array<Migration> = arrayOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+    val ALL: Array<Migration> = arrayOf(
+        MIGRATION_1_2,
+        MIGRATION_2_3,
+        MIGRATION_3_4,
+        MIGRATION_4_5,
+        MIGRATION_5_6,
+    )
 }

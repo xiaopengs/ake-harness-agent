@@ -21,6 +21,7 @@ import com.ake.core.ports.McpServerStorePort
 import com.ake.core.ports.MemoryStorePort
 import com.ake.core.ports.ModelAssetStorePort
 import com.ake.core.ports.ObservationStorePort
+import com.ake.core.ports.PlanStorePort
 import com.ake.core.ports.PolicyDecisionSink
 import com.ake.core.ports.SettingsStorePort
 import com.ake.core.ports.TaskStorePort
@@ -65,6 +66,7 @@ import com.ake.data.persist.store.ObservationRow
 import com.ake.data.persist.store.ObservationStoreImpl
 import com.ake.data.persist.store.PolicyDecisionSinkImpl
 import com.ake.data.persist.store.RouteDecisionSink
+import com.ake.data.persist.store.PlanStoreImpl
 import com.ake.data.persist.store.SettingsStoreImpl
 import com.ake.data.persist.store.StepTraceCodec
 import com.ake.data.persist.store.TaskStoreImpl
@@ -899,6 +901,21 @@ public abstract class PersistenceBindingsModule {
         ): CapabilityGrantStoreImpl = CapabilityGrantStoreImpl(
             grants = db.capabilityGrantDao(),
             clock = clock,
+        )
+
+        /**
+         * 计划版本存储（V1.0 M2）。
+         *
+         * 走 `@Provides` 而不是 `@Binds`：它需要 `PlanDao` + `DbTransaction` 两个参数，
+         * 而 `DbTransaction` 的构造必须拿到**已开库**的 `AkeDatabase`
+         * （见 `DbTransaction` 头部注释：测试侧要能换成直连替身）。
+         */
+        @Provides
+        @Singleton
+        @JvmStatic
+        public fun providePlanStore(db: AkeDatabase): PlanStorePort = PlanStoreImpl(
+            dao = db.planDao(),
+            tx = DbTransaction.of(db),
         )
 
         @Provides

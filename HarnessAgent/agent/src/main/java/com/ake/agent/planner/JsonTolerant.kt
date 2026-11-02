@@ -112,18 +112,52 @@ object JsonTolerant {
         s = UNQUOTED_KEY.replace(s, "$1\"$2\":")
         s = TRAILING_COMMA.replace(s, "$1")
         s = SINGLE_QUOTED.replace(s, "\"$1\"")
-        s = BARE_NEWLINE_IN_STRING.replace(s, "\\n")
+        s = escapeBareNewlinesInsideStrings(s)
         s = s.replace(' ', ' ')
         return s
+    }
+
+    /**
+     * 只把**字符串内部**的裸换行转义成 `\n`；结构里的换行原样留着（交给 `skipWs`）。
+     *
+     * ## ★ 这里原先是正则 `([^\\])\n(?!\s*[}\]])`，它有一个致命缺陷
+     *
+     * 那个正则不区分"在字符串里"还是"在结构里"。模型输出**美化过的 JSON**
+     * （每个字段一行）时，`{` 后、`, ` 后、`[` 后的换行全都会被替换成字面的 `\n`
+     * 两个字符 —— 解析器随后把 `\` 当成非法 token，**整份输出解析失败**。
+     * 而美化输出恰恰是模型最常见的形态之一。
+     *
+     * 症状之所以长期没被发现：几乎所有的样例都是单行 JSON，而单行里没有裸换行。
+     * `PlanParserTest.truncatesToMaxStepsAndReportsHowManyWereCut` 第一次用多行样例就撞上了。
+     */
+    private fun escapeBareNewlinesInsideStrings(src: String): String {
+        val sb = StringBuilder(src.length + 16)
+        var inStr = false
+        var escaped = false
+        for (c in src) {
+            if (!inStr) {
+                if (c == '"') inStr = true
+                sb.append(c)
+                continue
+            }
+            when {
+                escaped -> { sb.append(c); escaped = false }
+                c == '\\' -> { sb.append(c); escaped = true }
+                // ★ 这一条漏了整整一次：没有它，第一个字符串之后 `inStr` 永远是 true，
+                //   之后结构里的换行全被当成"字符串内换行"转义 ⇒ 美化 JSON 一律解析失败。
+                c == '"' -> { inStr = false; sb.append(c) }
+                c == '\n' -> sb.append("\\n")
+                c == '\r' -> sb.append("\\r")
+                else -> sb.append(c)
+            }
+        }
+        return sb.toString()
     }
 
     private val FENCE = Regex("""```(?:json)?\s*([\s\S]*?)```""")
     private val UNQUOTED_KEY = Regex("""([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:""")
     private val TRAILING_COMMA = Regex(""",(\s*[}\]])""")
     private val SINGLE_QUOTED = Regex("""'([^'\\]*)'""")
-
-    // 仅处理字符串内出现的裸换行（前一个是非转义字符、后一个是非引号）
-    private val BARE_NEWLINE_IN_STRING = Regex("""([^\\])\n(?!\s*[}\]])""")
 
     private class Parser(val s: String) {
         var i = 0

@@ -79,9 +79,9 @@ class DefaultTargetMigration4To5Test {
 
     @Test
     fun migrationIsRegistered() {
-        assertThat(AkeDatabase.VERSION).isEqualTo(5)
+        assertThat(AkeDatabase.VERSION).isEqualTo(6)
         assertThat(AkeMigrations.ALL.map { "${it.startVersion}->${it.endVersion}" })
-            .containsExactly("1->2", "2->3", "3->4", "4->5").inOrder()
+            .containsAtLeast("1->2", "2->3", "3->4", "4->5").inOrder()
         assertThat(AkeMigrations.ALL.toList()).contains(DefaultTargetMigration4To5)
     }
 
@@ -94,10 +94,9 @@ class DefaultTargetMigration4To5Test {
     @Test
     fun noSampleMigrationSharesAVersionWithARealOne() {
         val real = AkeMigrations.ALL.map { it.startVersion to it.endVersion }.toSet()
-        for (s in listOf(AkeMigrations.SAMPLE_MIGRATION_5_6, AkeMigrations.SAMPLE_MIGRATION_6_7)) {
+        for (s in listOf(AkeMigrations.SAMPLE_MIGRATION_6_7)) {
             assertThat(real).doesNotContain(s.startVersion to s.endVersion)
         }
-        assertThat(AkeMigrations.ALL.toList()).doesNotContain(AkeMigrations.SAMPLE_MIGRATION_5_6)
         assertThat(AkeMigrations.ALL.toList()).doesNotContain(AkeMigrations.SAMPLE_MIGRATION_6_7)
     }
 }

@@ -204,15 +204,16 @@ class AkeMigrationSchemaTest {
 
     @Test
     fun versionAndStatementsAreWired() {
-        assertThat(AkeDatabase.VERSION).isEqualTo(5)
+        assertThat(AkeDatabase.VERSION).isEqualTo(6)
         assertThat(AkeMigrations.ALL.map { "${it.startVersion}->${it.endVersion}" })
-            .containsExactly("1->2", "2->3", "3->4", "4->5")
+            .containsExactly("1->2", "2->3", "3->4", "4->5", "5->6")
             .inOrder()
         // ★ ALL 必须包含 2→3 与 3→4，否则真机上根本不会跑这两段迁移。
         //   v4 的逐条断言在 `CloudMigration3To4Test`（本文件仍只盯 v3 的既有纪律）。
         assertThat(AkeMigrations.ALL.toList()).contains(ChatMigration2To3)
         assertThat(AkeMigrations.ALL.toList()).contains(CloudMigration3To4)
         assertThat(AkeMigrations.ALL.toList()).contains(DefaultTargetMigration4To5)
+        assertThat(AkeMigrations.ALL.toList()).contains(PlanRevisionMigration5To6)
     }
 
     // ─────────────────────────────── ⑦ ★ v3 → v4（docs/09 §3.5）

@@ -12,6 +12,7 @@ import com.ake.data.persist.db.dao.ConfigDao
 import com.ake.data.persist.db.dao.DefaultTargetDao
 import com.ake.data.persist.db.dao.MemoryDao
 import com.ake.data.persist.db.dao.ModelAssetDao
+import com.ake.data.persist.db.dao.PlanDao
 import com.ake.data.persist.db.dao.PolicyDao
 import com.ake.data.persist.db.dao.RouteDecisionDao
 import com.ake.data.persist.db.dao.SessionDao
@@ -30,6 +31,7 @@ import com.ake.data.persist.db.entity.McpServerEntity
 import com.ake.data.persist.db.entity.MemoryCardEntity
 import com.ake.data.persist.db.entity.ModelAssetEntity
 import com.ake.data.persist.db.entity.ObservationEntity
+import com.ake.data.persist.db.entity.PlanRevisionEntity
 import com.ake.data.persist.db.entity.PolicyDecisionEntity
 import com.ake.data.persist.db.entity.SessionEntity
 import com.ake.data.persist.db.entity.StepEntity
@@ -99,6 +101,8 @@ import com.ake.data.persist.db.entity.TraceEventEntity
         CloudCredentialEntity::class,
         // ── ★ v5 新增 1 张
         DefaultTargetEntity::class,
+        // ── ★ v6 新增 1 张
+        PlanRevisionEntity::class,
     ],
     version = AkeDatabase.VERSION,
     exportSchema = true,
@@ -112,6 +116,7 @@ abstract class AkeDatabase : RoomDatabase() {
     abstract fun checkpointDao(): CheckpointDao
     abstract fun memoryDao(): MemoryDao
     abstract fun modelAssetDao(): ModelAssetDao
+    abstract fun planDao(): PlanDao
     abstract fun toolRegistryDao(): ToolRegistryDao
 
     /** 配置类两张表（`McpServerStorePort` / `SettingsStorePort` 的落点）。 */
@@ -145,7 +150,7 @@ abstract class AkeDatabase : RoomDatabase() {
          *  - 5 = 全局默认目标：`default_dialog_target` 单行表（新建会话继承用户
          *        选的后端，而不是静默回到 `'LOCAL'`）。★ 同样全 Additive。
          */
-        const val VERSION: Int = 5
+        const val VERSION: Int = 6
 
         /** §4.4 配额硬限。DB 含 -wal/-shm。★ §8.4 重估后**不变**（v3 稳态 ≈34 MB，仍有 ≈7× 余量）。 */
         const val QUOTA_HARD_BYTES: Long = 256L * 1024 * 1024

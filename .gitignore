@@ -34,3 +34,9 @@ captures/
 
 # ===== 工具目录 =====
 .codebuddy/
+
+# ===== 构建产物 / 发包件（不入库）=====
+*.apk
+*.aab
+*.jks
+*.keystore

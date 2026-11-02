@@ -3,10 +3,14 @@ package com.ake.data.persist.store
 import com.ake.core.common.AkeLog
 import com.ake.core.contract.MemoryCard
 import com.ake.core.contract.TaskSpec
+import com.ake.core.ports.MemoryEntry
 import com.ake.core.ports.MemoryStorePort
 import com.ake.data.persist.db.AkeDatabase
 import com.ake.data.persist.db.mapper.EntityMappers
 import com.ake.data.persist.redact.PersistenceRedactionGate
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.map
 
 /**
  * `MemoryStorePort` 实现。
@@ -56,6 +60,46 @@ public class MemoryStoreImpl(
         runCatching { db.memoryDao().markUsed(id, System.currentTimeMillis()) }
     }
 
+    /**
+     * 记忆中心列表。
+     *
+     * 直接读明文列（`title` / `content_preview`），**不碰 `content_enc`**：
+     * 列表滚动时逐条解密会让 6GB 机型掉帧，而列表本来也不显示正文。
+     *
+     * 失败时返回空列表而不是抛 —— 记忆页是只读浏览，读不出来应该显示"还没有记忆"，
+     * 而不是让整个界面崩掉。真正的异常由 `AkeLog` 留痕。
+     */
+    override fun observeRecent(limit: Int): Flow<List<MemoryEntry>> =
+        db.memoryDao().recent(limit.coerceIn(1, MAX_LIST_LIMIT))
+            .map { rows ->
+                rows.map { row ->
+                    MemoryEntry(
+                        id = row.id,
+                        title = row.title,
+                        preview = row.contentPreview,
+                        kind = row.kind,
+                        scopeHost = row.scopeHost,
+                        updatedAtMillis = row.updatedAt,
+                        useCount = row.useCount,
+                        pinned = row.pinned != 0,
+                        sourceTaskId = row.sourceTaskId,
+                    )
+                }
+            }
+            .catch { e ->
+                AkeLog.w(TAG, "observeRecent failed: ${e.message}")
+                emit(emptyList())
+            }
+
+    override suspend fun deleteById(id: String): Boolean {
+        val before = runCatching { db.memoryDao().byId(id) }.getOrNull() ?: return false
+        // ★ `MemoryDao.delete` 返回 Unit（不是受影响行数），所以这里只能按「没抛异常」判定。
+        //   存在性已经由上面的 byId 确认过，语义仍然成立：删之前它在，删完没报错 = 删掉了。
+        return runCatching { db.memoryDao().delete(listOf(before.id)) }
+            .onFailure { AkeLog.w(TAG, "deleteById failed: ${it.message}") }
+            .isSuccess
+    }
+
     suspend fun deleteExpired(now: Long = System.currentTimeMillis()): Int =
         runCatching { db.memoryDao().deleteExpired(now) }.getOrDefault(0)
 
@@ -65,5 +109,8 @@ public class MemoryStoreImpl(
 
     companion object {
         const val TAG: String = "MemoryStore"
+
+        /** 列表上限：超过这个数用户也不会翻，反而是给自己挖了个一次性解密 200 条的坑。 */
+        const val MAX_LIST_LIMIT: Int = 200
     }
 }
