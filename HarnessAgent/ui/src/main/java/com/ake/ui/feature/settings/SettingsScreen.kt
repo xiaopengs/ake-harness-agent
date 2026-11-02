@@ -1,5 +1,7 @@
 package com.ake.ui.feature.settings
 
+import android.content.pm.ApplicationInfo
+import android.text.format.DateFormat
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,11 +19,15 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import java.io.File
+import java.util.Date
 import com.ake.ui.components.AlertBar
 import com.ake.ui.components.DangerButton
 import com.ake.ui.components.FactRow
@@ -60,6 +66,7 @@ public fun SettingsScreen(
 ) {
     val ui by viewModel.ui.collectAsStateWithLifecycle()
     val local by viewModel.local.collectAsStateWithLifecycle()
+    val build = rememberInstalledBuild()
 
     Column(
         Modifier
@@ -68,6 +75,13 @@ public fun SettingsScreen(
             .verticalScroll(rememberScrollState()),
     ) {
         Text("我的", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        // 版本号放在标题下而不是塞进「关于」：用户报「改了没生效」时，
+        // 第一句话往往是「我装的就是新的」，这一行能在 2 秒内给出反证。
+        Text(
+            "版本 ${build.versionName}（versionCode ${build.versionCode}）",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Spacer(Modifier.height(12.dp))
 
         SectionCard("模型与工具", subtitle = "管理本机模型和助手可以使用的工具") {
@@ -252,6 +266,23 @@ public fun SettingsScreen(
             SecondaryButton("仅断开外部工具连接", onClick = viewModel::disconnectTools, modifier = Modifier.fillMaxWidth())
         }
 
+        Spacer(Modifier.height(12.dp))
+
+        // ── 本机安装指纹
+        // 「我明明装了新包，界面没变」是这个项目最容易反复出现的一类误判：
+        // 覆盖安装被跳过、装到了另一台设备、把 debug 包当 release 看。
+        // 这几行全部读自 PackageManager（不是编译期常量），所以它描述的一定是
+        // **正在跑的这一份**，而不是「源码里写的是多少」。
+        SectionCard(
+            "关于本机安装的版本",
+            subtitle = "界面没变化时先看这里：版本号 / APK 生成时间 / 安装时间",
+        ) {
+            FactRow("版本", "${build.versionName}（versionCode ${build.versionCode}）")
+            FactRow("APK 生成时间", formatStamp(build.apkBuiltAt))
+            FactRow("安装或更新时间", formatStamp(build.installedAt))
+            FactRow("构建类型", if (build.debuggable) "debug（可调试）" else "release")
+        }
+
         Spacer(Modifier.height(24.dp))
     }
 
@@ -296,3 +327,43 @@ private fun formatBytes(bytes: Long): String {
     if (mb >= 1.0) return String.format("%.1f MB", mb)
     return String.format("%.0f KB", bytes / 1024.0)
 }
+
+/**
+ * 正在运行的这一份安装包的指纹。
+ *
+ * 全部读自 `PackageManager`，**没有一个字段来自编译期常量** ——
+ * 这是刻意的：如果版本号从 `BuildConfig` 读，那它描述的是「源码」，而不是「设备上正在跑的那份」。
+ * 「装了新包界面没变」这类问题的唯一可靠证据，必须来自安装记录本身。
+ */
+private data class InstalledBuild(
+    val versionName: String,
+    val versionCode: Long,
+    /** APK 文件本身的修改时间，约等于构建完成时刻。 */
+    val apkBuiltAt: Long,
+    /** 系统记录的安装/覆盖更新时间。比 APK 生成时间晚，且能暴露「覆盖安装被跳过」。 */
+    val installedAt: Long,
+    val debuggable: Boolean,
+)
+
+@Composable
+private fun rememberInstalledBuild(): InstalledBuild {
+    val context = LocalContext.current
+    return remember(context) {
+        val pm = context.packageManager
+        @Suppress("DEPRECATION")
+        val info = runCatching { pm.getPackageInfo(context.packageName, 0) }.getOrNull()
+        val appInfo = runCatching { pm.getApplicationInfo(context.packageName, 0) }.getOrNull()
+        InstalledBuild(
+            versionName = info?.versionName ?: "未知",
+            versionCode = info?.longVersionCode ?: -1L,
+            apkBuiltAt = appInfo?.sourceDir
+                ?.let { runCatching { File(it).lastModified() }.getOrDefault(0L) }
+                ?: 0L,
+            installedAt = info?.lastUpdateTime ?: 0L,
+            debuggable = appInfo != null && (appInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0,
+        )
+    }
+}
+
+private fun formatStamp(epochMs: Long): String =
+    if (epochMs <= 0L) "未知" else DateFormat.format("yyyy-MM-dd HH:mm", Date(epochMs)).toString()
