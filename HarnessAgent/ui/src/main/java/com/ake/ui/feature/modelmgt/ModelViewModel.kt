@@ -40,6 +40,16 @@ public data class ModelUi(
     val errorCode: String? = null,
     val errorMessage: String? = null,
     val busy: Boolean = false,
+    /**
+     * 已发起、但还没收到第一条进度。
+     *
+     * 从「点按钮」到「第一条 Running 事件」之间隔着 DNS、建连、创建 `.part` 文件，
+     * 在弱网下能有十几秒。这段时间如果界面一动不动，用户唯一的判断是**它坏了**。
+     * 所以按钮要立刻变成「正在准备…」，而不是等后端先动。
+     */
+    val starting: Boolean = false,
+    /** 发起后超过 [PROGRESS_WATCHDOG_MS] 仍无任何进度：地址不可达 / 清单未配置 / 网络被拦。 */
+    val progressStale: Boolean = false,
 )
 
 /**
@@ -74,6 +84,7 @@ public class ModelViewModel @Inject constructor(
 
     private var samplingJob: Job? = null
     private var downloadJob: Job? = null
+    private var watchdogJob: Job? = null
     private var lastBytes = 0L
     private var lastSampleAt = 0L
 
@@ -82,9 +93,14 @@ public class ModelViewModel @Inject constructor(
             // 资产状态是 Flow，且在下载过程中持续更新
             lifecycle.assetState().collect { asset ->
                 _ui.update {
+                    val moving = asset.state == ModelAssetState.DOWNLOADING ||
+                        asset.state == ModelAssetState.VERIFYING
                     it.copy(
                         asset = asset,
-                        busy = asset.state == ModelAssetState.DOWNLOADING || asset.state == ModelAssetState.VERIFYING,
+                        busy = moving,
+                        // 第一条进度到达 = 链路是通的，之前的"准备中/没反应"提示全部撤掉
+                        starting = if (moving) false else it.starting,
+                        progressStale = if (moving) false else it.progressStale,
                     )
                 }
                 lastBytes = asset.bytesDownloaded
@@ -106,14 +122,42 @@ public class ModelViewModel @Inject constructor(
     /** 开始 / 继续：下载 → 校验 → 加载，全过程幂等。 */
     public fun ensureReady() {
         if (downloadJob?.isActive == true) return
+        _ui.update { it.copy(starting = true, progressStale = false, errorCode = null, errorMessage = null) }
+        armProgressWatchdog()
         downloadJob = viewModelScope.launch {
             _ui.update { it.copy(busy = true, errorCode = null, errorMessage = null) }
             refreshSpace()
             when (val r = lifecycle.ensureReady(MODEL_ID)) {
-                is Outcome.Ok -> _ui.update { it.copy(busy = false, errorCode = null, errorMessage = null) }
-                is Outcome.Err -> _ui.update {
-                    it.copy(busy = false, errorCode = r.error.code, errorMessage = errorTextOf(r.error))
+                is Outcome.Ok -> _ui.update {
+                    it.copy(busy = false, starting = false, progressStale = false, errorCode = null, errorMessage = null)
                 }
+                is Outcome.Err -> _ui.update {
+                    it.copy(
+                        busy = false,
+                        starting = false,
+                        progressStale = false,
+                        errorCode = r.error.code,
+                        errorMessage = errorTextOf(r.error),
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * 看门狗：发起后 [PROGRESS_WATCHDOG_MS] 还没有任何进度，就明确告诉用户"没收到进度"。
+     *
+     * 为什么不在失败时才提示：地址 404 / DNS 被污染 / 清单未签名这几类问题，
+     * 底层可能要重试好几轮才放弃（默认 3 次 + 退避），前端在那之前全是静默的。
+     * 与其让用户盯着一个不动的按钮猜，不如 10 秒就把话说明白。
+     */
+    private fun armProgressWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = viewModelScope.launch {
+            delay(PROGRESS_WATCHDOG_MS)
+            val cur = _ui.value
+            if (cur.starting) {
+                _ui.update { it.copy(progressStale = true) }
             }
         }
     }
@@ -121,8 +165,10 @@ public class ModelViewModel @Inject constructor(
     /** 暂停当前下载；半成品由底层保留，继续时使用 Range 续传。 */
     public fun pauseDownload() {
         if (_ui.value.asset.state != ModelAssetState.DOWNLOADING) return
+        watchdogJob?.cancel()
         downloadJob?.cancel()
         downloadJob = null
+        _ui.update { it.copy(starting = false, progressStale = false) }
         _ui.update { current ->
             current.copy(asset = current.asset.copy(state = ModelAssetState.PAUSED), busy = false)
         }
@@ -220,6 +266,26 @@ public class ModelViewModel @Inject constructor(
 
         /** 与 `ModelDownloader.SPACE_HEADROOM` 同值：预检要 15% 余量。 */
         public const val SPACE_HEADROOM: Double = 1.15
+
+        /**
+         * 发起下载后多久没有进度就提示"没收到进度"。
+         *
+         * 10 秒 ≈ 弱网下建连 + 首包的上限。**超时的典型原因不是慢，是域名根本连不上**：
+         * 内置地址指向 `huggingface.co`，在中国大陆的移动网络下通常是被拦的 ——
+         * 表现为「一点字节都不进来，最后报 DOWNLOAD_FAILED」，而不是一个清楚的 404。
+         */
+        public const val PROGRESS_WATCHDOG_MS: Long = 10_000L
+
+        /**
+         * 清单里的 sha256 是否还是占位值。
+         *
+         * `ModelCatalog` 的内置条目写着 `REPLACE_WITH_SIGNED_MANIFEST_SHA256`，
+         * 这意味着**下载完也一定会被校验拒绝**。这是刻意的 fail-closed，
+         * 但对用户来说就是"下了 2.6 GB 然后说文件损坏"。所以必须在开始下载之前就说清楚，
+         * 而不是让他白等十分钟。
+         */
+        public fun isUnsignedManifest(sha256: String): Boolean =
+            sha256.length != 64 || !sha256.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
 
         /** 与 `:llm` 的 `DEFAULT_RECORD` 同形：Flow 必须有初值，否则 UI 只能自己编一个假状态。 */
         public val DEFAULT_ASSET: ModelAssetRecord = ModelAssetRecord(

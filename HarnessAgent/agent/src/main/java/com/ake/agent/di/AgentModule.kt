@@ -34,6 +34,7 @@ import com.ake.core.ports.BrowserExecutorPort
 import com.ake.core.ports.CheckpointStorePort
 import com.ake.core.ports.DeviceHealthPort
 import com.ake.core.ports.DocumentPort
+import com.ake.core.ports.InferenceFocus
 import com.ake.core.ports.PlanCoordinatorPort
 import com.ake.core.ports.PlanStorePort
 import com.ake.core.ports.DomPerceptionPort
@@ -118,7 +119,8 @@ public abstract class AgentBindingsModule {
         public fun providePlanStepHandler(
             documents: DocumentPort,
             model: ModelPort,
-        ): PlanStepHandler = PlanStepHandlers.routing(documents, model)
+            focus: InferenceFocus,
+        ): PlanStepHandler = PlanStepHandlers.routing(documents, model, focus)
 
         /**
          * 计划编排。带默认值的标量参数（modelId / 超时 / token 上限）**不能**走
@@ -132,7 +134,9 @@ public abstract class AgentBindingsModule {
             model: ModelPort,
             plans: PlanStorePort,
             steps: PlanStepHandler,
-        ): PlanCoordinatorPort = PlanCoordinator(model = model, plans = plans, steps = steps)
+            focus: InferenceFocus,
+        ): PlanCoordinatorPort =
+            PlanCoordinator(model = model, plans = plans, steps = steps, focus = focus)
 
         @Provides
         @Singleton

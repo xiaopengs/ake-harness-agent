@@ -84,6 +84,15 @@ public fun ModelGateScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
                 )
+                Spacer(Modifier.height(8.dp))
+                // ★ 这一句是给"装完怎么还是这个页面"准备的：底栏与对话入口要等模型就绪才出现，
+                //   不说清楚，用户会以为装错了包（本轮真实发生过）。
+                Text(
+                    text = "模型就绪后才会出现底部导航与对话入口。",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.outline,
+                    textAlign = TextAlign.Center,
+                )
                 Spacer(Modifier.height(24.dp))
                 Column(
                     modifier = Modifier.fillMaxWidth(),

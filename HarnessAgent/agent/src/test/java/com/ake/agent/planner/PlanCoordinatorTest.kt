@@ -199,6 +199,38 @@ class PlanCoordinatorTest {
         assertThat(handler.calls).isEqualTo(1)
     }
 
+    // ─────────────────────────── 推理焦点（F3） ───────────────────────────
+
+    @Test
+    fun `draft fails fast when the inference focus is busy`() = runBlocking {
+        val model = FakeModelPort()
+        val plan = coordinator(model, FakePlanStore(), focus = FakeFocus(busy = true))
+
+        val result = plan.draft(taskId, "把这份 PDF 的重点整理出来", "年报.pdf")
+
+        assertThat(result).isInstanceOf(PlanDraftResult.Failed::class.java)
+        assertThat((result as PlanDraftResult.Failed).error.code).isEqualTo("FOCUS_BUSY")
+        // 关键不在"失败了"，而在**没开会话**：开了就已经撞上 native 的单会话约束，
+        // 之后再失败也来不及（串字已经发生）。
+        assertThat(model.generateCalls).isEmpty()
+    }
+
+    @Test
+    fun `draft releases the focus lease even when the output is unusable`() = runBlocking {
+        val focus = FakeFocus()
+        val plan = coordinator(
+            model = FakeModelPort(script = { "这不是 JSON" }),
+            store = FakePlanStore(),
+            focus = focus,
+        )
+
+        val result = plan.draft(taskId, "整理", fileName = null)
+
+        assertThat(result).isInstanceOf(PlanDraftResult.Rejected::class.java)
+        // 两次都失败也要还租约，否则用户之后发聊天会一直 FOCUS_BUSY。
+        assertThat(focus.released).isEqualTo(1)
+    }
+
     @Test
     fun `missing handler fails the step instead of silently skipping it`() = runBlocking {
         val store = FakePlanStore().apply { seed(confirmed(1)) }
@@ -218,7 +250,8 @@ class PlanCoordinatorTest {
         model: FakeModelPort,
         store: PlanStorePort,
         handler: PlanStepHandler = RecordingHandler { s, _ -> "S${s.index}" },
-    ) = PlanCoordinator(model = model, plans = store, steps = handler)
+        focus: com.ake.core.ports.InferenceFocus = NoInferenceFocus,
+    ) = PlanCoordinator(model = model, plans = store, steps = handler, focus = focus)
 
     private fun confirmed(revision: Int) = PlanRevision(
         taskId = taskId,

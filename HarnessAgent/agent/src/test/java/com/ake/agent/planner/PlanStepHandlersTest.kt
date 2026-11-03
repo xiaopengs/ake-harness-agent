@@ -89,6 +89,19 @@ class PlanStepHandlersTest {
     }
 
     @Test
+    fun `summarize fails without opening a session when the focus is busy`() = runBlocking {
+        val model = FakeModelPort(script = { "不该被调用" })
+        val r = SummarizeStepHandler(model, focus = FakeFocus(busy = true)).execute(
+            PlanStep(2, PlanStepKind.SUMMARIZE, "重点"),
+            ctx(upstream = "短文本。"),
+        )
+
+        assertThat((r as Outcome.Err).error.code).isEqualTo("FOCUS_BUSY")
+        // 会话一次都不该开：开了就是两条路径同时进 native（F3 串字）。
+        assertThat(model.generateCalls).isEmpty()
+    }
+
+    @Test
     fun `short input needs only the map pass`() = runBlocking {
         val model = FakeModelPort(script = { "这段讲了三件事。" })
         val r = SummarizeStepHandler(model).execute(

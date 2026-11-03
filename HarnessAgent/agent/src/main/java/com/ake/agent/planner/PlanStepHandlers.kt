@@ -17,6 +17,7 @@ import com.ake.core.modelapi.ThinkingBudget
 import com.ake.core.ports.DEFAULT_MODEL_ID
 import com.ake.core.ports.DocProbeResult
 import com.ake.core.ports.DocumentPort
+import com.ake.core.ports.InferenceFocus
 import com.ake.core.ports.PageBudget
 import com.ake.core.ports.PageEvent
 import com.ake.document.ChunkAssembler
@@ -45,13 +46,16 @@ public object PlanStepHandlers {
     public fun routing(
         documents: DocumentPort,
         model: ModelPort,
+        focus: InferenceFocus = NoInferenceFocus,
         assembler: ChunkAssembler = ChunkAssembler(),
     ): PlanStepHandler = KindRoutedPlanStepHandler(
         mapOf(
+            // 只有会碰 native 的两步需要焦点；read_file / pdf_extract 是纯 IO，
+            // 拿着租约去抽 30 秒 PDF 只会白白挡住聊天。
             PlanStepKind.READ_FILE to ReadFileStepHandler(documents),
             PlanStepKind.EXTRACT to ExtractStepHandler(documents, assembler),
-            PlanStepKind.SUMMARIZE to SummarizeStepHandler(model),
-            PlanStepKind.TODOS to TodosStepHandler(model),
+            PlanStepKind.SUMMARIZE to SummarizeStepHandler(model, focus = focus),
+            PlanStepKind.TODOS to TodosStepHandler(model, focus = focus),
         ),
     )
 }
@@ -166,6 +170,7 @@ public class ExtractStepHandler(
 public class SummarizeStepHandler(
     private val model: ModelPort,
     private val modelId: String = DEFAULT_MODEL_ID,
+    private val focus: InferenceFocus = NoInferenceFocus,
 ) : PlanStepHandler {
 
     override suspend fun execute(step: PlanStep, ctx: PlanStepContext): Outcome<PlanStepOutput> {
@@ -234,7 +239,7 @@ public class SummarizeStepHandler(
     }
 
     private suspend fun call(ctx: PlanStepContext, prompt: String, maxTokens: Int): Outcome<String> =
-        callModel(model, modelId, ctx.taskId.value, prompt, maxTokens)
+        callModel(model, modelId, ctx.taskId.value, prompt, maxTokens, focus = focus)
 }
 
 /**
@@ -247,6 +252,7 @@ public class SummarizeStepHandler(
 public class TodosStepHandler(
     private val model: ModelPort,
     private val modelId: String = DEFAULT_MODEL_ID,
+    private val focus: InferenceFocus = NoInferenceFocus,
 ) : PlanStepHandler {
 
     override suspend fun execute(step: PlanStep, ctx: PlanStepContext): Outcome<PlanStepOutput> {
@@ -260,7 +266,7 @@ public class TodosStepHandler(
             appendLine()
             append(ctx.upstream.take(TODOS_INPUT_CHARS))
         }
-        return when (val r = callModel(model, modelId, ctx.taskId.value, prompt, TODOS_MAX_TOKENS)) {
+        return when (val r = callModel(model, modelId, ctx.taskId.value, prompt, TODOS_MAX_TOKENS, focus = focus)) {
             is Outcome.Err -> r
             is Outcome.Ok -> Outcome.Ok(PlanStepOutput(r.value))
         }
@@ -281,7 +287,14 @@ internal suspend fun callModel(
     prompt: String,
     maxTokens: Int,
     timeoutMs: Long = 60_000,
+    focus: InferenceFocus = NoInferenceFocus,
 ): Outcome<String> {
+    // ★ 先拿焦点、后开会话。反过来的话，`openSession` 已经和别人的会话在 native 层撞上了，
+    //   租约再成功也晚了 —— F3 的串字就发生在这两步之间的窗口里。
+    val leaseOut = focus.acquireForPlan(planFocusHolder(taskId))
+    if (leaseOut is Outcome.Err) return leaseOut
+    val lease = (leaseOut as Outcome.Ok).value
+
     val opened = model.openSession(
         SessionSpec(
             modelId = modelId,
@@ -292,7 +305,11 @@ internal suspend fun callModel(
             enableJsonConstraint = false,
         ),
     )
-    if (opened is Outcome.Err) return opened
+    if (opened is Outcome.Err) {
+        // 开会话失败也要还租约，否则这个任务会永久占着推理槽（下一次 acquire 直接 FOCUS_BUSY）。
+        runCatching { lease.close() }
+        return opened
+    }
 
     val session: ModelSession = (opened as Outcome.Ok).value
     return try {
@@ -324,7 +341,9 @@ internal suspend fun callModel(
     } catch (e: Throwable) {
         Outcome.Err(AppError.wrap(e))
     } finally {
+        // 顺序：先关会话、再放租约。反过来会给下一个持有者一个「引擎还在忙」的窗口。
         runCatching { session.close() }
+        runCatching { lease.close() }
     }
 }
 

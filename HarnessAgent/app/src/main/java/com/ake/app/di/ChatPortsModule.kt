@@ -17,6 +17,7 @@ import com.ake.core.ports.CloudCredentialPort
 import com.ake.core.ports.DeviceHealthPort
 import com.ake.core.ports.EgressCoordinator
 import com.ake.core.ports.HumanGate
+import com.ake.core.ports.InferenceFocus
 import com.ake.core.ports.ModelRouter
 import com.ake.core.ports.PolicyPort
 import com.ake.core.ports.SkillRegistryPort
@@ -201,4 +202,16 @@ public object ChatPortsModule {
     @Provides
     @Singleton
     public fun provideSkillRegistryPort(services: ChatServices): SkillRegistryPort = services.skills
+
+    /**
+     * 推理焦点仲裁器 —— **从 `ChatServices` 的同一个实例上取**，不 new。
+     *
+     * 计划模式（`:agent` 的 `PlanCoordinator` / 步骤处理器）与聊天是两条独立的
+     * `openSession` 路径。它们必须共用同一把锁：另造一个 `InferenceFocusArbiter`
+     * 会让两边同时以为自己拿到了引擎，而 LiteRT-LM 一个 Engine 只允许一个 Conversation ——
+     * 表现就是**回答里混进另一段文字**（F3），且没有任何一方报错。
+     */
+    @Provides
+    @Singleton
+    public fun provideInferenceFocus(services: ChatServices): InferenceFocus = services.focus
 }

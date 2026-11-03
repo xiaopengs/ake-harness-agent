@@ -19,6 +19,7 @@ import com.ake.core.modelapi.ThinkingBudget
 import com.ake.core.ports.AbortSignal
 import com.ake.core.ports.DEFAULT_MODEL_ID
 import com.ake.core.ports.DocumentSource
+import com.ake.core.ports.InferenceFocus
 import com.ake.core.ports.PlanCoordinatorPort
 import com.ake.core.ports.PlanDraftResult
 import com.ake.core.ports.PlanRunEvent
@@ -52,6 +53,14 @@ public class PlanCoordinator(
     private val model: ModelPort,
     private val plans: PlanStorePort,
     private val steps: PlanStepHandler,
+    /**
+     * 推理焦点仲裁器（进程级唯一，F3 的正确性组件）。
+     *
+     * ★ 生产必须由 `:app` 注入 `ChatServices.focus` —— **同一个实例**。
+     *   在这里 `InferenceFocusArbiter(clock)` 另造一个，等于两把互不知情的锁：
+     *   双方都以为自己拿到了引擎，串字照旧发生，而且比没有锁更难查。
+     */
+    private val focus: InferenceFocus = NoInferenceFocus,
     private val clock: Clock = SystemClock,
     private val modelId: String = DEFAULT_MODEL_ID,
     /** 计划最多 5 步 × 每步一句话，160 token 足够；给多了模型会开始写解释。 */
@@ -73,6 +82,11 @@ public class PlanCoordinator(
             )
         }
 
+        // 拿不到焦点就立刻失败：见 FocusGate 的注释（计划永不抢聊天）。
+        val leaseOut = focus.acquireForPlan(planFocusHolder(taskId.value))
+        if (leaseOut is Outcome.Err) return PlanDraftResult.Failed(leaseOut.error)
+        val lease = (leaseOut as Outcome.Ok).value
+
         val opened = model.openSession(
             SessionSpec(
                 modelId = modelId,
@@ -88,17 +102,22 @@ public class PlanCoordinator(
             ),
         )
 
-        return when (opened) {
-            is Outcome.Err -> PlanDraftResult.Failed(opened.error)
-            is Outcome.Ok -> {
-                val session = opened.value
-                try {
-                    draftWithRetry(session, taskId, trimmed, fileName)
-                } finally {
-                    runCatching { session.close() }
-                        .onFailure { AkeLog.w(TAG, "plan session close failed: ${it.message}") }
+        return try {
+            when (opened) {
+                is Outcome.Err -> PlanDraftResult.Failed(opened.error)
+                is Outcome.Ok -> {
+                    val session = opened.value
+                    try {
+                        draftWithRetry(session, taskId, trimmed, fileName)
+                    } finally {
+                        runCatching { session.close() }
+                            .onFailure { AkeLog.w(TAG, "plan session close failed: ${it.message}") }
+                    }
                 }
             }
+        } finally {
+            // 生成可能跑满 45 秒 ×2 次；不还租约的话，用户之后再发聊天会一直 FOCUS_BUSY。
+            runCatching { lease.close() }
         }
     }
 

@@ -111,7 +111,11 @@ public fun ModelScreen(
         )
         Spacer(Modifier.height(12.dp))
 
-        StateCard(ui = ui, viewModel = viewModel)
+        StateCard(
+            ui = ui,
+            onDownload = viewModel::ensureReady,
+            onOpenChat = onModelReady,
+        )
 
         Spacer(Modifier.height(12.dp))
 
@@ -124,10 +128,9 @@ public fun ModelScreen(
             Spacer(Modifier.height(12.dp))
         }
 
-        SpaceCard(ui = ui, viewModel = viewModel)
-
-        Spacer(Modifier.height(12.dp))
-
+        // ★ 导入排在下载之后、存储预检之前：内置清单未签名时（见 ModelCatalog 的
+        //   `REPLACE_WITH_SIGNED_MANIFEST_SHA256`），这条路是唯一能真正把模型弄上手的。
+        //   把它压到三屏之后，等于让用户先白等一次 2.6 GB 的下载。
         ModelImportSection(
             ui = importUi,
             onPickManifest = { pickManifest.launch(arrayOf("application/json", "*/*")) },
@@ -135,6 +138,10 @@ public fun ModelScreen(
             onSelect = importVm::select,
             onReset = importVm::reset,
         )
+
+        Spacer(Modifier.height(12.dp))
+
+        SpaceCard(ui = ui, viewModel = viewModel)
 
         Spacer(Modifier.height(12.dp))
 
@@ -162,34 +169,13 @@ public fun ModelScreen(
         Spacer(Modifier.height(12.dp))
 
         SectionCard("操作") {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = viewModel::ensureReady,
-                    modifier = Modifier.weight(1f),
-                    enabled = !ui.busy,
-                ) { Text(if (ui.asset.state == ModelAssetState.READY) "重新校验并加载" else "下载并加载") }
-                SecondaryButton("释放内存", onClick = viewModel::unload, modifier = Modifier.weight(1f))
-            }
+            // 下载按钮已上移到「状态」卡：状态卡的文案一直在说"第一次点「下载并加载」"，
+            // 而按钮原来在第 4 屏。用户滑不到那里，只会以为这一页没有下载入口。
+            SecondaryButton("释放内存", onClick = viewModel::unload, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(8.dp))
             SecondaryButton("删除模型文件（$modelSize，重下代价高）", onClick = { confirmDelete = true }, modifier = Modifier.fillMaxWidth())
         }
 
-        if (ui.errorCode != null) {
-            Spacer(Modifier.height(12.dp))
-            SectionCard("准备失败") {
-                Text(
-                    text = "！ ${ui.errorMessage ?: "暂时无法准备模型，请检查网络后重试。"}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error,
-                )
-                Spacer(Modifier.height(12.dp))
-                PrimaryButton(
-                    text = "重试",
-                    onClick = viewModel::ensureReady,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        }
     }
 
     if (confirmDelete) {
@@ -208,11 +194,14 @@ public fun ModelScreen(
 }
 
 @Composable
-private fun StateCard(ui: com.ake.ui.feature.modelmgt.ModelUi, viewModel: ModelViewModel) {
-    val size = formatBytes(
-        ui.asset.expectedBytes.takeIf { it > 0L }
-            ?: com.ake.ui.feature.onboarding.ModelGateViewModel.VERIFIED_MODEL_BYTES,
-    )
+private fun StateCard(
+    ui: com.ake.ui.feature.modelmgt.ModelUi,
+    onDownload: () -> Unit,
+    onOpenChat: () -> Unit,
+) {
+    val expected = ui.asset.expectedBytes.takeIf { it > 0L }
+        ?: com.ake.ui.feature.onboarding.ModelGateViewModel.VERIFIED_MODEL_BYTES
+    val size = formatBytes(expected)
     val (label, color) = when (ui.asset.state) {
         ModelAssetState.NOT_PRESENT -> "未下载" to MaterialTheme.colorScheme.outline
         ModelAssetState.DOWNLOADING -> "下载中" to AkeColors.PhaseActive
@@ -222,25 +211,134 @@ private fun StateCard(ui: com.ake.ui.feature.modelmgt.ModelUi, viewModel: ModelV
         ModelAssetState.CORRUPTED -> "文件损坏" to AkeColors.RiskForbidden
         else -> ui.asset.state to MaterialTheme.colorScheme.outline
     }
+    val ready = ui.asset.state == ModelAssetState.READY
+    val downloading = ui.asset.state == ModelAssetState.DOWNLOADING
+    val pct = if (ui.asset.expectedBytes > 0L) {
+        (ui.asset.bytesDownloaded * 100 / ui.asset.expectedBytes).toInt().coerceIn(0, 100)
+    } else {
+        0
+    }
+    // 内置清单的 sha256 还是占位值 ⇒ 下完也一定会被校验拒掉。这件事必须在开始下载前说，
+    // 不能等 2.6 GB 拉完再报"文件损坏"。
+    val unsigned = ModelViewModel.isUnsignedManifest(ui.asset.sha256)
+    // 未签名清单 + 网络下载 = 白下 2.6 GB。不禁止（那是替用户做决定），但要他知情。
+    var askUnsigned by remember { mutableStateOf(false) }
+
     SectionCard("状态", subtitle = "模型 id：${ui.asset.id}") {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Tag(label, color, filled = ui.asset.state == ModelAssetState.READY)
+            Tag(label, color, filled = ready)
             Spacer(Modifier.height(4.dp))
-            Text("变体 ${ui.asset.variant}", style = MaterialTheme.typography.labelSmall)
+            Text("变体 ${ui.asset.variant} · $size", style = MaterialTheme.typography.labelSmall)
         }
         Spacer(Modifier.height(8.dp))
-        if (ui.asset.state == ModelAssetState.NOT_PRESENT) {
-            Text(
-                "还没有模型文件。第一次点「下载并加载」会开始下载 $size —— 建议连接 Wi‑Fi。",
+
+        when {
+            ready -> Text(
+                "模型已就绪，可以直接开始对话。",
                 style = MaterialTheme.typography.bodySmall,
             )
-        } else {
-            FactRow("已下载", "${formatBytes(ui.asset.bytesDownloaded)} / ${formatBytes(ui.asset.expectedBytes)}")
+
+            ui.starting -> Text(
+                "正在准备下载…正在建立连接并创建文件，还没有字节进来。",
+                style = MaterialTheme.typography.bodySmall,
+                color = AkeColors.PhaseActive,
+            )
+
+            downloading -> {
+                LinearProgressIndicator(
+                    progress = { pct / 100f },
+                    modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))
+                        .semantics { liveRegion = LiveRegionMode.Polite },
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "$pct% · ${formatBytes(ui.asset.bytesDownloaded)} / ${formatBytes(ui.asset.expectedBytes)}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    formatDownloadEstimate(ui.bytesPerSecond, ui.etaSeconds),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            else -> Text(
+                "还没有模型文件。点下面的按钮开始下载 $size —— 建议连接 Wi‑Fi。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+
+        if (ui.progressStale) {
+            Spacer(Modifier.height(8.dp))
+            AlertBar(
+                "10 秒内没有收到任何下载进度：内置地址指向 huggingface.co，" +
+                    "在中国大陆的移动网络下通常连不上。请改用下面的「从本地导入」，或换一个可访问的下载源。",
+            )
+        }
+        if (unsigned) {
+            Spacer(Modifier.height(8.dp))
+            AlertBar("内置清单里的校验值还是占位值（未签名），网络下载完成后会被校验拒绝。要走网络下载需先配置签名 manifest；否则请用下面的「从本地导入」。")
         }
         if (ui.asset.state == ModelAssetState.CORRUPTED) {
             Spacer(Modifier.height(8.dp))
             AlertBar("文件校验不通过，它不会被当成可用模型 —— 请重新下载。")
         }
+        if (ui.errorCode != null) {
+            Spacer(Modifier.height(8.dp))
+            AlertBar("！ ${ui.errorMessage ?: "暂时无法准备模型，请检查网络后重试。"}")
+        }
+
+        Spacer(Modifier.height(12.dp))
+        when {
+            ready -> PrimaryButton(
+                text = "开始对话",
+                onClick = onOpenChat,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            downloading -> Text(
+                "正在下载，请勿关闭应用。可在下方暂停或取消。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            else -> PrimaryButton(
+                text = if (ui.asset.state == ModelAssetState.PAUSED) {
+                    "继续下载（$size）"
+                } else {
+                    "下载并加载（$size）"
+                },
+                onClick = { if (unsigned) askUnsigned = true else onDownload() },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !ui.busy && !ui.starting,
+                loading = ui.starting,
+            )
+        }
+    }
+
+    if (askUnsigned) {
+        AlertDialog(
+            onDismissRequest = { askUnsigned = false },
+            title = { Text("清单未签名，下载多半白费") },
+            text = {
+                Text(
+                    "内置清单里的 sha256 仍是占位值，文件下完也一定会被校验拒绝。" +
+                        "另外该地址指向 huggingface.co，在部分网络下无法访问，表现是「一直 0%」。" +
+                        "建议改用「从本地导入」。仍要继续尝试网络下载吗？",
+                )
+            },
+            confirmButton = {
+                PrimaryButton(
+                    text = "仍然尝试",
+                    onClick = {
+                        askUnsigned = false
+                        onDownload()
+                    },
+                )
+            },
+            dismissButton = { SecondaryButton("取消", onClick = { askUnsigned = false }) },
+        )
     }
 }
 
